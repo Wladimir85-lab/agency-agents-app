@@ -19,6 +19,13 @@ export function isLocale(value: string): value is Locale {
   return (LOCALES as readonly string[]).includes(value);
 }
 
+/** Locales that render right-to-left. Drives `document.documentElement.dir`. */
+export const RTL_LOCALES = new Set<Locale>(["fa"]);
+
+export function isRTL(locale: Locale): boolean {
+  return RTL_LOCALES.has(locale);
+}
+
 export const localeLabels: Record<Locale, string> = {
   en: "English",
   "zh-CN": "简体中文",

@@ -1,4 +1,4 @@
-import { DEFAULT_LOCALE, LOCALES, isLocale, messages, type Locale, type MessageKey } from "$lib/i18n/messages";
+import { DEFAULT_LOCALE, LOCALES, isLocale, isRTL, messages, type Locale, type MessageKey } from "$lib/i18n/messages";
 
 const STORAGE_KEY = "agency-agents:locale";
 
@@ -28,7 +28,13 @@ function detectLocale(): Locale {
 }
 
 function applyLocale(locale: Locale) {
-  if (typeof document !== "undefined") document.documentElement.lang = locale;
+  if (typeof document !== "undefined") {
+    document.documentElement.lang = locale;
+    // Phase 1 RTL: flip the document direction for right-to-left locales.
+    // Flexbox/inline flow mirrors off this for free; physical-property
+    // polish (margins, positioning, icons) is a follow-up.
+    document.documentElement.dir = isRTL(locale) ? "rtl" : "ltr";
+  }
 }
 
 function format(template: string, vars?: Record<string, string | number>): string {

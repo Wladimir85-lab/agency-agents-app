@@ -278,7 +278,7 @@
   .close {
     position: absolute;
     top: var(--space-3);
-    right: var(--space-3);
+    inset-inline-end: var(--space-3); /* right in LTR, left in RTL */
     color: var(--color-text-muted);
     padding: 4px;
     border-radius: var(--radius-sm);

@@ -375,6 +375,31 @@
        absorbed by the layout — no empty space when nothing to show. */
     gap: 8px;
   }
+  /* ── RTL title bar ─────────────────────────────────────────────────
+     The title bar is absolutely positioned by physical offsets (it can't
+     mirror off flex like the rest of the app), so swap the horizontal
+     anchors by hand for right-to-left. The macOS traffic lights never
+     mirror — they stay top-left — so the icon cluster, which lands on the
+     left in RTL, gets clearance past them on macOS. */
+  :global(html[dir="rtl"]) .titlebar-btn:not(.nav) {
+    left: auto;
+    right: var(--titlebar-toggle-left);
+  }
+  :global(html[dir="rtl"]) .titlebar-nav {
+    left: auto;
+    right: var(--titlebar-title-left);
+  }
+  :global(html[dir="rtl"]) .titlebar-title {
+    left: auto;
+    right: calc(var(--titlebar-title-left) + 62px);
+  }
+  :global(html[dir="rtl"]) .titlebar-right {
+    right: auto;
+    left: var(--space-4);
+  }
+  :global(html[dir="rtl"]) .app.macos .titlebar-right {
+    left: 84px; /* clear the traffic lights (they never mirror) */
+  }
   .main {
     flex: 1;
     display: flex;
