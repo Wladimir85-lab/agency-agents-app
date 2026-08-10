@@ -1,5 +1,15 @@
 # Active Context — Agency Agents
 
+**State (2026-08-10)**: **post-v0.3.0 steady state** — `main` @ `04c10be`. v0.3.0 shipped ~07-05 (Runbooks); since
+then contributor merges + polish + i18n, no new release. **Live focus: RTL localization** — Phase 1 is PR #81
+(dir switch + titlebar mirror + Settings close), verified live in Persian; Phase 2 (logical-property sweep, ~½ day)
+not started. 8 open PRs, all mergeable (#81 RTL, #82 healthcare label, #85, #80, #77, #69, #67, #62). **Read
+`NEXT-SESSION.md` (2026-08-10 block) for the full live picture** — it supersedes everything below this line.
+
+---
+
+## History — v0.2.0 ship state (2026-06-23)
+
 **State**: 🚀 **v0.2.0 SHIPPED (2026-06-23)** — `main` @ `16182e5`. First feature release since the v0.1.0
 launch (the internally-tracked "0.1.1"/"0.1.2" milestones were never cut separately — they ship here), and
 **auto-update is now LIVE** at [`agencyagents.app/updater.json`](https://agencyagents.app/updater.json) for

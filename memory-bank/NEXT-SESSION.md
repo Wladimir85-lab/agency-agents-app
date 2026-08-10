@@ -3,7 +3,54 @@
 Read this first after a compaction. Then `activeContext.md`, `agentLog.md` (append-only history),
 `phases/phase-roadmap.md`, `contracts.md`, `systemPatterns.md`, `decisions.md`.
 
-## ⏩ CURRENT (2026-06-23) — read `activeContext.md` for the live picture
+## ⏩ CURRENT (2026-08-10) — post-v0.3.0 steady state; RTL Phase 1 in flight
+`main` @ `04c10be` (Persian #73 merged). **v0.3.0 shipped ~07-05** (Runbooks headline). Since then: a long
+steady-state of contributor merges + polish + i18n; **no new release cut yet**.
+
+**Merged this arc (all branch→PR):** #56 i18n copy · #58 Linux AppImage EGL crash (un-bundle stale libwayland)
+· #59 Russian Runbooks · **#68 agent-updates modal** ("N updates available" agents×tools dot-grid) · **#64 ZCode
+tool** (Z.ai GLM; `zcode-md` == `qwen-md`) + **#70 ZCode brand icon** (lobehub zhipu mark) · #63 project-only
+install guidance (**closed #40**) · **#74 Antigravity uninstall fix** (`remove_dir` the orphaned skill-md
+`<slug>/` dir — **closed #60**) · **#73 Persian (fa-IR)** (montajebii; **closed #72**).
+
+**OPEN PRs (8, all MERGEABLE):** **#81 RTL Phase 1** (mine) · **#82 Healthcare division label** (mine) · #85
+Windows console flash · #80 winget README · #77 `npm run tauri` TAURI_CONFIG fix (kills the macos-private-api
+footgun properly) · #69 WebView2 embedBootstrapper · #67 clone-on-first-run (removes bundled baseline — big
+surface) · #62 Runbooks doc-render/staged. → **#67/#69 want Linux+Windows CI dispatched before merge** (app CI =
+tags/dispatch only).
+
+**RTL = this session's focus. Phase 1 = PR #81, verified live in Persian on macOS.** The switch is ONE line —
+`document.documentElement.dir = isRTL(locale) ? "rtl" : "ltr"` in `applyLocale` (i18n.svelte.ts) — and the
+flexbox-heavy UI mirrors ~everything for free. The two spots that CAN'T: the **titlebar** (absolutely positioned
+by physical `left:` offsets → swapped to `right:` in RTL in `+page.svelte`, with a macOS **traffic-light
+clearance** since the OS lights never mirror) and **Settings.svelte**'s bespoke close-X (`right:` →
+`inset-inline-end`). `RTL_LOCALES = ["fa"]` in messages.ts. **Phase 2 (NOT started, ~½ day, captured in #81
+body):** logical-property sweep of ~13 overlay positions (Toast/CommandPalette/InstallModal/DiffModal/…),
+`text-align: left`→`start` (~38), the division-row internals, and chevron/arrow directional-icon mirroring.
+**KEY DESIGN FACT:** agent names/descriptions are **catalog content (English, authored upstream) — NOT translated
+by design** (`en.ts:49` documents it: chrome is localized, "persona content stays as authored upstream"). Only
+app chrome + division `category.*` labels are i18n. So English agent names in a Persian UI = correct, not a bug.
+#82 fixed a stale-catalog i18n gap (app kept dead `category.strategy`, lacked `category.healthcare`).
+
+**OPEN ISSUES:** #79 "58 but only 57 identified" (screenshot-only, untriaged) · #76 catalog-aware "Find the right
+agent" recommender (my tracking issue crediting @Rawlus7's catalog #634 draft; referral posted, quiet) · #71
+OpenClaw + #66 Antigravity Windows detection ("installed-but-not-detected" pair, likely shared root cause; not
+started) · #65 Windows launch (waits on reporter) · #27 skills · #26 Hermes. #75 closed as spam.
+
+**DEV GOTCHAS (hard-won this session):** (1) `tauri dev` on macOS re-injects `macos-private-api` into base
+`Cargo.toml` — run with `--config '{"app":{"macOSPrivateApi":true}}'`, `git checkout Cargo.toml` after (PR #77
+fixes it). (2) **Vite does NOT watch `src-tauri/data/tools.json`** (outside `src/`) — after a change touching it,
+`⌘R` won't help; **restart the dev server**. Dev-only (prod bundles fresh). (3) A new catalog integration NEVER
+auto-appears — Tools list is compiled in (`registry.rs include_str!` + `IMPLEMENTED_FORMATS`), so it needs a
+**paired app PR** (def + renderer + format gate + icon). (4) Forcing locale via `init()` doesn't take on first
+paint (SSR→English, hydration doesn't re-flip) — use the picker or a saved localStorage locale.
+
+**Icon WIP:** a re-authored Liquid Glass `.icon` (neon brain render) was **reverted to `git stash`** — the render
+baked in its own frame/gloss/shadow, wrong shape for the OS-applied Liquid Glass pipeline. Recoverable if wanted.
+
+---
+
+## ⏩ (history) CURRENT (2026-06-23) — read `activeContext.md` for the live picture
 **v0.2.0 SHIPPED** (`main` @ `16182e5`, PRs #21 + #22) — first feature release since v0.1.0, rolling up the
 v0.1.1 IA re-org (divisions landing, Teams, Projects pillar, the single InstallModal grid + DeployBrowser) and
 v0.1.2 tool-registry/Osaurus/Playbook arc, **plus LIVE auto-update**. 9 release assets across macOS (aarch64+x64,
