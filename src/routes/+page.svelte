@@ -18,10 +18,9 @@
   import Toast from "$lib/components/Toast.svelte";
   import TitlebarControls from "$lib/components/TitlebarControls.svelte";
   import UpdateIndicator from "$lib/components/UpdateIndicator.svelte";
-  import PanelLeftClose from "@lucide/svelte/icons/panel-left-close";
-  import PanelLeftOpen from "@lucide/svelte/icons/panel-left-open";
   import ArrowLeft from "@lucide/svelte/icons/arrow-left";
   import ArrowRight from "@lucide/svelte/icons/arrow-right";
+  import intentosMark from "$lib/assets/intentos-mark.png";
 
   import {
     ui,
@@ -153,30 +152,22 @@
     reads as one unified chrome (the Mac unified-toolbar pattern).
     Layout:
       • macOS-rendered traffic lights overlay the far left (~80 px)
-      • Sidebar toggle sits just inside the sidebar's right edge when
-        expanded; when collapsed, it slides over next to the traffic
-        lights (the sidebar can't fit a button at 56 px wide).
+      • The IntentOS identity stays fixed above the divider.
+      • The sidebar toggle lives inside the menu.
       • Page title sits just past where the sidebar divider lands so it
         aligns with the main content column.
-    Both the toggle and the title slide via CSS custom properties driven
-    by the `.sidebar-collapsed` class on `.app`, so transitions are smooth.
+    The title slides via CSS custom properties driven by the
+    `.sidebar-collapsed` class on `.app`, so transitions are smooth.
   -->
   <header class="titlebar" data-tauri-drag-region>
-    <button
-      type="button"
-      class="titlebar-btn"
-      data-tauri-drag-region="false"
-      title={ui.sidebarCollapsed ? i18n.t("titlebar.showSidebar") : i18n.t("titlebar.hideSidebar")}
-      aria-label={ui.sidebarCollapsed ? i18n.t("titlebar.showSidebar") : i18n.t("titlebar.hideSidebar")}
-      aria-pressed={ui.sidebarCollapsed}
-      onclick={() => ui.toggleSidebarCollapsed()}
+    <div
+      class="titlebar-brand"
+      data-tauri-drag-region
+      aria-label="IntentOS"
     >
-      {#if ui.sidebarCollapsed}
-        <PanelLeftOpen size={16} />
-      {:else}
-        <PanelLeftClose size={16} />
-      {/if}
-    </button>
+      <img src={intentosMark} alt="" aria-hidden="true" />
+      <span><span>Intent</span><span class="brand-os">OS</span></span>
+    </div>
     <div class="titlebar-nav" data-tauri-drag-region="false">
       <button
         type="button"
@@ -253,19 +244,16 @@
     flex-direction: column;
     height: 100%;
     background: var(--color-surface);
-    /* Title bar layout knobs — track the live sidebar width so the toggle
-       and page title stay aligned with the (resizable) sidebar's right edge.
+    /* Title bar layout knob — track the live sidebar width so the page title
+       stays aligned with the (resizable) sidebar's right edge.
        `--sidebar-width` is set inline from `ui.sidebarWidth`. */
-    --titlebar-toggle-left: calc(var(--sidebar-width, 200px) - 32px);
-    --titlebar-title-left: calc(var(--sidebar-width, 200px) + 20px);
+    --titlebar-title-left: max(150px, calc(var(--sidebar-width, 200px) + 20px));
   }
   .app.sidebar-collapsed {
-    --titlebar-toggle-left: 12px;
-    --titlebar-title-left: 52px;
+    --titlebar-title-left: 150px;
   }
   .app.macos.sidebar-collapsed {
-    --titlebar-toggle-left: 84px;   /* just past the traffic lights */
-    --titlebar-title-left: 124px;   /* just past the toggle */
+    --titlebar-title-left: 210px;   /* identity sits past the traffic lights */
   }
   /* Window-level title bar. Same chrome color as the sidebar so the
      two read as one continuous L-shaped frame around the main content.
@@ -274,16 +262,35 @@
      same horizontal axis as the toggle and the page title. */
   .titlebar {
     flex: none;
-    height: 36px;
+    height: 42px;
     position: relative;
-    background: var(--color-surface-raised);
+    background: var(--color-surface-sunken);
     border-bottom: 1px solid var(--color-border);
   }
-  /* Toggle slides between two positions via CSS variables. */
+  .titlebar-brand {
+    position: absolute;
+    top: 50%;
+    left: 34px;
+    transform: translateY(-50%);
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    height: 32px;
+    padding: 2px 5px;
+    border-radius: var(--radius-md);
+    color: var(--color-text-primary);
+    font-size: var(--text-body);
+    font-weight: var(--fw-semibold);
+    letter-spacing: -0.01em;
+  }
+  .titlebar-brand img { width: 36px; height: 36px; object-fit: contain; }
+  .titlebar-brand .brand-os { color: var(--color-brand); }
+  .app.macos .titlebar-brand { left: 106px; }
+  /* Shared titlebar button styling; back/forward buttons override positioning. */
   .titlebar-btn {
     position: absolute;
     top: 50%;
-    left: var(--titlebar-toggle-left);
+    left: 0;
     transform: translateY(-50%);
     display: inline-flex;
     align-items: center;
@@ -294,12 +301,11 @@
     border-radius: var(--radius-md);
     color: var(--color-text-muted);
     cursor: pointer;
-    transition: left var(--motion-duration-base, 180ms) var(--motion-ease-out, ease),
-                background-color var(--motion-duration-fast) var(--motion-ease-out),
+    transition: background-color var(--motion-duration-fast) var(--motion-ease-out),
                 color var(--motion-duration-fast) var(--motion-ease-out);
   }
   .titlebar-btn:hover {
-    background: var(--color-surface-sunken);
+    background: var(--color-surface-raised);
     color: var(--color-text-primary);
   }
   .titlebar-btn:focus-visible {
@@ -343,7 +349,7 @@
     transform: translateY(-50%);
     margin: 0;
     font-size: var(--text-h3);
-    font-weight: var(--fw-semibold);
+    font-weight: var(--fw-medium);
     color: var(--color-text-primary);
     white-space: nowrap;
     transition: left var(--motion-duration-base, 180ms) var(--motion-ease-out, ease);

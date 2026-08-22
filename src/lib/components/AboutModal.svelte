@@ -10,7 +10,7 @@
   import { safeOpenUrl } from "$lib/util/url";
   import { SPONSOR_URL } from "$lib/util/donate";
   import { i18n } from "$lib/stores/i18n.svelte";
-  import appIcon from "$lib/assets/app-icon.png";
+  import intentosMark from "$lib/assets/intentos-mark.png";
 
   const REPO_URL = "https://github.com/msitarzewski/agency-agents-app";
   const LICENSE_URL = "https://github.com/msitarzewski/agency-agents-app/blob/main/LICENSE";
@@ -66,8 +66,9 @@
       </button>
 
       <div class="hero">
-        <img class="brand-mark" src={appIcon} alt="Agency Agents" width="80" height="80" />
-        <h1 id="about-title">Agency Agents</h1>
+        <img class="brand-mark" src={intentosMark} alt="Emblema de IntentOS" width="96" height="96" />
+        <h1 id="about-title"><span>Intent</span><span class="brand-os">OS</span></h1>
+        <p class="brand-motto">GÉNESIS KAI SÝNDESIS</p>
         <p class="tagline">{i18n.t("about.tagline")}</p>
       </div>
 
@@ -134,17 +135,23 @@
   }
   .brand-mark {
     display: block;
-    width: 80px;
-    height: 80px;
+    width: 96px;
+    height: 96px;
     margin: 0 auto var(--space-2);
-    /* The PNG already carries the rounded-square shape on transparent corners;
-       drop-shadow follows the alpha so the shadow is squircle-shaped, not boxy. */
-    filter: drop-shadow(0 6px 16px color-mix(in oklch, black 45%, transparent));
+    object-fit: contain;
   }
   h1 {
     font-size: var(--text-h1, 1.4rem);
     font-weight: var(--fw-semibold);
     margin: 0;
+  }
+  .brand-os { color: var(--color-brand); }
+  .brand-motto {
+    margin: 5px 0 0;
+    color: var(--color-brand);
+    font-size: 10px;
+    font-weight: var(--fw-semibold);
+    letter-spacing: 0.18em;
   }
   .tagline {
     margin-top: 4px;

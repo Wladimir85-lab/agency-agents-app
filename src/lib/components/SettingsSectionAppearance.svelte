@@ -14,11 +14,12 @@
   import { ui, VIBRANCY_MATERIALS, type VibrancyMaterial } from "$lib/stores/ui.svelte";
   import { i18n } from "$lib/stores/i18n.svelte";
   import { LOCALES, localeLabels, type Locale } from "$lib/i18n/messages";
+  import { isMac } from "$lib/util/platform";
   import type { SidebarSection, ThemePreference } from "$lib/types";
 
   /** Sections the user can pick as their default landing page. Mirrors the
       sidebar nav order, plus Dashboard which lives in the brand button. */
-  const SECTIONS: SidebarSection[] = ["dashboard", "personas", "tools", "teams", "projects", "activity"];
+  const SECTIONS: SidebarSection[] = ["dashboard", "personas", "tools", "teams", "projects", "runbooks", "activity"];
 
   function sectionLabel(value: SidebarSection): string {
     if (value === "dashboard") return i18n.t("nav.dashboard");
@@ -26,6 +27,7 @@
     if (value === "tools") return i18n.t("nav.tools");
     if (value === "teams") return i18n.t("nav.teams");
     if (value === "projects") return i18n.t("nav.projects");
+    if (value === "runbooks") return i18n.t("nav.runbooks");
     return i18n.t("nav.activity");
   }
 
@@ -47,7 +49,7 @@
 <div class="section">
   <h2>{i18n.t("settings.appearance.title")}</h2>
 
-  <div class="field">
+  <div class="field card theme-card">
     <label for="theme-group">{i18n.t("settings.appearance.theme")}</label>
     <div id="theme-group" class="radio-row" role="radiogroup" aria-label={i18n.t("settings.appearance.theme")}>
       <button
@@ -84,55 +86,59 @@
     <p class="hint">{i18n.t("settings.appearance.themeHint")}</p>
   </div>
 
-  <div class="field">
-    <label for="default-section">{i18n.t("settings.appearance.defaultLanding")}</label>
-    <select
-      id="default-section"
-      class="select"
-      value={ui.defaultSection}
-      onchange={onSectionChange}
-    >
-      {#each SECTIONS as opt (opt)}
-        <option value={opt}>{sectionLabel(opt)}</option>
-      {/each}
-    </select>
-    <p class="hint">{i18n.t("settings.appearance.defaultLandingHint")}</p>
+  <div class="settings-grid">
+    <div class="field card">
+      <label for="default-section">{i18n.t("settings.appearance.defaultLanding")}</label>
+      <select
+        id="default-section"
+        class="select"
+        value={ui.defaultSection}
+        onchange={onSectionChange}
+      >
+        {#each SECTIONS as opt (opt)}
+          <option value={opt}>{sectionLabel(opt)}</option>
+        {/each}
+      </select>
+      <p class="hint">{i18n.t("settings.appearance.defaultLandingHint")}</p>
+    </div>
+
+    <div class="field card">
+      <label for="locale">{i18n.t("settings.appearance.language")}</label>
+      <select
+        id="locale"
+        class="select"
+        value={i18n.locale}
+        onchange={onLocaleChange}
+      >
+        {#each LOCALES as locale (locale)}
+          <option value={locale}>{localeLabels[locale]}</option>
+        {/each}
+      </select>
+      <p class="hint">{i18n.t("settings.appearance.languageHint")}</p>
+    </div>
   </div>
 
-  <div class="field">
-    <label for="locale">{i18n.t("settings.appearance.language")}</label>
-    <select
-      id="locale"
-      class="select"
-      value={i18n.locale}
-      onchange={onLocaleChange}
-    >
-      {#each LOCALES as locale (locale)}
-        <option value={locale}>{localeLabels[locale]}</option>
-      {/each}
-    </select>
-    <p class="hint">{i18n.t("settings.appearance.languageHint")}</p>
-  </div>
-
-  <div class="field">
-    <label for="vibrancy-material">{i18n.t("settings.appearance.vibrancy")}</label>
-    <select
-      id="vibrancy-material"
-      class="select"
-      value={ui.vibrancyMaterial}
-      onchange={onVibrancyChange}
-    >
-      {#each VIBRANCY_MATERIALS as m (m)}
-        <option value={m}>{m}</option>
-      {/each}
-    </select>
-    <p class="hint">{i18n.t("settings.appearance.vibrancyHint")}</p>
-  </div>
+  {#if isMac}
+    <div class="field card">
+      <label for="vibrancy-material">{i18n.t("settings.appearance.vibrancy")}</label>
+      <select
+        id="vibrancy-material"
+        class="select"
+        value={ui.vibrancyMaterial}
+        onchange={onVibrancyChange}
+      >
+        {#each VIBRANCY_MATERIALS as m (m)}
+          <option value={m}>{m}</option>
+        {/each}
+      </select>
+      <p class="hint">{i18n.t("settings.appearance.vibrancyHint")}</p>
+    </div>
+  {/if}
 
 </div>
 
 <style>
-  .section { display: flex; flex-direction: column; gap: var(--space-5); max-width: 520px; }
+  .section { display: flex; flex-direction: column; gap: var(--space-4); max-width: 720px; }
   h2 {
     font-size: var(--text-h1);
     font-weight: var(--fw-semibold);
@@ -140,6 +146,25 @@
     margin-bottom: var(--space-2);
   }
   .field { display: flex; flex-direction: column; gap: var(--space-2); }
+  .card {
+    padding: var(--space-4);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-lg);
+    background: color-mix(in srgb, var(--color-surface-raised) 82%, transparent);
+    transition:
+      border-color var(--motion-duration-fast) var(--motion-ease-out),
+      background-color var(--motion-duration-fast) var(--motion-ease-out);
+  }
+  .card:hover {
+    border-color: color-mix(in srgb, var(--color-brand) 46%, var(--color-border));
+    background: color-mix(in srgb, var(--color-brand-subtle) 42%, var(--color-surface-raised));
+  }
+  .settings-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: var(--space-3);
+  }
+  .theme-card { align-items: flex-start; }
   label {
     font-size: var(--text-body);
     font-weight: var(--fw-medium);
@@ -171,15 +196,22 @@
     cursor: pointer;
     transition: background-color var(--motion-duration-fast) var(--motion-ease-out);
   }
-  .radio-btn:hover { color: var(--color-text-primary); }
+  .radio-btn:hover {
+    background: var(--color-brand-subtle);
+    color: var(--color-cask-on-subtle);
+  }
   .radio-btn.on {
     background: var(--color-surface-raised);
     color: var(--color-text-primary);
     box-shadow: var(--shadow-xs);
   }
+  .radio-btn.on:hover {
+    background: var(--color-brand-subtle);
+    color: var(--color-cask-on-subtle);
+  }
   .select {
     width: 100%;
-    max-width: 260px;
+    max-width: none;
     padding: 6px var(--space-3);
     border: 1px solid var(--color-border);
     border-radius: var(--radius-md);
@@ -193,6 +225,14 @@
     outline: none;
     border-color: var(--color-border-focus);
     box-shadow: var(--shadow-focus-ring);
+  }
+  .select:hover {
+    border-color: var(--color-brand);
+    background: var(--color-brand-subtle);
+  }
+
+  @media (max-width: 760px) {
+    .settings-grid { grid-template-columns: 1fr; }
   }
 
 </style>

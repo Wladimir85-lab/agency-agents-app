@@ -190,7 +190,7 @@
        was stuck until Settings closed (issue #8). Leaving the title bar
        uncovered also matches native macOS, where the title bar stays at
        full opacity while a sheet is open. */
-    inset: 36px 0 0 0;
+    inset: 42px 0 0 0;
     background: rgb(0 0 0 / 0.4);
     z-index: 90;
     animation: fadeIn var(--motion-duration-base) var(--motion-ease-out);
@@ -257,14 +257,18 @@
     cursor: pointer;
   }
   .nav-item:hover {
-    background: var(--color-surface-raised);
-    color: var(--color-text-primary);
+    background: var(--color-brand-subtle);
+    color: var(--color-cask-on-subtle);
   }
   .nav-item.active {
     background: var(--color-surface-raised);
     color: var(--color-text-primary);
     font-weight: var(--fw-semibold);
     box-shadow: var(--shadow-xs);
+  }
+  .nav-item.active:hover {
+    background: var(--color-brand-subtle);
+    color: var(--color-cask-on-subtle);
   }
   .nav-icon { display: inline-flex; color: inherit; }
 

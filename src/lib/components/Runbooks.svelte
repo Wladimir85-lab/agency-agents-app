@@ -20,30 +20,14 @@
   import { INTENTOS_CAPABILITIES, routeIntent } from "$lib/data/intentosCapabilities";
   import type { Agent, Runbook, RunEvent } from "$lib/types";
 
-  const DRAFT_KEY = "intentos.productionBrief.v1";
+  const LEGACY_DRAFT_KEY = "intentos.productionBrief.v1";
   const DEFAULT_SIGNATURE = "Dirección creativa inspirada en la nueva ola de estudios digitales de Japón y Corea: tipografía protagonista y cinética, composición editorial con asimetría intencional, maximalismo controlado, capas y texturas, microinteracciones con propósito y narrativa visual mediante scroll. Usar 3D, WebGL o medios mixtos solo cuando refuercen la identidad del producto. El resultado debe sentirse vivo, memorable y propio, nunca como una plantilla SaaS genérica. Mantener siempre jerarquía clara, accesibilidad, respuesta móvil, rendimiento y facilidad de uso.";
   onMount(() => {
-    try {
-      const draft = JSON.parse(localStorage.getItem(DRAFT_KEY) ?? "null");
-      if (draft) {
-        intent = draft.intent ?? "";
-        audience = draft.audience ?? "";
-        businessGoal = draft.businessGoal ?? "";
-        requiredFeatures = draft.requiredFeatures ?? "";
-        visualDirection = draft.visualDirection ?? "";
-        references = draft.references ?? "";
-        availableAssets = draft.availableAssets ?? "";
-        signature = draft.signature?.trim() ? draft.signature : DEFAULT_SIGNATURE;
-        attachments = Array.isArray(draft.attachments) ? draft.attachments.filter((item: unknown) => typeof item === "string") : [];
-        constraints = draft.constraints ?? "";
-        acceptance = draft.acceptance ?? "";
-        projectPath = draft.projectPath ?? "";
-        selectedSlug = draft.selectedSlug ?? "";
-        selectedCapabilityId = draft.selectedCapabilityId ?? "auto";
-        briefOpen = Boolean(draft.briefOpen);
-      }
-    } catch { /* A corrupt draft must never block production. */ }
-    draftReady = true;
+    // Security baseline v0.1: production briefs can contain client data and
+    // must never live in plaintext WebView storage. Remove the legacy draft
+    // once and keep the current brief in memory until an encrypted workspace
+    // store exists.
+    try { localStorage.removeItem(LEGACY_DRAFT_KEY); } catch { /* best effort */ }
     corpus.ensureLoaded(); runbooks.load(); projects.refresh(); runs.load();
   });
   const bySlug = $derived(new Map(corpus.agents.map((a) => [a.slug, a])));
@@ -64,7 +48,6 @@
   let constraints = $state("");
   let acceptance = $state("");
   let briefOpen = $state(false);
-  let draftReady = $state(false);
   let projectPath = $state("");
   let selectedSlug = $state("");
   let selectedCapabilityId = $state("auto");
@@ -87,10 +70,6 @@
     if (!runs.current) return;
     if (!projectPath || projectPath === projects.list[0]?.path) projectPath = runs.current.projectPath;
     if (runbooks.list.some((rb) => rb.slug === runs.current?.runbookId)) selectedSlug = runs.current.runbookId;
-  });
-  $effect(() => {
-    if (!draftReady) return;
-    localStorage.setItem(DRAFT_KEY, JSON.stringify({ intent, audience, businessGoal, requiredFeatures, visualDirection, signature, references, availableAssets, attachments, constraints, acceptance, projectPath, selectedSlug, selectedCapabilityId, briefOpen }));
   });
 
   function productionBrief(): string {
@@ -140,7 +119,6 @@
     validation = "";
     briefOpen = false;
     runs.clearCurrent();
-    localStorage.setItem(DRAFT_KEY, JSON.stringify({ intent: "", audience: "", businessGoal: "", requiredFeatures: "", visualDirection: "", signature: DEFAULT_SIGNATURE, references: "", availableAssets: "", attachments: [], constraints: "", acceptance: "", projectPath, selectedSlug, selectedCapabilityId: "auto", briefOpen: false }));
     toast.success("Nueva intención preparada");
   }
 

@@ -5,29 +5,29 @@
 
 /* ---------- LIGHT MODE (default) ---------- */
 :root {
-  /* Brand — warm amber, brew-bottle */
-  --color-brand:           oklch(67% 0.15 45);
-  --color-brand-hover:     oklch(62% 0.16 45);
-  --color-brand-active:    oklch(56% 0.16 45);
-  --color-brand-subtle:    oklch(96% 0.03 65);
+  /* IntentOS brand — disciplined violet, reserved for focus and selection. */
+  --color-brand:           oklch(60% 0.18 290);
+  --color-brand-hover:     oklch(56% 0.19 290);
+  --color-brand-active:    oklch(51% 0.18 290);
+  --color-brand-subtle:    oklch(90% 0.055 290);
 
   /* Surfaces — layered */
-  --color-surface:         oklch(99% 0.003 95);
-  --color-surface-raised:  oklch(100% 0 0);
-  --color-surface-sunken:  oklch(96% 0.003 95);
-  --color-surface-overlay: oklch(100% 0 0 / 0.9);
+  --color-surface:         oklch(95% 0.012 290);
+  --color-surface-raised:  oklch(97% 0.010 290);
+  --color-surface-sunken:  oklch(92% 0.014 290);
+  --color-surface-overlay: oklch(97% 0.012 290 / 0.94);
 
   /* Borders */
-  --color-border:          oklch(90% 0.005 95);
-  --color-border-strong:   oklch(82% 0.005 95);
-  --color-border-focus:    oklch(60% 0.16 250);
+  --color-border:          oklch(85% 0.018 290);
+  --color-border-strong:   oklch(76% 0.025 290);
+  --color-border-focus:    oklch(60% 0.18 290);
 
   /* Text */
-  --color-text-primary:    oklch(20% 0.005 95);
-  --color-text-secondary:  oklch(40% 0.005 95);
-  --color-text-muted:      oklch(48% 0.005 95);  /* ≈ #615e58 — ~5.7:1 on surface, ~5.2:1 on surface-sunken (was 55% L / ~4.4:1, failed WCAG 1.4.3 AA for body-sm) */
+  --color-text-primary:    oklch(22% 0.018 285);
+  --color-text-secondary:  oklch(40% 0.018 285);
+  --color-text-muted:      oklch(48% 0.016 285);
   --color-text-inverse:    oklch(99% 0 0);
-  --color-text-link:       oklch(50% 0.15 250);
+  --color-text-link:       oklch(50% 0.17 290);
 
   /* Semantic */
   --color-success:         oklch(58% 0.14 150);
@@ -44,15 +44,15 @@
      The plain semantic colors fail 4.5:1 on their matching -subtle backgrounds; these "-on-subtle"
      variants pair with `tone-X` pills in Pill.svelte. All clear WCAG 1.4.3 AA. */
   --color-formula-on-subtle: oklch(40% 0.15 250); /* ≈ #1e40af on info-subtle #dbeafe — ~6.0:1 (was 4.3:1) */
-  --color-cask-on-subtle:    oklch(45% 0.13 45);  /* ≈ #7a4708 on brand-subtle #fef3c7 — ~5.0:1 (was 2.9:1) — preserves warm amber */
+  --color-cask-on-subtle:    oklch(43% 0.16 290);
   --color-success-on-subtle: oklch(45% 0.14 150); /* ≈ #166534 on success-subtle #dcfce7 — ~6.0:1 (was borderline 4.6:1) */
   --color-warning-on-subtle: oklch(48% 0.14 75);  /* ≈ #854d0e on warning-subtle #fef9c3 — ~5.0:1 (was 2.7:1) */
   --color-danger-on-subtle:  oklch(45% 0.20 27);  /* ≈ #991b1b on danger-subtle #fee2e2 — ~5.5:1 (was 4.0:1) */
   --color-info-on-subtle:    oklch(40% 0.15 250); /* same as formula — info pill uses same pair */
 
   /* Selection */
-  --color-selection:       oklch(92% 0.05 250);
-  --color-selection-strong: oklch(60% 0.16 250);
+  --color-selection:       oklch(87% 0.075 290);
+  --color-selection-strong: oklch(60% 0.18 290);
 
   /* Console */
   --color-console-bg:      oklch(20% 0.005 95);
@@ -70,29 +70,29 @@
 
 /* ---------- DARK MODE ---------- */
 [data-theme="dark"] {
-  /* Brand */
-  --color-brand:           oklch(72% 0.16 50);
-  --color-brand-hover:     oklch(78% 0.15 50);
-  --color-brand-active:    oklch(82% 0.13 50);
-  --color-brand-subtle:    oklch(28% 0.05 50);
+  /* IntentOS brand */
+  --color-brand:           oklch(68% 0.17 290);
+  --color-brand-hover:     oklch(73% 0.16 290);
+  --color-brand-active:    oklch(78% 0.14 290);
+  --color-brand-subtle:    oklch(25% 0.055 290);
 
   /* Surfaces */
-  --color-surface:         oklch(20% 0.003 270);
-  --color-surface-raised:  oklch(25% 0.003 270);
-  --color-surface-sunken:  oklch(15% 0.003 270);
-  --color-surface-overlay: oklch(20% 0.003 270 / 0.9);
+  --color-surface:         oklch(16% 0.008 280);
+  --color-surface-raised:  oklch(19% 0.009 280);
+  --color-surface-sunken:  oklch(13% 0.007 280);
+  --color-surface-overlay: oklch(18% 0.012 280 / 0.94);
 
   /* Borders */
-  --color-border:          oklch(30% 0.003 270);
-  --color-border-strong:   oklch(40% 0.003 270);
-  --color-border-focus:    oklch(68% 0.16 250);
+  --color-border:          oklch(25% 0.012 280);
+  --color-border-strong:   oklch(34% 0.014 280);
+  --color-border-focus:    oklch(68% 0.17 290);
 
   /* Text */
-  --color-text-primary:    oklch(94% 0.003 270);
-  --color-text-secondary:  oklch(76% 0.003 270);
-  --color-text-muted:      oklch(58% 0.003 270);
-  --color-text-inverse:    oklch(15% 0.003 270);
-  --color-text-link:       oklch(72% 0.14 250);
+  --color-text-primary:    oklch(94% 0.005 280);
+  --color-text-secondary:  oklch(75% 0.008 280);
+  --color-text-muted:      oklch(57% 0.01 280);
+  --color-text-inverse:    oklch(14% 0.008 280);
+  --color-text-link:       oklch(74% 0.14 290);
 
   /* Semantic */
   --color-success:         oklch(72% 0.16 150);
@@ -108,15 +108,15 @@
   /* Pill foregrounds — bright variants for dark mode (subtle bgs are dark ~28-30% L).
      All clear WCAG 1.4.3 AA on their paired -subtle dark background. */
   --color-formula-on-subtle: oklch(82% 0.14 230); /* bright info-blue on dark info-subtle — ~8:1 */
-  --color-cask-on-subtle:    oklch(82% 0.14 50);  /* bright warm-amber on dark brand-subtle — ~8:1, brand-identity preserved */
+  --color-cask-on-subtle:    oklch(82% 0.13 290);
   --color-success-on-subtle: oklch(82% 0.16 150); /* bright green on dark success-subtle — ~9:1 */
   --color-warning-on-subtle: oklch(85% 0.14 75);  /* bright amber on dark warning-subtle — ~9:1 */
   --color-danger-on-subtle:  oklch(80% 0.16 27);  /* bright red on dark danger-subtle — ~7:1 */
   --color-info-on-subtle:    oklch(82% 0.14 230); /* same as formula */
 
   /* Selection */
-  --color-selection:       oklch(30% 0.10 250);
-  --color-selection-strong: oklch(60% 0.18 250);
+  --color-selection:       oklch(28% 0.09 290);
+  --color-selection-strong: oklch(68% 0.17 290);
 
   /* Console */
   --color-console-bg:      oklch(12% 0.003 270);

@@ -6,6 +6,8 @@
   import FolderGit2 from "@lucide/svelte/icons/folder-git-2";
   import Rocket from "@lucide/svelte/icons/rocket";
   import Activity from "@lucide/svelte/icons/activity";
+  import PanelLeftClose from "@lucide/svelte/icons/panel-left-close";
+  import PanelLeftOpen from "@lucide/svelte/icons/panel-left-open";
 
   import { ui } from "$lib/stores/ui.svelte";
   import { corpus } from "$lib/stores/corpus.svelte";
@@ -66,10 +68,22 @@
   style="width: {ui.sidebarCollapsed ? 56 : ui.sidebarWidth}px"
   aria-label={i18n.t("nav.primary")}
 >
-  <button class="brand" onclick={() => ui.setSection("personas")} title={i18n.t("nav.homeTitle")}>
-    <span class="brand-mark" aria-hidden="true">🤖</span>
-    <span class="brand-name">Agency Agents</span>
-  </button>
+  <div class="brand-row">
+    <button
+      type="button"
+      class="sidebar-toggle"
+      title={ui.sidebarCollapsed ? i18n.t("titlebar.showSidebar") : i18n.t("titlebar.hideSidebar")}
+      aria-label={ui.sidebarCollapsed ? i18n.t("titlebar.showSidebar") : i18n.t("titlebar.hideSidebar")}
+      aria-pressed={ui.sidebarCollapsed}
+      onclick={() => ui.toggleSidebarCollapsed()}
+    >
+      {#if ui.sidebarCollapsed}
+        <PanelLeftOpen size={16} />
+      {:else}
+        <PanelLeftClose size={16} />
+      {/if}
+    </button>
+  </div>
 
   <nav>
     <ul>
@@ -106,31 +120,44 @@
     /* width is set inline from ui.sidebarWidth (or 56px collapsed) so the
        resize handle in +page.svelte can drive it live. */
     flex: none;
-    background: var(--color-surface-raised);
+    background: var(--color-surface-sunken);
     border-right: 1px solid var(--color-border);
     display: flex;
     flex-direction: column;
     min-height: 0;
+    position: relative;
+    z-index: 5;
     transition: width var(--motion-duration-base, 180ms) var(--motion-ease-out, ease);
   }
   @media (prefers-reduced-motion: reduce) {
     .sidebar { transition: none; }
   }
 
-  /* Brand row — the app's home affordance. Click → Agents home. */
-  .brand {
+  /* Brand row — identity and sidebar control form one menu-level unit. */
+  .brand-row {
     display: flex;
     align-items: center;
-    gap: var(--space-2);
-    width: 100%;
-    padding: var(--space-3);
-    background: transparent;
-    color: var(--color-text-primary);
-    cursor: pointer;
-    text-align: left;
+    justify-content: flex-end;
+    min-height: 48px;
+    padding: var(--space-2);
   }
-  .brand-mark { font-size: 18px; line-height: 1; }
-  .brand-name { font-weight: var(--fw-semibold); font-size: var(--text-body); }
+  .sidebar-toggle {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    flex: none;
+    border-radius: var(--radius-md);
+    color: var(--color-text-muted);
+    transition:
+      color var(--motion-duration-fast) var(--motion-ease-out),
+      background-color var(--motion-duration-fast) var(--motion-ease-out);
+  }
+  .sidebar-toggle:hover {
+    color: var(--color-text-primary);
+    background: var(--color-surface-raised);
+  }
 
   nav { flex: 1; padding: var(--space-2); overflow-y: auto; }
   ul { display: flex; flex-direction: column; gap: 1px; }
@@ -147,16 +174,30 @@
     font-weight: var(--fw-medium);
     line-height: 1;
     text-align: left;
-    transition: background-color var(--motion-duration-fast) var(--motion-ease-out);
+    position: relative;
+    min-height: 34px;
+    transition:
+      color var(--motion-duration-fast) var(--motion-ease-out),
+      background-color var(--motion-duration-fast) var(--motion-ease-out),
+      transform var(--motion-duration-fast) var(--motion-ease-out);
   }
-  .nav-item:hover { background: var(--color-surface-sunken); color: var(--color-text-primary); }
+  .nav-item:hover {
+    background: var(--color-brand-subtle);
+    color: var(--color-cask-on-subtle);
+    transform: translateX(2px);
+  }
   .nav-item.active {
-    background: var(--color-surface-sunken);
+    background: var(--color-surface-raised);
     color: var(--color-text-primary);
     font-weight: var(--fw-semibold);
   }
+  .nav-item.active:hover {
+    background: var(--color-brand-subtle);
+    color: var(--color-cask-on-subtle);
+  }
   .nav-item .label { flex: 1; }
-  .ico { display: inline-flex; }
+  .ico { display: inline-flex; transition: transform var(--motion-duration-base) var(--motion-ease-spring); }
+  .nav-item:hover .ico { transform: scale(1.08); }
   .badge {
     display: inline-flex;
     align-items: center;
@@ -198,16 +239,59 @@
   .status-ready .dot { background: var(--color-success); }
 
   /* ── Collapsed sidebar (icon-rail mode) ── */
-  .sidebar.collapsed { width: 56px; }
-  .sidebar.collapsed .brand-name { display: none; }
-  .sidebar.collapsed .brand { justify-content: center; }
+  .sidebar.collapsed { width: 56px; overflow: visible; }
+  .sidebar.collapsed .brand-row { justify-content: center; padding: 4px; }
+  .sidebar.collapsed .sidebar-toggle { width: 24px; height: 28px; }
+  .sidebar.collapsed nav { overflow: visible; }
   .sidebar.collapsed .nav-item {
     justify-content: center;
     padding-left: 0;
     padding-right: 0;
     position: relative;
+    border-radius: var(--radius-lg);
   }
-  .sidebar.collapsed .nav-item .label { display: none; }
+  .sidebar.collapsed .nav-item:hover { transform: translateX(0); }
+  .sidebar.collapsed .nav-item.active {
+    background: var(--color-brand-subtle);
+    color: var(--color-cask-on-subtle);
+  }
+  .sidebar.collapsed .nav-item.active::before {
+    content: "";
+    position: absolute;
+    left: -8px;
+    width: 2px;
+    height: 17px;
+    border-radius: 0 var(--radius-full) var(--radius-full) 0;
+    background: var(--color-brand);
+  }
+  .sidebar.collapsed .nav-item .label {
+    display: block;
+    position: absolute;
+    left: calc(100% + 10px);
+    top: 50%;
+    z-index: 10;
+    width: max-content;
+    max-width: 180px;
+    padding: 7px 10px;
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-md);
+    background: var(--color-surface-overlay);
+    color: var(--color-text-primary);
+    box-shadow: var(--shadow-sm);
+    backdrop-filter: blur(18px);
+    opacity: 0;
+    pointer-events: none;
+    transform: translate(-5px, -50%) scale(0.96);
+    transform-origin: left center;
+    transition:
+      opacity var(--motion-duration-fast) var(--motion-ease-out),
+      transform var(--motion-duration-base) var(--motion-ease-spring);
+  }
+  .sidebar.collapsed .nav-item:hover .label,
+  .sidebar.collapsed .nav-item:focus-visible .label {
+    opacity: 1;
+    transform: translate(0, -50%) scale(1);
+  }
   .sidebar.collapsed .nav-item .badge {
     position: absolute;
     top: 2px;

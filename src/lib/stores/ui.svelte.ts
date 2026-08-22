@@ -42,7 +42,11 @@ const VIBRANCY_MATERIAL_KEY = "agency-agents:vibrancy-material";
 const CONFIRM_DESTRUCTIVE_KEY = "agency-agents:confirm-destructive";
 const ACTIVITY_MAX_JOBS_KEY = "agency-agents:activity:max-jobs";
 const ACTIVITY_MAX_LINES_KEY = "agency-agents:activity:max-lines";
-const SIDEBAR_COLLAPSED_KEY = "agency-agents:sidebar-collapsed";
+// IntentOS starts in icon-rail mode. A new preference key intentionally avoids
+// inheriting the expanded default from the pre-IntentOS Agency Agents shell;
+// after the first launch, the user's choice is persisted normally.
+const SIDEBAR_COLLAPSED_KEY = "intentos:sidebar-collapsed";
+const THEME_KEY = "intentos:theme";
 
 /** Defaults for the Activity-retention settings (Phase 12b). */
 export const ACTIVITY_MAX_JOBS_DEFAULT = 50;
@@ -112,7 +116,7 @@ class UiStore {
   aboutOpen: boolean = $state(false);
   /** Playbook modal — "how to get real work out of your agents" (title-bar ?). */
   playbookOpen: boolean = $state(false);
-  theme: ThemePreference = $state("system");
+  theme: ThemePreference = $state("dark");
   /** Active category ("division") filter for the Agents workspace; null = all.
       Lifted into ui so division pills can deep-link to it and so back/forward
       can restore it. */
@@ -173,7 +177,7 @@ class UiStore {
   /** When true, the sidebar collapses to an icon-only rail with native
       tooltips on hover. Persisted to localStorage so the choice survives
       app launches. */
-  sidebarCollapsed: boolean = $state(false);
+  sidebarCollapsed: boolean = $state(true);
 
   /** Sidebar width in px (when expanded); persisted to localStorage so a
       resized sidebar survives app launches. */
@@ -457,13 +461,13 @@ class UiStore {
 
   setTheme(t: ThemePreference) {
     this.theme = t;
-    try { localStorage.setItem("agency-agents.theme", t); } catch { /* ignore */ }
+    try { localStorage.setItem(THEME_KEY, t); } catch { /* ignore */ }
     applyTheme(t);
   }
 
   loadThemeFromStorage() {
     try {
-      const v = localStorage.getItem("agency-agents.theme");
+      const v = localStorage.getItem(THEME_KEY);
       if (v === "light" || v === "dark" || v === "system") {
         this.theme = v;
       }

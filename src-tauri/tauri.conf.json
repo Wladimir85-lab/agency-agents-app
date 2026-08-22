@@ -13,7 +13,7 @@
     "withGlobalTauri": false,
     "windows": [
       {
-        "title": "Agency Agents",
+        "title": "IntentOS",
         "width": 1100,
         "height": 720,
         "minWidth": 800,
