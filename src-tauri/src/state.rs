@@ -6,6 +6,7 @@
 //! app-data directory that the corpus / install / github / updater
 //! modules derive their paths from.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -49,6 +50,10 @@ pub struct AppState {
     /// staleness. See `crate::commands::updater::UpdaterState` for the
     /// shape and the rationale.
     pub updater_state: Arc<RwLock<UpdaterState>>,
+
+    /// IntentOS runtime jobs. Handles are backend-owned so the renderer can
+    /// cancel a known run without ever supplying a process or shell command.
+    pub runtime_jobs: Arc<Mutex<HashMap<String, tokio::task::AbortHandle>>>,
 }
 
 impl AppState {
@@ -84,6 +89,7 @@ impl AppState {
             corpus_refresh_in_flight: Arc::new(Mutex::new(())),
             settings: Arc::new(RwLock::new(settings_state)),
             updater_state: crate::commands::updater::empty_state(),
+            runtime_jobs: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 

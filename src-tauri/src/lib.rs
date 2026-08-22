@@ -11,6 +11,7 @@ mod github;
 mod install;
 mod registry;
 mod render;
+mod runtime;
 mod state;
 mod types;
 mod util;
@@ -185,6 +186,11 @@ pub fn run() {
             install::projects_list,
             install::loadout_export,
             install::loadout_import,
+            runtime::runtime_providers,
+            runtime::runtime_start,
+            runtime::runtime_cancel,
+            runtime::runtime_get,
+            runtime::runtime_list,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

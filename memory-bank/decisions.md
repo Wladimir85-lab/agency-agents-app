@@ -211,3 +211,16 @@ on exposed three latent traps that the manual-DMG (`SKIP_UPDATER`) path had alwa
    the Keychain copy must match it byte-for-byte. `release.sh` is fully Keychain-based — no `signing.env`.
 **Consequences**: `release.sh` now signs updater artifacts cleanly with no manual `signer sign -f` step; the next
 release "just works." **References**: `tasks/2026-06/260623_v0.2.0-ship.md`, `~/Downloads/fix-updater-keychain.sh`.
+
+### 2026-08-22: Freeze IntentOS Runtime v0.1 as a single-provider five-stage pipeline
+
+**Status**: Approved for closure on branch `intentos/runtime-v0.1`. **Context**: the private IntentOS workspace
+needs evidence that a product intention can become coordinated project work before adding model routing or more
+agents. Two factory exercises produced a web MVP and an IoT vertical, but also showed that visual evidence and
+honest terminal gates matter more than surface breadth. **Decision**: freeze v0.1 around Codex CLI, a fixed
+five-stage sequential pipeline, catalog personas, project-scoped execution, persisted run summaries, streamed
+events, cancellation, resume of passed stages, and a three-attempt QA remediation loop. The final explicit
+PASS/FAIL marker wins; a successful process alone is insufficient. **Alternatives rejected for this milestone**:
+NeMo/Switchyard, multiple providers, parallel execution, new personas and autonomous deployment. **Consequences**:
+v0.1 remains a local experimental branch extension, not an Agency Agents release or a production autonomous
+agency. The next architectural gate is human approval plus structured evidence/diff control, not more capability.

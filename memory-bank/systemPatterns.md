@@ -101,3 +101,33 @@ Activity drawer (live install/convert stdout). Cmd+K palette, Cmd+0…6 nav inhe
 
 Long ops stream stdout/stderr via `Channel<Event>` with a global write-lock, exactly
 like brew-browser's `run_brew_streaming`. Install/convert/refresh are the streaming ops.
+
+## 9. IntentOS Runtime v0.1 (experimental branch)
+
+The renderer remains untrusted presentation; Rust owns the executable, arguments,
+sandbox, working directory and provider allowlist. The only provider is `codexCli`.
+
+```text
+production brief + registered project + runbook + capability
+  -> five catalog personas
+  -> Project Management
+  -> UX / Architecture
+  -> Development
+  -> QA (up to 3 attempts, with Development remediation)
+  -> Reality Check
+  -> persisted RunSummary + streamed RunEvent evidence
+```
+
+Invariants:
+
+- Exactly five non-empty agent slugs and five non-empty stage labels enter the backend.
+- Project paths are canonical directories; filesystem roots and the app data tree are rejected.
+- A stage passes only when the process exits successfully and its last explicit gate marker is `INTENTOS_GATE:PASS`.
+- Terminal runs cannot retain a `running` stage or `currentStage` when read.
+- Run files are capped at 2 MiB and addressed by validated UUIDs.
+- Cancellation aborts the backend-owned job and persists a terminal cancelled state.
+- Resume only reuses passed stages from the same intent, project, runbook, capability and stage layout.
+- The UI may clear its projection but never deletes persisted run evidence.
+
+Known limits: sequential execution, textual self-reported gates, no human approval
+checkpoint, no diff/rollback transaction, no token/cost budget, and no model routing.

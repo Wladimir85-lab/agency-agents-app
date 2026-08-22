@@ -290,7 +290,15 @@ pub fn dests(
 
     Ok(templates
         .iter()
-        .map(|t| root.join(t.replace("{slug}", slug)))
+        // Registry templates are portable `/`-separated paths. Joining the
+        // whole string preserves `/` inside a Windows PathBuf and produces a
+        // ledger path that differs from the canonical filesystem spelling.
+        .map(|t| {
+            t.replace("{slug}", slug)
+                .split('/')
+                .filter(|part| !part.is_empty())
+                .fold(root.to_path_buf(), |path, part| path.join(part))
+        })
         .collect())
 }
 

@@ -412,6 +412,62 @@ export interface Runbook {
   roster: RunbookGroup[];
 }
 
+// =========================================================
+// IntentOS runtime (native provider + run orchestration)
+// =========================================================
+
+export interface RuntimeProvider {
+  id: string;
+  label: string;
+  available: boolean;
+  version: string | null;
+  unavailableReason: string | null;
+}
+
+export type RunStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled";
+
+export interface RunStage {
+  id: string;
+  label: string;
+  agentSlug: string;
+  status: "pending" | "running" | "passed" | "failed" | "cancelled";
+  attempt: number;
+}
+
+export interface StartRunRequest {
+  intent: string;
+  projectPath: string;
+  runbookId: string;
+  capabilityId: string;
+  stageLabels: string[];
+  agentSlugs: string[];
+  providerId: string;
+}
+
+export interface RunSummary {
+  id: string;
+  intent: string;
+  projectPath: string;
+  runbookId: string;
+  capabilityId: string;
+  providerId: string;
+  status: RunStatus;
+  currentStage: string | null;
+  stages: RunStage[];
+  createdAt: string;
+  updatedAt: string;
+  completedAt: string | null;
+  error: string | null;
+}
+
+export type RuntimeOutputStream = "stdout" | "stderr";
+
+export type RunEvent =
+  | { kind: "runUpdated"; run: RunSummary }
+  | { kind: "output"; runId: string; stageId: string; stream: RuntimeOutputStream; text: string }
+  | { kind: "gatePassed"; runId: string; stageId: string }
+  | { kind: "gateFailed"; runId: string; stageId: string; reason: string; attempt: number };
+
 export interface CatalogUpdateCheck {
   isGit: boolean;
   behind: number;

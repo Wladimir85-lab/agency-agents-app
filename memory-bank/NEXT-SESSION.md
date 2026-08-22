@@ -1,5 +1,15 @@
 # NEXT SESSION — resume notes (Agency Agents)
 
+## IntentOS Runtime v0.1 — resume first (2026-08-22)
+
+Work on branch `intentos/runtime-v0.1`; the runtime changes are intentionally uncommitted
+until final review. Read `projectbrief.md#IntentOS Runtime v0.1 branch extension`,
+`systemPatterns.md#9`, `contracts.md#F`, the 2026-08-22 decision, and the top of
+`activeContext.md`. Preserve the frozen scope. Do not add providers, agents, parallelism,
+NeMo/Switchyard or deployment. Re-run `npm run check`, `npm run build`, and
+`cargo test --lib` before presenting approval. TaskFlow and IoT still require browser QA;
+do not describe either as production-ready.
+
 Read this first after a compaction. Then `activeContext.md`, `agentLog.md` (append-only history),
 `phases/phase-roadmap.md`, `contracts.md`, `systemPatterns.md`, `decisions.md`.
 

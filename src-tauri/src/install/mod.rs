@@ -1352,7 +1352,7 @@ mod tests {
         )
         .unwrap();
 
-        let path = home.path().join(".codex/agents").join("frontend-developer.toml");
+        let path = home.path().join(".codex").join("agents").join("frontend-developer.toml");
         assert!(!path.exists(), "Track must not write the agent file");
         assert_eq!(rec.dest, path.to_string_lossy(), "record points at the canonical dest");
 
@@ -1379,7 +1379,7 @@ mod tests {
         let mut agent = sample_agent();
         agent.slug = "engineering-frontend-developer".into();
         let raw = "---\nname: Frontend Developer\ndescription: Builds UIs.\n---\nBODY\n";
-        let conversion_dest = home.path().join(".codex/agents").join("frontend-developer.toml");
+        let conversion_dest = home.path().join(".codex").join("agents").join("frontend-developer.toml");
         std::fs::create_dir_all(conversion_dest.parent().unwrap()).unwrap();
         std::fs::write(&conversion_dest, b"OLDER CLI OUTPUT").unwrap();
 

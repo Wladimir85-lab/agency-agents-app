@@ -1,5 +1,21 @@
 # Active Context — Agency Agents
 
+## IntentOS Runtime v0.1 closure — 2026-08-22
+
+Branch `intentos/runtime-v0.1` contains an uncommitted experimental runtime extension.
+Scope is frozen: Codex CLI only, eight intent capabilities, five sequential stages,
+catalog-backed teams, QA remediation capped at three attempts, local run persistence,
+event streaming, cancellation and resumption. All 24 unique capability personas resolve
+from the bundled corpus. Current closure gates: Svelte check 0/0, production build PASS,
+Rust 281 passed / 0 failed / 1 external-parity test ignored, focused runtime 9/9, and
+native Tauri compilation/launch reached the executable. Do not add providers or capabilities before
+reviewing the complete diff and preserving this baseline.
+
+Factory evidence: TaskFlow automated gate 19/19 but browser QA remains blocked; the web
+automotive MVP exists without final certification; the IoT vertical compiles and passes
+backend/contract/MQTT/persistence gates but remains FAILED pending five QA findings and
+fresh browser evidence. These are evidence projects, not production deployments.
+
 **State**: 🚀 **v0.2.0 SHIPPED (2026-06-23)** — `main` @ `16182e5`. First feature release since the v0.1.0
 launch (the internally-tracked "0.1.1"/"0.1.2" milestones were never cut separately — they ship here), and
 **auto-update is now LIVE** at [`agencyagents.app/updater.json`](https://agencyagents.app/updater.json) for

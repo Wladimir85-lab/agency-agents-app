@@ -127,3 +127,41 @@ brew-browser's stores verbatim.
 2. Hash = SHA-256 lowercase hex of UTF-8 bytes.
 3. Frontmatter parsing tolerates the agency-agents format (YAML between `---` fences).
 4. Never write into an agent file we'd classify `Modified` without explicit user confirm.
+
+## F. IntentOS Runtime v0.1 contract
+
+### Command surface
+
+```text
+runtime_providers() -> RuntimeProvider[]
+runtime_start(StartRunRequest, Channel<RunEvent>) -> RunSummary
+runtime_cancel(run_id: UUID) -> ()
+runtime_get(run_id: UUID) -> RunSummary
+runtime_list(project_path?: String) -> RunSummary[]
+```
+
+`StartRunRequest` requires a non-empty intent, registered provider `codexCli`,
+canonical non-root project directory, runbook id, capability id, exactly five
+non-empty stage labels and exactly five non-empty catalog agent slugs.
+
+### State contract
+
+- Run: `queued | running | succeeded | failed | cancelled`.
+- Stage: `pending | running | passed | failed | cancelled`.
+- Stage ids are fixed: `project-management`, `ux-architecture`, `development`,
+  `qa`, `reality-check`.
+- Rust is the source of truth. The Svelte store is only a live projection.
+- Evidence is persisted under app data `state/runs/<uuid>.json` by atomic write.
+
+### Gate contract
+
+The Codex process must exit successfully and the last explicit marker in its output
+must be `INTENTOS_GATE:PASS`. A later `INTENTOS_GATE:FAIL`, no marker, a non-zero
+exit or a 30-minute timeout fails the stage. QA may trigger at most two Development
+remediation passes before its third and final attempt.
+
+### Explicitly excluded from v0.1
+
+Human approval gates, parallel stages, multiple model providers, NeMo/Switchyard,
+cost budgets, automatic commits, transactional rollback, deployment and physical
+IoT certification.

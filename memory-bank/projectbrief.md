@@ -33,7 +33,21 @@ database*. That state-tracking layer is the app's core differentiator:
 
 - **Is**: a browser + installer + cross-tool state tracker + loadout manager for agents.
 - **Isn't**: a replacement for the agency-agents repo, telemetry-funded, freemium,
-  or a runtime that executes agents itself (v1 installs into other tools; it does not run agents).
+  or a hosted multi-tenant agency platform.
+
+## IntentOS Runtime v0.1 branch extension
+
+The `intentos/runtime-v0.1` branch adds an experimental, local execution surface on
+top of the existing catalog and project registry. It runs a fixed five-stage pipeline
+through an installed Codex CLI and persists run evidence locally. This extension does
+not change the upstream Agency Agents release version (`0.3.0`) and is not part of the
+published app until it is separately reviewed and merged.
+
+Runtime v0.1 is deliberately narrow: one provider, sequential stages, one project
+directory, catalog-backed personas, explicit PASS/FAIL markers, one QA remediation
+loop capped at three attempts, cancellation, resumption of passed stages, and local
+JSON evidence. It is not NeMo, a model router, a parallel agent scheduler, a human
+approval system, a cost controller, or a transactional rollback engine.
 
 ## Source of truth (the corpus-copy model)
 
