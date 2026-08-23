@@ -709,3 +709,34 @@ never separate releases; they ship here. Then took it further: **turned auto-upd
   the matching filtered view; an active lens shows a **flat all-divisions list** (`showDivisions` gates on
   `lens === "all"`). New "Needs attention" bucket = Outdated ∪ Modified ∪ Missing. Dropped the lens's cross-launch
   localStorage persistence (a sticky filter would hijack the landing). svelte-check 0, build clean.
+
+## 2026-08-23 — IntentOS Runtime v0.1 CLOSED (branch intentos/runtime-v0.1, uncommitted)
+Closed the experimental runtime extension per the 2026-08-22 freeze decision (`decisions.md`):
+Codex CLI only, five fixed sequential stages (project-management/ux-architecture/development/
+qa/reality-check), catalog-backed personas, QA remediation capped at three attempts, local
+run persistence, streamed events, cancellation, resume of passed stages. Verified by reading
+the code (not by running it in this session): `src-tauri/src/runtime.rs` + `state.rs`
+(runtime_jobs AbortHandle map, require_network fail-closed gate) implement the full
+`contracts.md` §F command surface (runtime_providers/start/cancel/get/list) and the
+`systemPatterns.md` §9 invariants (INTENTOS_GATE:PASS/FAIL as the last explicit marker wins;
+terminal-state normalization on read; capped/redacted event text); registered in `lib.rs`.
+Frontend `src/lib/stores/runs.svelte.ts` is a thin projection over the five commands per the
+contract ("Rust is the source of truth"). UI integration landed after the prior session's
+15:58 snapshot: the Runbooks panel was wired into `Sidebar.svelte` + `routes/+page.svelte`
+nav (⌘5) and IntentOS branding assets updated, 2026-08-22 22:00–22:38. A small, unrelated
+language/appearance settings addition (`Settings.svelte`, `SettingsSectionAppearance.svelte`,
+locale files) landed in the same window — not part of Runtime v0.1.
+Final gates — run manually by Wladimir on his machine, 2026-08-23, and reported to the
+assistant (this session has no shell access to the dev machine, so these were not
+independently re-executed): `npm run check` 0 errors/0 warnings; `npm run build` PASS (only
+the non-blocking >500kB chunk-size warning); `cargo test --lib` 281 passed / 0 failed / 1
+ignored. Matches the gate counts the 2026-08-22 snapshot had targeted.
+Verdict: Runtime v0.1 CLOSED on this evidence. Branch remains uncommitted, not merged to
+`main`, not part of the published 0.3.0 release — next open decision is commit/review/merge.
+TaskFlow (automated gate 19/19) and the IoT vertical (backend/contract/MQTT/persistence
+green, FAILED pending five QA findings) still lack browser QA — neither is production-ready.
+Noted but explicitly untouched: a divisions/agency-organization rework
+(`agencyOrganization.ts`, `DivisionsLanding.svelte`, `AgentsWorkspace.svelte`,
+`corpus.svelte.ts`, `categoryIcon.ts`, `presetTeams.ts`) started 2026-08-23 in the early
+morning, after this closure's code was already in place — a separate line of work, not
+reviewed or continued here.

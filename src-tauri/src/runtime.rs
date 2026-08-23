@@ -461,6 +461,11 @@ pub async fn runtime_start(
         });
     }
     validate_start_request(&request)?;
+    // Codex CLI is an outbound provider even though it is launched as a local
+    // child process. The same fail-closed network policy that protects GitHub,
+    // catalog sync, and updates must therefore gate the runtime before the
+    // project is inspected or any provider process is started.
+    state.require_network("runtime_codex").await?;
     let project = validate_project(&request.project_path, &state.app_data_dir)?;
     let provider = probe_codex().await;
     if !provider.available {

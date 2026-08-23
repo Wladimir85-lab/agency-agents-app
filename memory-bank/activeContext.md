@@ -1,20 +1,44 @@
 # Active Context — Agency Agents
 
-## IntentOS Runtime v0.1 closure — 2026-08-22
+## IntentOS Runtime v0.1 — CLOSED — 2026-08-23
 
-Branch `intentos/runtime-v0.1` contains an uncommitted experimental runtime extension.
-Scope is frozen: Codex CLI only, eight intent capabilities, five sequential stages,
-catalog-backed teams, QA remediation capped at three attempts, local run persistence,
-event streaming, cancellation and resumption. All 24 unique capability personas resolve
-from the bundled corpus. Current closure gates: Svelte check 0/0, production build PASS,
-Rust 281 passed / 0 failed / 1 external-parity test ignored, focused runtime 9/9, and
-native Tauri compilation/launch reached the executable. Do not add providers or capabilities before
-reviewing the complete diff and preserving this baseline.
+Branch `intentos/runtime-v0.1` holds the experimental runtime extension; it remains
+uncommitted pending a review/merge decision — this closure is a milestone on the branch,
+not a merge to `main`. Scope is frozen: Codex CLI only, eight intent capabilities, five
+sequential stages, catalog-backed teams, QA remediation capped at three attempts, local run
+persistence, event streaming, cancellation and resumption. All 24 unique capability personas
+resolve from the bundled corpus. Do not add providers or capabilities before reviewing the
+complete diff and preserving this baseline.
+
+**2026-08-22 15:58 snapshot** (superseded by the re-verification below, kept for history):
+Svelte check 0/0, production build PASS, Rust 281 passed / 0 failed / 1 external-parity test
+ignored, focused runtime 9/9, native Tauri compilation/launch reached the executable.
+
+**Work that landed after that snapshot, now folded into this closure:** backend
+(`src-tauri/src/runtime.rs`, `state.rs`, registered in `lib.rs`) and frontend
+(`src/lib/stores/runs.svelte.ts`, `src/lib/components/Runbooks.svelte`) implement the full
+`contracts.md` §F command surface and the `systemPatterns.md` §9 invariants. UI integration —
+the Runbooks panel wired into `Sidebar.svelte` and `routes/+page.svelte` nav (⌘5), plus
+IntentOS branding assets — landed 2026-08-22 22:00–22:38. A small, unrelated
+language/appearance settings addition (`Settings.svelte`, `SettingsSectionAppearance.svelte`,
+locale files) landed in the same window and is NOT part of Runtime v0.1.
+
+**Final gates, 2026-08-23** — run manually by Wladimir and reported to the assistant (not
+re-executed in this session; no shell access to the dev machine here): `npm run check` — 0
+errors, 0 warnings. `npm run build` — PASS, only the non-blocking >500kB chunk-size warning.
+`cargo test --lib` — 281 passed / 0 failed / 1 ignored. Runtime v0.1 is closed on this
+evidence.
 
 Factory evidence: TaskFlow automated gate 19/19 but browser QA remains blocked; the web
 automotive MVP exists without final certification; the IoT vertical compiles and passes
 backend/contract/MQTT/persistence gates but remains FAILED pending five QA findings and
 fresh browser evidence. These are evidence projects, not production deployments.
+
+**Separate, unrelated work on the same working tree (explicitly NOT part of this closure):**
+a divisions/agency-organization rework — `agencyOrganization.ts`, `DivisionsLanding.svelte`,
+`AgentsWorkspace.svelte`, `corpus.svelte.ts`, `categoryIcon.ts`, `presetTeams.ts` — started
+2026-08-23 in the early morning, after this closure's code was already in place. It is
+undocumented here and was intentionally left untouched while closing Runtime v0.1.
 
 **State**: 🚀 **v0.2.0 SHIPPED (2026-06-23)** — `main` @ `16182e5`. First feature release since the v0.1.0
 launch (the internally-tracked "0.1.1"/"0.1.2" milestones were never cut separately — they ship here), and

@@ -1,14 +1,23 @@
 # NEXT SESSION — resume notes (Agency Agents)
 
-## IntentOS Runtime v0.1 — resume first (2026-08-22)
+## IntentOS Runtime v0.1 — CLOSED (2026-08-23); next decision is commit/review/merge
 
-Work on branch `intentos/runtime-v0.1`; the runtime changes are intentionally uncommitted
-until final review. Read `projectbrief.md#IntentOS Runtime v0.1 branch extension`,
-`systemPatterns.md#9`, `contracts.md#F`, the 2026-08-22 decision, and the top of
-`activeContext.md`. Preserve the frozen scope. Do not add providers, agents, parallelism,
-NeMo/Switchyard or deployment. Re-run `npm run check`, `npm run build`, and
-`cargo test --lib` before presenting approval. TaskFlow and IoT still require browser QA;
-do not describe either as production-ready.
+Branch `intentos/runtime-v0.1` closed its build-and-verify milestone 2026-08-23: `npm run
+check` 0/0, `npm run build` PASS (only the benign >500kB chunk warning), `cargo test --lib`
+281/0/1-ignored — run manually by Wladimir and reported to the assistant, not re-executed in
+this session. The branch is still uncommitted and not merged into `main`; not part of the
+published 0.3.0 release. Read `projectbrief.md#IntentOS Runtime v0.1 branch extension`,
+`systemPatterns.md#9`, `contracts.md#F`, the 2026-08-22 decision, and `activeContext.md` for
+the frozen scope before touching this branch again. Do not add providers, agents,
+parallelism, NeMo/Switchyard or deployment. TaskFlow and IoT factory evidence still require
+browser QA; do not describe either as production-ready.
+
+**Separate open item, NOT part of Runtime v0.1:** a divisions/agency-organization rework
+(`agencyOrganization.ts`, `DivisionsLanding.svelte`, `AgentsWorkspace.svelte`,
+`corpus.svelte.ts`, `categoryIcon.ts`, `presetTeams.ts`) started 2026-08-23 in the early
+morning hours, after Runtime v0.1's code was already in place. It has no memory-bank
+documentation yet — read the live diff before continuing it, and don't conflate it with the
+runtime closure above.
 
 Read this first after a compaction. Then `activeContext.md`, `agentLog.md` (append-only history),
 `phases/phase-roadmap.md`, `contracts.md`, `systemPatterns.md`, `decisions.md`.
