@@ -1,6 +1,6 @@
 /** IntentOS runtime projection. The Rust backend remains the source of truth. */
 import { Channel, invoke } from "@tauri-apps/api/core";
-import type { RunEvent, RunSummary, RuntimeProvider, StartRunRequest } from "$lib/types";
+import type { RunEvent, RunSummary, RuntimeProvider, RuntimeReview, StartRunRequest } from "$lib/types";
 
 export interface TimestampedRunEvent {
   id: number;
@@ -17,6 +17,10 @@ class RunsStore {
   starting = $state(false);
   cancelling = $state(false);
   error: string | null = $state(null);
+  review: RuntimeReview | null = $state(null);
+  reviewing = $state(false);
+  applying = $state(false);
+  discarding = $state(false);
   private sequence = 0;
 
   async load(projectPath?: string): Promise<void> {
@@ -29,7 +33,9 @@ class RunsStore {
       ]);
       this.providers = providers;
       this.list = runs;
-      this.current = runs[0] ?? null;
+      // A terminal historical run belongs to the history, not to the new-intent
+      // workspace. Only resume a run that can still produce live events.
+      this.current = runs.find((run) => run.status === "queued" || run.status === "running") ?? null;
     } catch (e) {
       this.error = String(e);
     } finally {
@@ -41,6 +47,7 @@ class RunsStore {
     this.starting = true;
     this.error = null;
     this.events = [];
+    this.review = null;
     this.sequence = 0;
     const onEvent = new Channel<RunEvent>();
     onEvent.onmessage = (event) => this.accept(event);
@@ -75,11 +82,47 @@ class RunsStore {
     }
   }
 
+  async reviewCurrent(): Promise<RuntimeReview | null> {
+    if (!this.current?.workspacePath) return null;
+    this.reviewing = true;
+    try {
+      this.review = await invoke<RuntimeReview>("runtime_review", { runId: this.current.id });
+      return this.review;
+    } finally {
+      this.reviewing = false;
+    }
+  }
+
+  async applyCurrent(): Promise<RuntimeReview | null> {
+    if (!this.current?.workspacePath) return null;
+    this.applying = true;
+    try {
+      this.review = await invoke<RuntimeReview>("runtime_apply", { runId: this.current.id });
+      return this.review;
+    } finally {
+      this.applying = false;
+    }
+  }
+
+  async discardCurrentWorkspace(): Promise<void> {
+    if (!this.current?.workspacePath) return;
+    this.discarding = true;
+    try {
+      await invoke("runtime_discard_workspace", { runId: this.current.id });
+      this.current = { ...this.current, workspacePath: null };
+      this.upsert(this.current);
+      this.review = null;
+    } finally {
+      this.discarding = false;
+    }
+  }
+
   /** Clear the UI projection without deleting persisted run evidence. */
   clearCurrent(): void {
     this.current = null;
     this.events = [];
     this.error = null;
+    this.review = null;
     this.sequence = 0;
   }
 

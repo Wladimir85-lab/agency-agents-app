@@ -8,6 +8,14 @@ export interface IntentOSCapability {
   keywords: string[];
 }
 
+export interface IntentOSPipelineStage {
+  id: string;
+  kind: "direction" | "architecture" | "development" | "qa" | "reality";
+  label: string;
+  agent: string;
+  capabilityId: string;
+}
+
 export const INTENTOS_CAPABILITIES: IntentOSCapability[] = [
   {
     id: "digital-experience",
@@ -83,7 +91,7 @@ export const INTENTOS_CAPABILITIES: IntentOSCapability[] = [
   },
 ];
 
-export function routeIntent(text: string): { capability: IntentOSCapability; confidence: number; matched: string[] } {
+export function routeIntent(text: string): { capability: IntentOSCapability; capabilities: IntentOSCapability[]; confidence: number; matched: string[] } {
   const normalized = text.toLocaleLowerCase("es");
   const ranked = INTENTOS_CAPABILITIES.map((capability) => {
     const matched = capability.keywords.filter((keyword) => normalized.includes(keyword));
@@ -91,5 +99,20 @@ export function routeIntent(text: string): { capability: IntentOSCapability; con
   }).sort((a, b) => b.score - a.score);
   const best = ranked[0];
   const confidence = best.score === 0 ? 0 : Math.min(0.95, 0.45 + best.score * 0.1);
-  return { capability: best.score ? best.capability : INTENTOS_CAPABILITIES[0], confidence, matched: best.matched };
+  const capability = best.score ? best.capability : INTENTOS_CAPABILITIES[0];
+  const threshold = Math.max(2, Math.ceil(best.score * 0.4));
+  const capabilities = best.score
+    ? ranked.filter((item) => item.score >= threshold).slice(0, 4).map((item) => item.capability)
+    : [capability];
+  return { capability, capabilities, confidence, matched: best.matched };
+}
+
+export function composePipeline(capabilities: IntentOSCapability[]): IntentOSPipelineStage[] {
+  const primary = capabilities[0] ?? INTENTOS_CAPABILITIES[0];
+  const stages: IntentOSPipelineStage[] = [{ id: "direction", kind: "direction", label: primary.stageLabels[0], agent: primary.agents[0], capabilityId: primary.id }];
+  for (const capability of capabilities) stages.push({ id: `${capability.id}:architecture`, kind: "architecture", label: capability.stageLabels[1], agent: capability.agents[1], capabilityId: capability.id });
+  for (const capability of capabilities) stages.push({ id: `${capability.id}:development`, kind: "development", label: capability.stageLabels[2], agent: capability.agents[2], capabilityId: capability.id });
+  for (const capability of capabilities) stages.push({ id: `${capability.id}:qa`, kind: "qa", label: capability.stageLabels[3], agent: capability.agents[3], capabilityId: capability.id });
+  stages.push({ id: "reality-check", kind: "reality", label: primary.stageLabels[4], agent: primary.agents[4], capabilityId: primary.id });
+  return stages;
 }

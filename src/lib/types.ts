@@ -430,6 +430,7 @@ export interface RunStage {
   id: string;
   label: string;
   agentSlug: string;
+  kind: string;
   status: "pending" | "running" | "passed" | "failed" | "cancelled";
   attempt: number;
 }
@@ -439,6 +440,9 @@ export interface StartRunRequest {
   projectPath: string;
   runbookId: string;
   capabilityId: string;
+  capabilityIds: string[];
+  stageIds: string[];
+  stageKinds: string[];
   stageLabels: string[];
   agentSlugs: string[];
   providerId: string;
@@ -448,8 +452,11 @@ export interface RunSummary {
   id: string;
   intent: string;
   projectPath: string;
+  /** Isolated mutable copy used by the agents; projectPath remains untouched. */
+  workspacePath: string | null;
   runbookId: string;
   capabilityId: string;
+  capabilityIds: string[];
   providerId: string;
   status: RunStatus;
   currentStage: string | null;
@@ -461,6 +468,21 @@ export interface RunSummary {
 }
 
 export type RuntimeOutputStream = "stdout" | "stderr";
+
+export interface WorkspaceChange {
+  path: string;
+  kind: "added" | "modified" | "removed";
+  beforeSha256: string | null;
+  afterSha256: string | null;
+}
+
+export interface RuntimeReview {
+  runId: string;
+  sourcePath: string;
+  workspacePath: string;
+  sourceUnchanged: boolean;
+  changes: WorkspaceChange[];
+}
 
 export type RunEvent =
   | { kind: "runUpdated"; run: RunSummary }

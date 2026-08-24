@@ -9,6 +9,7 @@ mod corpus;
 mod error;
 mod github;
 mod install;
+mod mission;
 mod registry;
 mod render;
 mod runtime;
@@ -186,11 +187,22 @@ pub fn run() {
             install::projects_list,
             install::loadout_export,
             install::loadout_import,
+            // Mission/Engagement — Agency Operating Specification v1. Purely
+            // additive: Runtime v0.1's commands and contract below are
+            // unchanged. Mission is deliberately its own module, independent
+            // of ProjectInfo (types.rs) and of RunSummary.
+            mission::mission_create,
+            mission::mission_get,
+            mission::mission_list,
+            mission::mission_update,
             runtime::runtime_providers,
             runtime::runtime_start,
             runtime::runtime_cancel,
             runtime::runtime_get,
             runtime::runtime_list,
+            runtime::runtime_review,
+            runtime::runtime_apply,
+            runtime::runtime_discard_workspace,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

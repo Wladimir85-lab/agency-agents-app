@@ -5,12 +5,15 @@
 //! working directory policy remain entirely in Rust.
 
 use std::collections::HashMap;
+use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tauri::{ipc::Channel, State};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
@@ -18,6 +21,7 @@ use uuid::Uuid;
 
 use crate::corpus;
 use crate::error::AppError;
+use crate::mission::{self, Mission};
 use crate::state::AppState;
 use crate::util::fs::{atomic_write, read_capped};
 
@@ -25,6 +29,8 @@ const PROVIDER_ID: &str = "codexCli";
 const MAX_INTENT_CHARS: usize = 20_000;
 const MAX_RUN_FILE_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_EVENT_TEXT_CHARS: usize = 8_000;
+const MAX_WORKSPACE_FILES: usize = 100_000;
+const MAX_WORKSPACE_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -43,9 +49,20 @@ pub struct StartRunRequest {
     project_path: String,
     runbook_id: String,
     capability_id: String,
+    #[serde(default)]
+    capability_ids: Vec<String>,
+    #[serde(default)]
+    stage_ids: Vec<String>,
+    #[serde(default)]
+    stage_kinds: Vec<String>,
     stage_labels: Vec<String>,
     agent_slugs: Vec<String>,
     provider_id: String,
+    /// Optional Mission to attach to this run. Purely additive — omitting
+    /// it (or passing None) preserves Runtime v0.1's frozen behavior
+    /// byte-for-byte: the raw `intent` field is used exactly as before.
+    #[serde(default)]
+    mission_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -64,6 +81,8 @@ pub struct RunStage {
     id: String,
     label: String,
     agent_slug: String,
+    #[serde(default)]
+    kind: String,
     status: String,
     attempt: u8,
 }
@@ -74,10 +93,21 @@ pub struct RunSummary {
     id: String,
     intent: String,
     project_path: String,
+    /// Isolated copy used by every provider process. The user-selected project
+    /// remains immutable until a future explicit review/apply command exists.
+    #[serde(default)]
+    workspace_path: Option<String>,
     runbook_id: String,
     #[serde(default)]
     capability_id: String,
+    #[serde(default)]
+    capability_ids: Vec<String>,
     provider_id: String,
+    /// Mirrors StartRunRequest.mission_id — absent on every run persisted
+    /// before this field existed; `#[serde(default)]` deserializes those
+    /// old files exactly like the existing `capability_id` precedent.
+    #[serde(default)]
+    mission_id: Option<String>,
     status: RunStatus,
     current_stage: Option<String>,
     stages: Vec<RunStage>,
@@ -111,25 +141,35 @@ pub enum RunEvent {
     },
 }
 
-fn stage(id: &str, label: &str, agent: &str) -> RunStage {
+fn stage(id: &str, label: &str, agent: &str, kind: &str) -> RunStage {
     RunStage {
         id: id.into(),
         label: label.into(),
         agent_slug: agent.into(),
+        kind: kind.into(),
         status: "pending".into(),
         attempt: 0,
     }
 }
 
-fn initial_stages(agents: &[String], labels: &[String]) -> Vec<RunStage> {
-    if agents.len() >= 5 && labels.len() == 5 {
-        return vec![
-            stage("project-management", &labels[0], &agents[0]),
-            stage("ux-architecture", &labels[1], &agents[1]),
-            stage("development", &labels[2], &agents[2]),
-            stage("qa", &labels[3], &agents[3]),
-            stage("reality-check", &labels[4], &agents[4]),
-        ];
+fn initial_stages(
+    agents: &[String],
+    labels: &[String],
+    ids: &[String],
+    kinds: &[String],
+) -> Vec<RunStage> {
+    if agents.len() == labels.len()
+        && agents.len() == ids.len()
+        && agents.len() == kinds.len()
+        && agents.len() >= 5
+    {
+        return agents
+            .iter()
+            .zip(labels)
+            .zip(ids)
+            .zip(kinds)
+            .map(|(((agent, label), id), kind)| stage(id, label, agent, kind))
+            .collect();
     }
     let pick = |needle: &str, fallback: &str| {
         agents
@@ -143,26 +183,31 @@ fn initial_stages(agents: &[String], labels: &[String]) -> Vec<RunStage> {
             "project-management",
             "Project Manager",
             &pick("project-manager", "project-manager-senior"),
+            "direction",
         ),
         stage(
             "ux-architecture",
             "UX / Architecture",
             &pick("architect", "ux-architect"),
+            "architecture",
         ),
         stage(
             "development",
             "Development",
             &pick("developer", "senior-developer"),
+            "development",
         ),
         stage(
             "qa",
             "Quality Assurance",
             &pick("evidence", "testing-evidence-collector"),
+            "qa",
         ),
         stage(
             "reality-check",
             "Final Reality Check",
             &pick("reality", "testing-reality-checker"),
+            "reality",
         ),
     ]
 }
@@ -172,6 +217,332 @@ fn runs_dir(state: &AppState) -> PathBuf {
 }
 fn run_path(state: &AppState, id: &str) -> PathBuf {
     runs_dir(state).join(format!("{id}.json"))
+}
+
+fn run_workspace_dir(app_data: &Path, id: &str) -> PathBuf {
+    app_data
+        .join("state")
+        .join("run-workspaces")
+        .join(id)
+        .join("project")
+}
+
+fn run_evidence_dir(app_data: &Path, id: &str) -> PathBuf {
+    app_data.join("state").join("run-evidence").join(id)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct ManifestEntry {
+    path: String,
+    bytes: u64,
+    sha256: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceChange {
+    path: String,
+    kind: String,
+    before_sha256: Option<String>,
+    after_sha256: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeReview {
+    run_id: String,
+    source_path: String,
+    workspace_path: String,
+    source_unchanged: bool,
+    changes: Vec<WorkspaceChange>,
+}
+
+fn walk_files(root: &Path) -> Result<Vec<PathBuf>, AppError> {
+    fn visit(
+        root: &Path,
+        dir: &Path,
+        files: &mut Vec<PathBuf>,
+        bytes: &mut u64,
+    ) -> Result<(), AppError> {
+        for entry in fs::read_dir(dir).map_err(|e| AppError::Io {
+            message: e.to_string(),
+        })? {
+            let entry = entry.map_err(|e| AppError::Io {
+                message: e.to_string(),
+            })?;
+            let file_type = entry.file_type().map_err(|e| AppError::Io {
+                message: e.to_string(),
+            })?;
+            let path = entry.path();
+            if file_type.is_symlink() {
+                continue;
+            }
+            if file_type.is_dir() {
+                if path.file_name().and_then(|name| name.to_str()) == Some(".git") {
+                    continue;
+                }
+                visit(root, &path, files, bytes)?;
+            } else if file_type.is_file() {
+                *bytes = bytes.saturating_add(
+                    entry
+                        .metadata()
+                        .map_err(|e| AppError::Io {
+                            message: e.to_string(),
+                        })?
+                        .len(),
+                );
+                files.push(path);
+                if files.len() > MAX_WORKSPACE_FILES || *bytes > MAX_WORKSPACE_BYTES {
+                    return Err(AppError::InvalidArgument {
+                        message: format!("project exceeds isolation limit ({MAX_WORKSPACE_FILES} files or {MAX_WORKSPACE_BYTES} bytes)"),
+                    });
+                }
+            }
+        }
+        debug_assert!(files.iter().all(|path| path.starts_with(root)));
+        Ok(())
+    }
+
+    let mut files = Vec::new();
+    let mut bytes = 0;
+    visit(root, root, &mut files, &mut bytes)?;
+    files.sort();
+    Ok(files)
+}
+
+fn copy_workspace(source: &Path, destination: &Path) -> Result<(), AppError> {
+    if destination.exists() {
+        return Err(AppError::InvalidArgument {
+            message: "isolated workspace already exists".into(),
+        });
+    }
+    fs::create_dir_all(destination).map_err(|e| AppError::Io {
+        message: e.to_string(),
+    })?;
+    for source_file in walk_files(source)? {
+        let relative = source_file
+            .strip_prefix(source)
+            .map_err(|e| AppError::Internal {
+                message: e.to_string(),
+            })?;
+        let destination_file = destination.join(relative);
+        if let Some(parent) = destination_file.parent() {
+            fs::create_dir_all(parent).map_err(|e| AppError::Io {
+                message: e.to_string(),
+            })?;
+        }
+        fs::copy(&source_file, &destination_file).map_err(|e| AppError::Io {
+            message: format!("could not isolate {}: {e}", relative.display()),
+        })?;
+    }
+    Ok(())
+}
+
+fn workspace_manifest(root: &Path) -> Result<Vec<ManifestEntry>, AppError> {
+    walk_files(root)?
+        .into_iter()
+        .map(|path| {
+            let relative = path.strip_prefix(root).map_err(|e| AppError::Internal {
+                message: e.to_string(),
+            })?;
+            let mut file = fs::File::open(&path).map_err(|e| AppError::Io {
+                message: e.to_string(),
+            })?;
+            let mut hasher = Sha256::new();
+            let mut buffer = [0u8; 64 * 1024];
+            loop {
+                let read = file.read(&mut buffer).map_err(|e| AppError::Io {
+                    message: e.to_string(),
+                })?;
+                if read == 0 {
+                    break;
+                }
+                hasher.update(&buffer[..read]);
+            }
+            Ok(ManifestEntry {
+                path: relative.to_string_lossy().replace('\\', "/"),
+                bytes: file
+                    .metadata()
+                    .map_err(|e| AppError::Io {
+                        message: e.to_string(),
+                    })?
+                    .len(),
+                sha256: hex::encode(hasher.finalize()),
+            })
+        })
+        .collect()
+}
+
+async fn persist_manifest(
+    app_data: &Path,
+    run_id: &str,
+    name: &str,
+    workspace: &Path,
+) -> Result<(), AppError> {
+    let workspace = workspace.to_path_buf();
+    let entries = tokio::task::spawn_blocking(move || workspace_manifest(&workspace))
+        .await
+        .map_err(|e| AppError::Internal {
+            message: e.to_string(),
+        })??;
+    let dir = run_evidence_dir(app_data, run_id);
+    tokio::fs::create_dir_all(&dir).await?;
+    atomic_write(
+        &dir.join(format!("{name}.manifest.json")),
+        &serde_json::to_vec_pretty(&entries)?,
+    )
+    .await
+}
+
+async fn load_initial_manifest(
+    app_data: &Path,
+    run_id: &str,
+) -> Result<Vec<ManifestEntry>, AppError> {
+    let path = run_evidence_dir(app_data, run_id).join("initial.manifest.json");
+    let bytes = read_capped(&path, MAX_RUN_FILE_BYTES).await?;
+    Ok(serde_json::from_slice(&bytes)?)
+}
+
+fn manifest_changes(before: &[ManifestEntry], after: &[ManifestEntry]) -> Vec<WorkspaceChange> {
+    let before: HashMap<&str, &ManifestEntry> = before
+        .iter()
+        .map(|entry| (entry.path.as_str(), entry))
+        .collect();
+    let after: HashMap<&str, &ManifestEntry> = after
+        .iter()
+        .map(|entry| (entry.path.as_str(), entry))
+        .collect();
+    let mut paths: Vec<&str> = before.keys().chain(after.keys()).copied().collect();
+    paths.sort_unstable();
+    paths.dedup();
+    paths
+        .into_iter()
+        .filter_map(|path| match (before.get(path), after.get(path)) {
+            (None, Some(new)) => Some(WorkspaceChange {
+                path: path.into(),
+                kind: "added".into(),
+                before_sha256: None,
+                after_sha256: Some(new.sha256.clone()),
+            }),
+            (Some(old), None) => Some(WorkspaceChange {
+                path: path.into(),
+                kind: "removed".into(),
+                before_sha256: Some(old.sha256.clone()),
+                after_sha256: None,
+            }),
+            (Some(old), Some(new)) if old.sha256 != new.sha256 => Some(WorkspaceChange {
+                path: path.into(),
+                kind: "modified".into(),
+                before_sha256: Some(old.sha256.clone()),
+                after_sha256: Some(new.sha256.clone()),
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
+fn validated_workspace(run: &RunSummary, app_data: &Path) -> Result<PathBuf, AppError> {
+    let raw = run
+        .workspace_path
+        .as_ref()
+        .ok_or_else(|| AppError::InvalidArgument {
+            message: "this historical run has no isolated workspace".into(),
+        })?;
+    let workspace = PathBuf::from(raw)
+        .canonicalize()
+        .map_err(|e| AppError::InvalidArgument {
+            message: format!("isolated workspace is unavailable: {e}"),
+        })?;
+    let root = app_data
+        .join("state")
+        .join("run-workspaces")
+        .canonicalize()
+        .map_err(|e| AppError::Io {
+            message: format!("runtime workspace root is unavailable: {e}"),
+        })?;
+    if !workspace.starts_with(&root) || !workspace.is_dir() {
+        return Err(AppError::InvalidArgument {
+            message: "run workspace escaped the managed runtime area".into(),
+        });
+    }
+    Ok(workspace)
+}
+
+fn synchronize_snapshot(snapshot: &Path, destination: &Path) -> Result<(), AppError> {
+    let snapshot_files = walk_files(snapshot)?;
+    let expected: std::collections::HashSet<PathBuf> = snapshot_files
+        .iter()
+        .filter_map(|path| path.strip_prefix(snapshot).ok().map(Path::to_path_buf))
+        .collect();
+    for existing in walk_files(destination)? {
+        let relative = existing
+            .strip_prefix(destination)
+            .map_err(|e| AppError::Internal {
+                message: e.to_string(),
+            })?;
+        if !expected.contains(relative) {
+            fs::remove_file(&existing).map_err(|e| AppError::Io {
+                message: format!("rollback could not remove {}: {e}", relative.display()),
+            })?;
+        }
+    }
+    for source in snapshot_files {
+        let relative = source
+            .strip_prefix(snapshot)
+            .map_err(|e| AppError::Internal {
+                message: e.to_string(),
+            })?;
+        let target = destination.join(relative);
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent).map_err(|e| AppError::Io {
+                message: e.to_string(),
+            })?;
+        }
+        fs::copy(&source, &target).map_err(|e| AppError::Io {
+            message: format!("rollback could not restore {}: {e}", relative.display()),
+        })?;
+    }
+    Ok(())
+}
+
+fn apply_workspace_changes(
+    source: &Path,
+    workspace: &Path,
+    changes: &[WorkspaceChange],
+) -> Result<(), AppError> {
+    for change in changes {
+        let relative = Path::new(&change.path);
+        if relative.is_absolute() || change.path.split('/').any(|part| part == "..") {
+            return Err(AppError::InvalidArgument {
+                message: "unsafe path in workspace diff".into(),
+            });
+        }
+        let target = source.join(relative);
+        if !target.starts_with(source) {
+            return Err(AppError::InvalidArgument {
+                message: "workspace diff escaped source project".into(),
+            });
+        }
+        if change.kind == "removed" {
+            if target.exists() {
+                fs::remove_file(&target).map_err(|e| AppError::Io {
+                    message: e.to_string(),
+                })?;
+            }
+        } else {
+            let from = workspace.join(relative);
+            if let Some(parent) = target.parent() {
+                fs::create_dir_all(parent).map_err(|e| AppError::Io {
+                    message: e.to_string(),
+                })?;
+            }
+            fs::copy(&from, &target).map_err(|e| AppError::Io {
+                message: format!("could not apply {}: {e}", change.path),
+            })?;
+        }
+    }
+    Ok(())
 }
 
 async fn persist(state: &AppState, run: &RunSummary) -> Result<(), AppError> {
@@ -252,10 +623,16 @@ fn output_gate_passed(output: &str) -> bool {
 }
 
 fn validate_start_request(request: &StartRunRequest) -> Result<(), AppError> {
+    let stage_count = request.agent_slugs.len();
+    let structured =
+        request.stage_ids.len() == stage_count && request.stage_kinds.len() == stage_count;
     if request.runbook_id.trim().is_empty()
         || request.capability_id.trim().is_empty()
-        || request.agent_slugs.len() != 5
-        || request.stage_labels.len() != 5
+        || stage_count < 5
+        || stage_count > 20
+        || request.stage_labels.len() != stage_count
+        || (!request.stage_ids.is_empty() && !structured)
+        || (!request.stage_kinds.is_empty() && !structured)
         || request
             .agent_slugs
             .iter()
@@ -264,9 +641,15 @@ fn validate_start_request(request: &StartRunRequest) -> Result<(), AppError> {
             .stage_labels
             .iter()
             .any(|value| value.trim().is_empty())
+        || request.stage_kinds.iter().any(|kind| {
+            !matches!(
+                kind.as_str(),
+                "direction" | "architecture" | "development" | "qa" | "reality"
+            )
+        })
     {
         return Err(AppError::InvalidArgument {
-            message: "runbook, capability, five agents and five stage labels are required".into(),
+            message: "runbook, capabilities and a valid 5-20 stage pipeline are required".into(),
         });
     }
     Ok(())
@@ -366,14 +749,145 @@ pub async fn runtime_list(
     Ok(out)
 }
 
+async fn build_review(state: &AppState, run: &RunSummary) -> Result<RuntimeReview, AppError> {
+    let source = validate_project(&run.project_path, &state.app_data_dir)?;
+    let workspace = validated_workspace(run, &state.app_data_dir)?;
+    let initial = load_initial_manifest(&state.app_data_dir, &run.id).await?;
+    let source_for_manifest = source.clone();
+    let workspace_for_manifest = workspace.clone();
+    let (source_now, workspace_now) = tokio::try_join!(
+        tokio::task::spawn_blocking(move || workspace_manifest(&source_for_manifest)),
+        tokio::task::spawn_blocking(move || workspace_manifest(&workspace_for_manifest)),
+    )
+    .map_err(|e| AppError::Internal {
+        message: e.to_string(),
+    })?;
+    let source_now = source_now?;
+    let workspace_now = workspace_now?;
+    let applied_path =
+        run_evidence_dir(&state.app_data_dir, &run.id).join("applied-source.manifest.json");
+    let applied = match tokio::fs::read(applied_path).await {
+        Ok(bytes) => serde_json::from_slice::<Vec<ManifestEntry>>(&bytes).ok(),
+        Err(_) => None,
+    };
+    let already_applied = applied.as_ref().is_some_and(|manifest| {
+        manifest_changes(manifest, &source_now).is_empty()
+            && manifest_changes(manifest, &workspace_now).is_empty()
+    });
+    Ok(RuntimeReview {
+        run_id: run.id.clone(),
+        source_path: source.to_string_lossy().into_owned(),
+        workspace_path: workspace.to_string_lossy().into_owned(),
+        source_unchanged: already_applied || manifest_changes(&initial, &source_now).is_empty(),
+        changes: if already_applied {
+            Vec::new()
+        } else {
+            manifest_changes(&initial, &workspace_now)
+        },
+    })
+}
+
+#[tauri::command]
+pub async fn runtime_review(
+    state: State<'_, AppState>,
+    run_id: String,
+) -> Result<RuntimeReview, AppError> {
+    let run = load_run(&state, &run_id).await?;
+    build_review(&state, &run).await
+}
+
+#[tauri::command]
+pub async fn runtime_apply(
+    state: State<'_, AppState>,
+    run_id: String,
+) -> Result<RuntimeReview, AppError> {
+    let run = load_run(&state, &run_id).await?;
+    if matches!(run.status, RunStatus::Queued | RunStatus::Running) {
+        return Err(AppError::InvalidArgument {
+            message: "a running workspace cannot be applied".into(),
+        });
+    }
+    let review = build_review(&state, &run).await?;
+    if !review.source_unchanged {
+        return Err(AppError::InvalidArgument {
+            message:
+                "source project changed after this run started; review conflicts before applying"
+                    .into(),
+        });
+    }
+    let source = PathBuf::from(&review.source_path);
+    let workspace = PathBuf::from(&review.workspace_path);
+    let backup = state
+        .app_data_dir
+        .join("state")
+        .join("run-backups")
+        .join(&run.id)
+        .join("project");
+    let backup_source = source.clone();
+    let backup_destination = backup.clone();
+    tokio::task::spawn_blocking(move || copy_workspace(&backup_source, &backup_destination))
+        .await
+        .map_err(|e| AppError::Internal {
+            message: e.to_string(),
+        })??;
+    let apply_source = source.clone();
+    let apply_workspace = workspace.clone();
+    let changes = review.changes.clone();
+    let apply_result = tokio::task::spawn_blocking(move || {
+        apply_workspace_changes(&apply_source, &apply_workspace, &changes)
+    })
+    .await
+    .map_err(|e| AppError::Internal {
+        message: e.to_string(),
+    })?;
+    if let Err(apply_error) = apply_result {
+        let restore_source = source.clone();
+        let restore_backup = backup.clone();
+        tokio::task::spawn_blocking(move || synchronize_snapshot(&restore_backup, &restore_source))
+            .await
+            .map_err(|e| AppError::Internal {
+                message: e.to_string(),
+            })??;
+        return Err(apply_error);
+    }
+    persist_manifest(&state.app_data_dir, &run.id, "applied-source", &source).await?;
+    build_review(&state, &run).await
+}
+
+#[tauri::command]
+pub async fn runtime_discard_workspace(
+    state: State<'_, AppState>,
+    run_id: String,
+) -> Result<(), AppError> {
+    let mut run = load_run(&state, &run_id).await?;
+    if matches!(run.status, RunStatus::Queued | RunStatus::Running) {
+        return Err(AppError::InvalidArgument {
+            message: "a running workspace cannot be discarded".into(),
+        });
+    }
+    let workspace = validated_workspace(&run, &state.app_data_dir)?;
+    let run_dir = workspace.parent().ok_or_else(|| AppError::Internal {
+        message: "workspace has no managed parent".into(),
+    })?;
+    tokio::fs::remove_dir_all(run_dir)
+        .await
+        .map_err(|e| AppError::Io {
+            message: format!("could not discard isolated workspace: {e}"),
+        })?;
+    run.workspace_path = None;
+    run.updated_at = Utc::now();
+    persist(&state, &run).await
+}
+
 async fn resumable_run(
     state: &AppState,
     intent: &str,
     project_path: &str,
     runbook_id: &str,
     capability_id: &str,
+    capability_ids: &[String],
     expected: &[RunStage],
-) -> Option<(String, Vec<RunStage>)> {
+) -> Option<(String, Vec<RunStage>, PathBuf)> {
     let dir = runs_dir(state);
     let mut entries = tokio::fs::read_dir(dir).await.ok()?;
     let mut candidates = Vec::new();
@@ -393,7 +907,12 @@ async fn resumable_run(
             && run.project_path == project_path
             && run.runbook_id == runbook_id
             && run.capability_id == capability_id
+            && (run.capability_ids.is_empty() || run.capability_ids == capability_ids)
             && run.status != RunStatus::Succeeded
+            && run
+                .workspace_path
+                .as_ref()
+                .is_some_and(|path| Path::new(path).is_dir())
             && same_workflow
             && run.stages.iter().any(|stage| stage.status == "passed")
         {
@@ -402,6 +921,7 @@ async fn resumable_run(
     }
     candidates.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
     candidates.into_iter().next().map(|run| {
+        let workspace = PathBuf::from(run.workspace_path.as_deref().expect("filtered above"));
         let stages = expected
             .iter()
             .cloned()
@@ -417,7 +937,7 @@ async fn resumable_run(
                 stage
             })
             .collect();
-        (run.id, stages)
+        (run.id, stages, workspace)
     })
 }
 
@@ -483,37 +1003,65 @@ pub async fn runtime_start(
         .iter()
         .filter_map(|slug| catalog.get(slug).map(|agent| (slug.clone(), agent.body)))
         .collect();
-    if profiles.is_empty() {
+    if profiles.len() != request.agent_slugs.len() {
         return Err(AppError::InvalidArgument {
-            message: "none of the runbook agents resolved to real catalog personas".into(),
+            message: "every runbook agent must resolve to a real catalog persona".into(),
         });
     }
+    // Mission is loaded once, at run start, and never re-read mid-run —
+    // matches the existing resumable-run semantics and the explicit
+    // decision to defer Mission Brief versioning past this pass. Absent
+    // mission_id: mission stays None and every stage prompt is generated
+    // exactly as in Runtime v0.1 today.
+    let mission: Option<Mission> = match request.mission_id.as_ref() {
+        Some(id) => Some(mission::load_mission(&state, id).await?),
+        None => None,
+    };
     let project_path = project.to_string_lossy().into_owned();
-    let default_stages = initial_stages(&request.agent_slugs, &request.stage_labels);
+    let default_stages = initial_stages(
+        &request.agent_slugs,
+        &request.stage_labels,
+        &request.stage_ids,
+        &request.stage_kinds,
+    );
     let resume = resumable_run(
         &state,
         intent,
         &project_path,
         &request.runbook_id,
         &request.capability_id,
+        &request.capability_ids,
         &default_stages,
     )
     .await;
-    let stages = if let Some((previous_id, stages)) = resume {
+    let run_id = Uuid::new_v4().to_string();
+    let (stages, workspace) = if let Some((previous_id, stages, workspace)) = resume {
         if let Some(handle) = state.runtime_jobs.lock().await.remove(&previous_id) {
             handle.abort();
         }
-        stages
+        (stages, workspace)
     } else {
-        default_stages
+        let workspace = run_workspace_dir(&state.app_data_dir, &run_id);
+        let source = project.clone();
+        let destination = workspace.clone();
+        tokio::task::spawn_blocking(move || copy_workspace(&source, &destination))
+            .await
+            .map_err(|e| AppError::Internal {
+                message: e.to_string(),
+            })??;
+        (default_stages, workspace)
     };
+    persist_manifest(&state.app_data_dir, &run_id, "initial", &workspace).await?;
     let now = Utc::now();
     let run = RunSummary {
-        id: Uuid::new_v4().to_string(),
+        id: run_id,
         intent: intent.into(),
         project_path,
+        workspace_path: Some(workspace.to_string_lossy().into_owned()),
         runbook_id: request.runbook_id,
         capability_id: request.capability_id,
+        capability_ids: request.capability_ids,
+        mission_id: request.mission_id,
         provider_id: request.provider_id,
         status: RunStatus::Queued,
         current_stage: None,
@@ -553,29 +1101,58 @@ pub async fn runtime_start(
                 run: current.clone(),
             });
             let mut passed = false;
-            let max_attempts = if stage_id == "qa" { 3 } else { 1 };
+            let is_qa = current.stages[index].kind == "qa" || stage_id == "qa";
+            let max_attempts = if is_qa { 3 } else { 1 };
             while current.stages[index].attempt <= max_attempts {
+                let attempt = current.stages[index].attempt;
+                let workspace = PathBuf::from(
+                    current
+                        .workspace_path
+                        .as_deref()
+                        .unwrap_or(&current.project_path),
+                );
+                let _ = persist_manifest(
+                    &app_data,
+                    &current.id,
+                    &format!("{stage_id}-{attempt}-before"),
+                    &workspace,
+                )
+                .await;
                 let prompt = stage_prompt(
                     &current,
                     index,
                     profiles.get(&current.stages[index].agent_slug),
+                    mission.as_ref(),
                 );
                 match run_codex_stage(
-                    Path::new(&current.project_path),
+                    &workspace,
                     &prompt,
                     &current.id,
                     &stage_id,
+                    attempt,
+                    &run_evidence_dir(&app_data, &current.id),
                     &on_event,
                 )
                 .await
                 {
                     Ok(true) => {
+                        let _ = persist_manifest(
+                            &app_data,
+                            &current.id,
+                            &format!("{stage_id}-{attempt}-after"),
+                            &workspace,
+                        )
+                        .await;
                         passed = true;
                         break;
                     }
-                    Ok(false)
-                        if stage_id == "qa" && current.stages[index].attempt < max_attempts =>
-                    {
+                    Ok(false) if is_qa && current.stages[index].attempt < max_attempts => {
+                        let Some(development_index) = remediation_stage_index(&current, index)
+                        else {
+                            current.error =
+                                Some("QA has no corresponding development stage".into());
+                            break;
+                        };
                         let attempt = current.stages[index].attempt;
                         let _ = on_event.send(RunEvent::GateFailed {
                             run_id: current.id.clone(),
@@ -584,9 +1161,9 @@ pub async fn runtime_start(
                             attempt,
                         });
                         current.stages[index].status = "failed".into();
-                        current.stages[2].status = "running".into();
-                        current.stages[2].attempt += 1;
-                        current.current_stage = Some("development".into());
+                        current.stages[development_index].status = "running".into();
+                        current.stages[development_index].attempt += 1;
+                        current.current_stage = Some(current.stages[development_index].id.clone());
                         current.updated_at = Utc::now();
                         let _ = persist_at(&app_data, &current).await;
                         let _ = on_event.send(RunEvent::RunUpdated {
@@ -594,13 +1171,15 @@ pub async fn runtime_start(
                         });
                         let fix_prompt = format!(
                             "The QA gate failed on attempt {attempt}. This is a remediation pass. Inspect the QA evidence and implement every in-scope requirement that is still missing; do not limit the repair to your catalog specialty. Fix the root causes and run the relevant checks.\n\n{}",
-                            stage_prompt(&current, 2, profiles.get(&current.stages[2].agent_slug))
+                            stage_prompt(&current, development_index, profiles.get(&current.stages[development_index].agent_slug), mission.as_ref())
                         );
                         if !run_codex_stage(
-                            Path::new(&current.project_path),
+                            &workspace,
                             &fix_prompt,
                             &current.id,
                             "development",
+                            current.stages[development_index].attempt,
+                            &run_evidence_dir(&app_data, &current.id),
                             &on_event,
                         )
                         .await
@@ -611,7 +1190,7 @@ pub async fn runtime_start(
                             );
                             break;
                         }
-                        current.stages[2].status = "passed".into();
+                        current.stages[development_index].status = "passed".into();
                         current.stages[index].attempt += 1;
                         current.stages[index].status = "running".into();
                         current.current_stage = Some(stage_id.clone());
@@ -621,7 +1200,22 @@ pub async fn runtime_start(
                             run: current.clone(),
                         });
                     }
-                    Ok(false) => break,
+                    Ok(false) => {
+                        let _ = persist_manifest(
+                            &app_data,
+                            &current.id,
+                            &format!("{stage_id}-{attempt}-after"),
+                            &workspace,
+                        )
+                        .await;
+                        let _ = on_event.send(RunEvent::GateFailed {
+                            run_id: current.id.clone(),
+                            stage_id: stage_id.clone(),
+                            reason: "stage did not provide INTENTOS_GATE:PASS".into(),
+                            attempt,
+                        });
+                        break;
+                    }
                     Err(e) => {
                         current.error = Some(clean_text(&e.to_string()));
                         break;
@@ -676,6 +1270,29 @@ fn fail_run(run: &mut RunSummary, index: usize, reason: &str) {
     run.updated_at = Utc::now();
 }
 
+fn remediation_stage_index(run: &RunSummary, qa_index: usize) -> Option<usize> {
+    let qa_prefix = run.stages[qa_index].id.split(':').next();
+    run.stages
+        .iter()
+        .enumerate()
+        .take(qa_index)
+        .rev()
+        .find(|(_, stage)| {
+            (stage.kind == "development" || stage.id == "development")
+                && (qa_prefix == Some("qa") || stage.id.split(':').next() == qa_prefix)
+        })
+        .map(|(index, _)| index)
+        .or_else(|| {
+            run.stages
+                .iter()
+                .enumerate()
+                .take(qa_index)
+                .rev()
+                .find(|(_, stage)| stage.kind == "development" || stage.id == "development")
+                .map(|(index, _)| index)
+        })
+}
+
 async fn persist_at(app_data: &Path, run: &RunSummary) -> Result<(), AppError> {
     let dir = app_data.join("state").join("runs");
     tokio::fs::create_dir_all(&dir).await?;
@@ -686,14 +1303,31 @@ async fn persist_at(app_data: &Path, run: &RunSummary) -> Result<(), AppError> {
     .await
 }
 
-fn stage_prompt(run: &RunSummary, index: usize, persona: Option<&String>) -> String {
+fn stage_prompt(
+    run: &RunSummary,
+    index: usize,
+    persona: Option<&String>,
+    mission: Option<&Mission>,
+) -> String {
     let s = &run.stages[index];
-    let implementation_scope = if s.id == "development" && run.capability_id == "iot" {
+    // Additive only: when no Mission is attached, brief_section is empty
+    // and the format! below is byte-identical to Runtime v0.1's original
+    // output. When a Mission is attached, its deterministic brief is
+    // interpolated ahead of the raw intent — nothing about USER INTENT or
+    // PROJECT below changes.
+    let brief_section = match mission {
+        Some(m) => format!("MISSION BRIEF:\n{}\n\n", mission::mission_brief(m)),
+        None => String::new(),
+    };
+    let implementation_scope = if (s.kind == "development" || s.id == "development")
+        && (s.id.starts_with("iot:") || run.capability_id == "iot")
+    {
         "\nIOT FULL-VERTICAL IMPLEMENTATION MANDATE:\n- This stage owns the complete local prototype described by the user, not firmware alone.\n- Preserve and verify existing firmware work, and also implement the in-scope MQTT path, consumer/backend, persistence, alert rules, API, and responsive dashboard when the intent requires them.\n- Hardware purchase and physical validation remain out of scope unless explicitly authorized; use reproducible local simulation for those boundaries.\n- Read QA evidence already present in the workspace and close every actionable in-scope gap before claiming PASS.\n"
     } else {
         ""
     };
-    format!("You are the {} agent ({}) in the IntentOS '{}' autonomous pipeline.\n\nINTENTOS ORCHESTRATOR OVERRIDES (highest priority for this run):\n- The USER INTENT below is the authoritative product specification.\n- Catalog persona references to missing templates, memory-bank files, frameworks, scripts, or organizational conventions are optional guidance, not prerequisites.\n- If useful project documentation is missing, create the minimal appropriate documentation yourself from the USER INTENT and continue autonomously.\n- Choose reasonable technical defaults when the user explicitly delegates the choice. Do not fail merely because an auxiliary file, preferred framework, or prior setup is absent.\n- Do not ask the user to implement or configure anything unless human authorization is genuinely required.\n- Stay within the requested scope and do not invent product requirements.\n{}\nCATALOG PERSONA INSTRUCTIONS:\n{}\n\nUSER INTENT:\n{}\nPROJECT: {}\n\nWork only inside the project. Inspect existing work and perform this stage for real. Run relevant checks. Do not claim success without evidence. End your final response with exactly INTENTOS_GATE:PASS only if this stage genuinely passes; otherwise end with INTENTOS_GATE:FAIL and explain a genuine blocker. Previous stages are present in the workspace.", s.label, s.agent_slug, run.runbook_id, implementation_scope, persona.map(String::as_str).unwrap_or("Catalog persona unavailable; disclose this limitation."), run.intent, run.project_path)
+    let workspace = run.workspace_path.as_deref().unwrap_or(&run.project_path);
+    format!("You are the {} agent ({}) in the IntentOS '{}' autonomous pipeline.\n\nINTENTOS ORCHESTRATOR OVERRIDES (highest priority for this run):\n- The USER INTENT below is the authoritative product specification.\n- Catalog persona references to missing templates, memory-bank files, frameworks, scripts, or organizational conventions are optional guidance, not prerequisites.\n- If useful project documentation is missing, create the minimal appropriate documentation yourself from the USER INTENT and continue autonomously.\n- Choose reasonable technical defaults when the user explicitly delegates the choice. Do not fail merely because an auxiliary file, preferred framework, or prior setup is absent.\n- Do not ask the user to implement or configure anything unless human authorization is genuinely required.\n- Stay within the requested scope and do not invent product requirements.\n- This is an isolated working copy. Never access or modify the source project outside WORKSPACE.\n{}\nCATALOG PERSONA INSTRUCTIONS:\n{}\n\n{}USER INTENT:\n{}\nSOURCE PROJECT (read-only reference; do not access): {}\nWORKSPACE: {}\n\nWork only inside WORKSPACE. Inspect existing work and perform this stage for real. Run relevant checks. Do not claim success without evidence. End your final response with exactly INTENTOS_GATE:PASS only if this stage genuinely passes; otherwise end with INTENTOS_GATE:FAIL and explain a genuine blocker. Previous stages are present in the workspace.", s.label, s.agent_slug, run.runbook_id, implementation_scope, persona.map(String::as_str).unwrap_or("Catalog persona unavailable; disclose this limitation."), brief_section, run.intent, run.project_path, workspace)
 }
 
 async fn run_codex_stage(
@@ -701,6 +1335,8 @@ async fn run_codex_stage(
     prompt: &str,
     run_id: &str,
     stage_id: &str,
+    attempt: u8,
+    evidence_dir: &Path,
     channel: &Channel<RunEvent>,
 ) -> Result<bool, AppError> {
     let execution = async {
@@ -734,8 +1370,11 @@ async fn run_codex_stage(
         let err_run = run_id.to_string();
         let err_stage = stage_id.to_string();
         let stderr_task = tokio::spawn(async move {
+            let mut captured = String::new();
             let mut lines = BufReader::new(stderr).lines();
             while let Ok(Some(line)) = lines.next_line().await {
+                captured.push_str(&clean_text(&line));
+                captured.push('\n');
                 let _ = err_channel.send(RunEvent::Output {
                     run_id: err_run.clone(),
                     stage_id: err_stage.clone(),
@@ -743,6 +1382,7 @@ async fn run_codex_stage(
                     text: clean_text(&line),
                 });
             }
+            captured
         });
         let mut lines = BufReader::new(stdout).lines();
         let mut combined = String::new();
@@ -758,7 +1398,18 @@ async fn run_codex_stage(
             });
         }
         let status = child.wait().await?;
-        let _ = stderr_task.await;
+        let captured_stderr = stderr_task.await.unwrap_or_default();
+        tokio::fs::create_dir_all(evidence_dir).await?;
+        atomic_write(
+            &evidence_dir.join(format!("{stage_id}-{attempt}.stdout.log")),
+            combined.as_bytes(),
+        )
+        .await?;
+        atomic_write(
+            &evidence_dir.join(format!("{stage_id}-{attempt}.stderr.log")),
+            captured_stderr.as_bytes(),
+        )
+        .await?;
         Ok::<bool, AppError>(status.success() && output_gate_passed(&combined))
     };
     tokio::time::timeout(Duration::from_secs(60 * 30), execution)
@@ -777,9 +1428,13 @@ mod tests {
             project_path: "/tmp/project".into(),
             runbook_id: "startup-mvp".into(),
             capability_id: "digital-experience".into(),
+            capability_ids: vec!["digital-experience".into()],
+            stage_ids: Vec::new(),
+            stage_kinds: Vec::new(),
             stage_labels: (1..=5).map(|index| format!("Stage {index}")).collect(),
             agent_slugs: (1..=5).map(|index| format!("agent-{index}")).collect(),
             provider_id: PROVIDER_ID.into(),
+            mission_id: None,
         }
     }
     #[test]
@@ -789,7 +1444,7 @@ mod tests {
     }
     #[test]
     fn creates_five_real_pipeline_stages() {
-        let s = initial_stages(&[], &[]);
+        let s = initial_stages(&[], &[], &[], &[]);
         assert_eq!(s.len(), 5);
         assert_eq!(s[3].id, "qa");
         assert_eq!(s[4].id, "reality-check");
@@ -812,10 +1467,70 @@ mod tests {
             "Reality Check",
         ]
         .map(str::to_string);
-        let s = initial_stages(&agents, &labels);
+        let ids = [
+            "direction",
+            "iot:architecture",
+            "iot:development",
+            "iot:qa",
+            "reality-check",
+        ]
+        .map(str::to_string);
+        let kinds =
+            ["direction", "architecture", "development", "qa", "reality"].map(str::to_string);
+        let s = initial_stages(&agents, &labels, &ids, &kinds);
         assert_eq!(s[1].label, "Arquitectura IoT");
         assert_eq!(s[2].agent_slug, "firmware-engineer");
         assert_eq!(s[3].label, "QA físico");
+    }
+    #[test]
+    fn composes_variable_pipeline_and_maps_each_qa_to_its_developer() {
+        let ids = [
+            "direction",
+            "digital-experience:architecture",
+            "systems-data:architecture",
+            "digital-experience:development",
+            "systems-data:development",
+            "digital-experience:qa",
+            "systems-data:qa",
+            "reality-check",
+        ]
+        .map(str::to_string);
+        let kinds = [
+            "direction",
+            "architecture",
+            "architecture",
+            "development",
+            "development",
+            "qa",
+            "qa",
+            "reality",
+        ]
+        .map(str::to_string);
+        let labels = ids.clone();
+        let agents = ids.clone().map(|id| format!("agent-{id}"));
+        let stages = initial_stages(&agents, &labels, &ids, &kinds);
+        let now = Utc::now();
+        let run = RunSummary {
+            id: "multi".into(),
+            intent: "hybrid".into(),
+            project_path: "/tmp/project".into(),
+            workspace_path: None,
+            runbook_id: "startup-mvp".into(),
+            capability_id: "digital-experience".into(),
+            capability_ids: vec!["digital-experience".into(), "systems-data".into()],
+            mission_id: None,
+            provider_id: PROVIDER_ID.into(),
+            status: RunStatus::Running,
+            current_stage: None,
+            stages,
+            created_at: now,
+            updated_at: now,
+            completed_at: None,
+            error: None,
+        };
+        assert_eq!(run.stages.len(), 8);
+        assert_eq!(remediation_stage_index(&run, 5), Some(3));
+        assert_eq!(remediation_stage_index(&run, 6), Some(4));
     }
     #[test]
     fn truncates_and_redacts_output() {
@@ -840,6 +1555,88 @@ mod tests {
         ));
     }
     #[test]
+    fn isolated_workspace_preserves_source_and_excludes_git_metadata() {
+        let source = tempfile::tempdir().unwrap();
+        let destination_parent = tempfile::tempdir().unwrap();
+        let destination = destination_parent.path().join("workspace");
+        fs::create_dir_all(source.path().join("nested")).unwrap();
+        fs::create_dir_all(source.path().join(".git")).unwrap();
+        fs::write(source.path().join("nested/app.txt"), b"original").unwrap();
+        fs::write(source.path().join(".git/config"), b"secret metadata").unwrap();
+
+        copy_workspace(source.path(), &destination).unwrap();
+        fs::write(destination.join("nested/app.txt"), b"agent edit").unwrap();
+
+        assert_eq!(
+            fs::read(source.path().join("nested/app.txt")).unwrap(),
+            b"original"
+        );
+        assert_eq!(
+            fs::read(destination.join("nested/app.txt")).unwrap(),
+            b"agent edit"
+        );
+        assert!(!destination.join(".git").exists());
+    }
+    #[test]
+    fn manifest_is_sorted_and_hashes_file_contents() {
+        let workspace = tempfile::tempdir().unwrap();
+        fs::write(workspace.path().join("b.txt"), b"second").unwrap();
+        fs::write(workspace.path().join("a.txt"), b"first").unwrap();
+
+        let manifest = workspace_manifest(workspace.path()).unwrap();
+        assert_eq!(
+            manifest
+                .iter()
+                .map(|entry| entry.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a.txt", "b.txt"]
+        );
+        assert_eq!(manifest[0].bytes, 5);
+        assert_eq!(manifest[0].sha256, hex::encode(Sha256::digest(b"first")));
+    }
+    #[test]
+    fn manifest_diff_classifies_added_modified_and_removed() {
+        let entry = |path: &str, hash: &str| ManifestEntry {
+            path: path.into(),
+            bytes: 1,
+            sha256: hash.into(),
+        };
+        let before = vec![
+            entry("modified.txt", "old"),
+            entry("removed.txt", "gone"),
+            entry("same.txt", "same"),
+        ];
+        let after = vec![
+            entry("added.txt", "new"),
+            entry("modified.txt", "newer"),
+            entry("same.txt", "same"),
+        ];
+        let changes = manifest_changes(&before, &after);
+        assert_eq!(
+            changes
+                .iter()
+                .map(|change| (change.path.as_str(), change.kind.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("added.txt", "added"),
+                ("modified.txt", "modified"),
+                ("removed.txt", "removed")
+            ]
+        );
+    }
+    #[test]
+    fn apply_changes_rejects_parent_traversal() {
+        let source = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let changes = vec![WorkspaceChange {
+            path: "../escape.txt".into(),
+            kind: "added".into(),
+            before_sha256: None,
+            after_sha256: Some("hash".into()),
+        }];
+        assert!(apply_workspace_changes(source.path(), workspace.path(), &changes).is_err());
+    }
+    #[test]
     fn start_contract_requires_a_complete_five_stage_team() {
         assert!(validate_start_request(&valid_request()).is_ok());
 
@@ -862,12 +1659,15 @@ mod tests {
             id: "run".into(),
             intent: "intent".into(),
             project_path: "/tmp/project".into(),
+            workspace_path: None,
             runbook_id: "startup-mvp".into(),
             capability_id: "iot".into(),
+            capability_ids: vec!["iot".into()],
+            mission_id: None,
             provider_id: PROVIDER_ID.into(),
             status: RunStatus::Running,
             current_stage: Some("development".into()),
-            stages: initial_stages(&[], &[]),
+            stages: initial_stages(&[], &[], &[], &[]),
             created_at: now,
             updated_at: now,
             completed_at: None,
@@ -888,12 +1688,15 @@ mod tests {
             id: "old-run".into(),
             intent: "intent".into(),
             project_path: "/tmp/project".into(),
+            workspace_path: None,
             runbook_id: "startup-mvp".into(),
             capability_id: "iot".into(),
+            capability_ids: vec!["iot".into()],
+            mission_id: None,
             provider_id: PROVIDER_ID.into(),
             status: RunStatus::Failed,
             current_stage: Some("development".into()),
-            stages: initial_stages(&[], &[]),
+            stages: initial_stages(&[], &[], &[], &[]),
             created_at: now,
             updated_at: now,
             completed_at: Some(now),
@@ -911,20 +1714,100 @@ mod tests {
             id: "run".into(),
             intent: "ESP32, MQTT, API and dashboard".into(),
             project_path: "/tmp/project".into(),
+            workspace_path: None,
             runbook_id: "startup-mvp".into(),
             capability_id: "iot".into(),
+            capability_ids: vec!["iot".into()],
+            mission_id: None,
             provider_id: PROVIDER_ID.into(),
             status: RunStatus::Running,
             current_stage: Some("development".into()),
-            stages: initial_stages(&[], &[]),
+            stages: initial_stages(&[], &[], &[], &[]),
             created_at: now,
             updated_at: now,
             completed_at: None,
             error: None,
         };
         run.stages[2].id = "development".into();
-        let prompt = stage_prompt(&run, 2, None);
+        let prompt = stage_prompt(&run, 2, None, None);
         assert!(prompt.contains("IOT FULL-VERTICAL IMPLEMENTATION MANDATE"));
         assert!(prompt.contains("consumer/backend, persistence, alert rules, API"));
+    }
+
+    #[test]
+    fn stage_prompt_without_mission_omits_the_brief_section() {
+        // Backward-compatibility guarantee: a run with no Mission attached
+        // must not gain a MISSION BRIEF section — this is what keeps
+        // Runtime v0.1's frozen contract intact for every existing caller.
+        let now = Utc::now();
+        let run = RunSummary {
+            id: "run".into(),
+            intent: "Build a verified product".into(),
+            project_path: "/tmp/project".into(),
+            workspace_path: None,
+            runbook_id: "startup-mvp".into(),
+            capability_id: "digital-experience".into(),
+            capability_ids: vec!["digital-experience".into()],
+            mission_id: None,
+            provider_id: PROVIDER_ID.into(),
+            status: RunStatus::Running,
+            current_stage: Some("development".into()),
+            stages: initial_stages(&[], &[], &[], &[]),
+            created_at: now,
+            updated_at: now,
+            completed_at: None,
+            error: None,
+        };
+        let prompt = stage_prompt(&run, 2, None, None);
+        assert!(!prompt.contains("MISSION BRIEF"));
+        assert!(prompt.contains("USER INTENT:\nBuild a verified product"));
+    }
+
+    #[test]
+    fn stage_prompt_with_mission_prepends_the_brief_before_user_intent() {
+        let now = Utc::now();
+        let mission = Mission {
+            id: "11111111-1111-1111-1111-111111111111".into(),
+            project_path: "/tmp/project".into(),
+            objective: "Build a booking website".into(),
+            scope_statement: "Marketing site with a booking form".into(),
+            exclusions: vec!["Payment processing".into()],
+            acceptance_criteria: vec![],
+            client_locale: Some("es-CL".into()),
+            target_markets: vec![],
+            delivery_locales: vec![],
+            agency_jurisdiction: None,
+            engagement_regime: crate::mission::EngagementRegime::Fixed,
+            adjustment_budget: None,
+            change_policy_note: None,
+            status: crate::mission::MissionStatus::Approved,
+            approved_by_ncto: true,
+            created_at: now,
+            updated_at: now,
+        };
+        let run = RunSummary {
+            id: "run".into(),
+            intent: "Build a verified product".into(),
+            project_path: "/tmp/project".into(),
+            workspace_path: None,
+            runbook_id: "startup-mvp".into(),
+            capability_id: "digital-experience".into(),
+            capability_ids: vec!["digital-experience".into()],
+            mission_id: Some(mission.id.clone()),
+            provider_id: PROVIDER_ID.into(),
+            status: RunStatus::Running,
+            current_stage: Some("development".into()),
+            stages: initial_stages(&[], &[], &[], &[]),
+            created_at: now,
+            updated_at: now,
+            completed_at: None,
+            error: None,
+        };
+        let prompt = stage_prompt(&run, 2, None, Some(&mission));
+        assert!(prompt.contains("MISSION BRIEF"));
+        assert!(prompt.contains("EXPLICITLY OUT OF SCOPE"));
+        let brief_pos = prompt.find("MISSION BRIEF").unwrap();
+        let intent_pos = prompt.find("USER INTENT:").unwrap();
+        assert!(brief_pos < intent_pos);
     }
 }
