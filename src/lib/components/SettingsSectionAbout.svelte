@@ -61,6 +61,18 @@
     </div>
   </dl>
 
+  <section class="credits" aria-labelledby="intentos-credits-title">
+    <p class="eyebrow">RECONOCIMIENTOS</p>
+    <h3 id="intentos-credits-title">IntentOS</h3>
+    <dl>
+      <div><dt>Diseño y dirección</dt><dd>Wladimir Arriagada Tenorio · NCTO</dd></div>
+      <div><dt>Base original</dt><dd>Agency Agents, creado por Michael Sitarzewski</dd></div>
+      <div><dt>Ingeniería colaborativa</dt><dd>Codex y Claude</dd></div>
+      <div><dt>Aceleración de IA</dt><dd>NVIDIA · integración local en desarrollo</dd></div>
+    </dl>
+    <p class="principle">Reconocimiento sin dependencia. Integración sin pérdida de identidad.</p>
+  </section>
+
   <div class="affirm">
     <h3>{i18n.t("settings.about.privacyTitle")}</h3>
     <p>{i18n.t("settings.about.privacyBody")}</p>
@@ -101,6 +113,29 @@
     color: var(--color-text-primary);
   }
   .mono { font-family: var(--font-mono); font-size: var(--text-mono); }
+  .credits {
+    padding: var(--space-4);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-md);
+    background: var(--color-surface-raised);
+  }
+  .credits .eyebrow {
+    margin: 0 0 4px;
+    color: var(--color-brand);
+    font: 700 10px var(--font-mono);
+    letter-spacing: .14em;
+  }
+  .credits h3 { margin-bottom: var(--space-3); font-size: var(--text-h1); }
+  .credits dl { display: flex; flex-direction: column; gap: 9px; }
+  .credits dl div { display: grid; grid-template-columns: 150px 1fr; gap: var(--space-3); }
+  .credits .principle {
+    margin: var(--space-4) 0 0;
+    padding-top: var(--space-3);
+    border-top: 1px solid var(--color-border);
+    color: var(--color-text-secondary);
+    font-size: var(--text-body-sm);
+    font-style: italic;
+  }
   .link {
     display: inline-flex;
     align-items: center;
@@ -133,5 +168,8 @@
     font-size: var(--text-body-sm);
     color: var(--color-text-secondary);
     line-height: var(--lh-normal);
+  }
+  @media (max-width: 620px) {
+    .credits dl div { grid-template-columns: 1fr; gap: 2px; }
   }
 </style>
