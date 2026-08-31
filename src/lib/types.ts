@@ -494,6 +494,19 @@ export interface AutomaticProject {
   path: string;
 }
 
+export interface TemporalMissionRef {
+  workflowId: string;
+  missionId: string;
+  status: "awaitingApproval";
+}
+
+export interface DurableMissionSnapshot {
+  missionId: string;
+  proposalRevision: number;
+  status: "awaitingApproval" | "approved" | "rejected" | "cancelled";
+  reason: string | null;
+}
+
 export type RuntimeOutputStream = "stdout" | "stderr";
 
 export interface WorkspaceChange {

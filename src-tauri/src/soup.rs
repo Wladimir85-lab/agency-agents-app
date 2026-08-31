@@ -19,10 +19,10 @@
 //! here. Adding them later is a separate, additive change to this same
 //! module; it does not require touching any other Fabric contract.
 
-use std::{path::PathBuf, time::Duration};
-use serde::Serialize;
-use tokio::process::Command;
 use crate::error::AppError;
+use serde::Serialize;
+use std::{path::PathBuf, time::Duration};
+use tokio::process::Command;
 
 /// Per-invocation ceiling. Dataset operations can legitimately run longer
 /// than a network handshake (unlike Temporal's 4s connect timeout), but an
@@ -86,12 +86,16 @@ pub struct SoupCommandResult {
 }
 
 fn internal(context: &str, error: impl std::fmt::Display) -> AppError {
-    AppError::Internal { message: format!("{context}: {error}") }
+    AppError::Internal {
+        message: format!("{context}: {error}"),
+    }
 }
 
 fn require_path(path: &str) -> Result<(), AppError> {
     if path.trim().is_empty() {
-        return Err(AppError::InvalidArgument { message: "dataset path is required".into() });
+        return Err(AppError::InvalidArgument {
+            message: "dataset path is required".into(),
+        });
     }
     Ok(())
 }
@@ -147,7 +151,10 @@ pub async fn soup_status() -> SoupRuntimeStatus {
 }
 
 fn first_line(text: &str) -> Option<String> {
-    text.lines().next().map(|line| line.trim().to_string()).filter(|line| !line.is_empty())
+    text.lines()
+        .next()
+        .map(|line| line.trim().to_string())
+        .filter(|line| !line.is_empty())
 }
 
 #[tauri::command]
@@ -217,7 +224,10 @@ mod tests {
 
     #[test]
     fn first_line_extracts_and_trims() {
-        assert_eq!(first_line("soup 0.73.2\nmore stuff\n"), Some("soup 0.73.2".to_string()));
+        assert_eq!(
+            first_line("soup 0.73.2\nmore stuff\n"),
+            Some("soup 0.73.2".to_string())
+        );
         assert_eq!(first_line(""), None);
         assert_eq!(first_line("   \n"), None);
     }
@@ -244,7 +254,11 @@ mod tests {
             .expect("create temp fixture");
         writeln!(file, r#"{{"instruction": "What is 2+2?", "output": "4"}}"#).unwrap();
         writeln!(file, r#"{{"instruction": "What is 2+2?", "output": "4"}}"#).unwrap();
-        writeln!(file, r#"{{"instruction": "Capital of France?", "output": "Paris"}}"#).unwrap();
+        writeln!(
+            file,
+            r#"{{"instruction": "Capital of France?", "output": "Paris"}}"#
+        )
+        .unwrap();
         file.flush().unwrap();
         file
     }
@@ -253,8 +267,15 @@ mod tests {
     #[ignore = "requires the real `soup` CLI on PATH"]
     async fn soup_status_reports_the_real_installation() {
         let status = soup_status().await;
-        assert!(status.available, "expected soup doctor to succeed: {}", status.message);
-        assert!(status.version.is_some(), "expected a version line from soup doctor's output");
+        assert!(
+            status.available,
+            "expected soup doctor to succeed: {}",
+            status.message
+        );
+        assert!(
+            status.version.is_some(),
+            "expected a version line from soup doctor's output"
+        );
     }
 
     #[tokio::test]
@@ -262,7 +283,9 @@ mod tests {
     async fn soup_inspect_dataset_returns_real_stats_for_a_fixture_file() {
         let fixture = alpaca_fixture();
         let path = fixture.path().to_string_lossy().into_owned();
-        let result = soup_inspect_dataset(path).await.expect("soup data inspect should run");
+        let result = soup_inspect_dataset(path)
+            .await
+            .expect("soup data inspect should run");
         assert!(result.ok, "stderr: {}", result.stderr);
         assert!(result.stdout.contains("Total samples"));
         assert!(result.stdout.contains('3'));
@@ -273,7 +296,9 @@ mod tests {
     async fn soup_validate_dataset_auto_detects_alpaca_format() {
         let fixture = alpaca_fixture();
         let path = fixture.path().to_string_lossy().into_owned();
-        let result = soup_validate_dataset(path).await.expect("soup data validate should run");
+        let result = soup_validate_dataset(path)
+            .await
+            .expect("soup data validate should run");
         assert!(result.ok, "stderr: {}", result.stderr);
         assert!(result.stdout.to_lowercase().contains("alpaca"));
     }
@@ -283,7 +308,9 @@ mod tests {
     async fn soup_dedup_dataset_removes_the_duplicate_row() {
         let fixture = alpaca_fixture();
         let path = fixture.path().to_string_lossy().into_owned();
-        let result = soup_dedup_dataset(path).await.expect("soup data dedup should run");
+        let result = soup_dedup_dataset(path)
+            .await
+            .expect("soup data dedup should run");
         assert!(result.ok, "stderr: {}", result.stderr);
         assert!(result.stdout.contains("3 -> 2 rows"));
 

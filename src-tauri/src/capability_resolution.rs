@@ -220,7 +220,10 @@ mod tests {
         // (e.g. "digital-experience") here — the two id spaces must never
         // collide, since they mean structurally different things.
         for id in ["dataset.inspect", "dataset.validate", "dataset.dedup"] {
-            assert!(providers_for(id).is_some(), "{id} should resolve to a provider list");
+            assert!(
+                providers_for(id).is_some(),
+                "{id} should resolve to a provider list"
+            );
             assert!(id.starts_with("dataset."));
         }
         assert!(providers_for("digital-experience").is_none());
@@ -238,7 +241,11 @@ mod tests {
             .expect("create temp fixture");
         writeln!(file, r#"{{"instruction": "What is 2+2?", "output": "4"}}"#).unwrap();
         writeln!(file, r#"{{"instruction": "What is 2+2?", "output": "4"}}"#).unwrap();
-        writeln!(file, r#"{{"instruction": "Capital of France?", "output": "Paris"}}"#).unwrap();
+        writeln!(
+            file,
+            r#"{{"instruction": "Capital of France?", "output": "Paris"}}"#
+        )
+        .unwrap();
         file.flush().unwrap();
         file
     }
@@ -250,7 +257,10 @@ mod tests {
             .await
             .expect("soup should be available and resolve");
         assert_eq!(resolution.resolved_provider_id, "soup");
-        assert!(resolution.candidates.iter().any(|c| c.provider_id == "soup" && c.available));
+        assert!(resolution
+            .candidates
+            .iter()
+            .any(|c| c.provider_id == "soup" && c.available));
     }
 
     #[tokio::test]
@@ -258,10 +268,16 @@ mod tests {
     async fn invokes_dataset_inspect_through_the_registry_and_gets_real_soup_output() {
         let fixture = alpaca_fixture();
         let path = fixture.path().to_string_lossy().into_owned();
-        let value = capability_invoke("dataset.inspect".into(), serde_json::json!({ "path": path }))
-            .await
-            .expect("resolution + invocation should succeed against the real soup install");
-        let stdout = value.get("stdout").and_then(Value::as_str).unwrap_or_default();
+        let value = capability_invoke(
+            "dataset.inspect".into(),
+            serde_json::json!({ "path": path }),
+        )
+        .await
+        .expect("resolution + invocation should succeed against the real soup install");
+        let stdout = value
+            .get("stdout")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
         assert!(stdout.contains("Total samples"));
     }
 
@@ -273,7 +289,10 @@ mod tests {
         let value = capability_invoke("dataset.dedup".into(), serde_json::json!({ "path": path }))
             .await
             .expect("resolution + invocation should succeed against the real soup install");
-        let stdout = value.get("stdout").and_then(Value::as_str).unwrap_or_default();
+        let stdout = value
+            .get("stdout")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
         assert!(stdout.contains("3 -> 2 rows"));
 
         // Same cwd-output quirk as soup.rs's own dedup test — clean it up.
@@ -294,6 +313,9 @@ mod tests {
         .await
         .expect("soup itself runs; it just reports a non-zero exit for a missing file");
         let ok = value.get("ok").and_then(Value::as_bool).unwrap_or(true);
-        assert!(!ok, "expected a domain-level failure (ok:false), got: {value:?}");
+        assert!(
+            !ok,
+            "expected a domain-level failure (ok:false), got: {value:?}"
+        );
     }
 }

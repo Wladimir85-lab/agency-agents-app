@@ -107,7 +107,10 @@ pub enum AppError {
     /// failure, not a "capability not attempted" no-op.
     #[error("no provider available for capability {capability_id}: {message}")]
     #[serde(rename_all = "camelCase")]
-    CapabilityProviderUnavailable { capability_id: String, message: String },
+    CapabilityProviderUnavailable {
+        capability_id: String,
+        message: String,
+    },
 }
 
 // ---------- From impls ----------

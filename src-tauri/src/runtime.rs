@@ -1953,9 +1953,27 @@ async fn run_provider_stage(
     channel: &Channel<RunEvent>,
 ) -> Result<bool, AppError> {
     if provider_id == CLAUDE_PROVIDER_ID {
-        run_claude_stage(project, prompt, run_id, stage_id, attempt, evidence_dir, channel).await
+        run_claude_stage(
+            project,
+            prompt,
+            run_id,
+            stage_id,
+            attempt,
+            evidence_dir,
+            channel,
+        )
+        .await
     } else {
-        run_codex_stage(project, prompt, run_id, stage_id, attempt, evidence_dir, channel).await
+        run_codex_stage(
+            project,
+            prompt,
+            run_id,
+            stage_id,
+            attempt,
+            evidence_dir,
+            channel,
+        )
+        .await
     }
 }
 
@@ -2343,11 +2361,7 @@ mod tests {
         };
         assert!(delivery_evidence_complete(&run, dir.path()));
         let missing = evidence_file_component(&run.stages[0].id);
-        fs::remove_file(
-            dir.path()
-                .join(format!("{missing}-1-after.manifest.json")),
-        )
-        .unwrap();
+        fs::remove_file(dir.path().join(format!("{missing}-1-after.manifest.json"))).unwrap();
         assert!(!delivery_evidence_complete(&run, dir.path()));
     }
     #[test]

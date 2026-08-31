@@ -17,14 +17,15 @@ The human supplies intent, judgment and irreversible product decisions. IntentOS
 The current vertical is real and incremental:
 
 1. Esmeralda's production surface captures intent and proposes a visible solution.
-2. An approved `Mission` persists objective, scope, exclusions and acceptance criteria.
-3. IntentOS selects reusable professional capabilities from the Agency Agents corpus.
-4. The native orchestrator creates an isolated workspace and runs a variable staged workflow.
-5. Model-provider adapters execute each stage. Their output is not trusted as proof by itself.
-6. QA can return work to Development; Reality Check remains a mandatory final gate.
-7. File manifests and stage evidence are persisted independently of conversational output.
-8. The human reviews the delta; apply is conflict-checked and backup-first.
-9. A delivery receipt is derived from persisted run state, gate state, manifests and apply evidence.
+2. A draft `Mission` enters the Temporal control plane and waits for an explicit NCTO decision.
+3. Temporal durably records approval, rejection or cancellation. Only a confirmed approval may enter production.
+4. IntentOS selects reusable professional capabilities from the Agency Agents corpus.
+5. The native orchestrator creates an isolated workspace and runs a variable staged workflow.
+6. Model-provider adapters execute each stage. Their output is not trusted as proof by itself.
+7. QA can return work to Development; Reality Check remains a mandatory final gate.
+8. File manifests and stage evidence are persisted independently of conversational output.
+9. The human reviews the delta; apply is conflict-checked and backup-first.
+10. A delivery receipt is derived from persisted run state, gate state, manifests and apply evidence.
 
 ## IntentOS Fabric contracts
 
@@ -51,8 +52,8 @@ NeMo, OmniRoute, Theia, Daytona, E2B and future systems may implement one or mor
 Evidence from this repository:
 
 - Production build succeeds on the current SvelteKit/Tauri application.
-- `svelte-check` reports zero errors (current warnings are local unused CSS in `Runbooks.svelte`).
-- The Rust core passes 295 tests with one environment-dependent parity test ignored.
+- `svelte-check` reports zero errors and zero warnings.
+- The Rust core passes 314 tests with environment-dependent integration tests ignored by default.
 - Tauri already provides the security-sensitive native boundary, persistent state, filesystem isolation, child-process execution, channels and backup-first apply path.
 - The current user journey already reaches Mission -> isolated runtime -> QA/Reality gates -> reviewed apply. A chassis migration would replace working system boundaries before a demonstrated limitation exists.
 
@@ -73,6 +74,10 @@ Completed in this foundation:
 - Evidence-derived delivery receipt added to backend and production UI.
 - Existing Agency Agents corpus retained as a capability source.
 - Chassis decision recorded from repository evidence.
+- Temporal approval control plane connected to Runbooks: a mission is started, signalled and queried before production begins.
+- Real Temporal-server smoke covers approval, rejection, cancellation and querying a completed workflow for recovery.
+
+Temporal's current boundary is deliberate: it owns durable mission decisions and recovery history. IntentOS Runtime still owns construction stages, QA/Reality gates, workspace isolation and delivery evidence. Moving those stages into Temporal Activities remains a future increment and must preserve the existing runtime contracts; the current integration must not be described as fully Temporal-orchestrated execution.
 
 Next increments, in order:
 
@@ -82,4 +87,3 @@ Next increments, in order:
 4. Add process-tree containment on Windows and selectable local/container/remote execution adapters.
 5. Run a native golden-path factory mission and retain screenshots, logs, manifests and receipt as release evidence.
 6. Benchmark Theia components only when editor/LSP/terminal scope enters an approved mission.
-
