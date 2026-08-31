@@ -90,6 +90,24 @@ pub enum AppError {
     /// the currently-running build — the explicit downgrade-attack defense.
     #[error("update would downgrade {current} to {target}; refusing")]
     DowngradeRejected { current: String, target: String },
+
+    /// `capability_resolve`/`capability_invoke` was asked for a capability id
+    /// that has no entry in the registry at all. Distinct from
+    /// `CapabilityProviderUnavailable` on purpose: this is "no such
+    /// capability exists", not "it exists but nothing can serve it right
+    /// now" — callers need to tell the two apart rather than getting a
+    /// generic failure either way.
+    #[error("unknown capability: {capability_id}")]
+    #[serde(rename_all = "camelCase")]
+    UnknownCapability { capability_id: String },
+
+    /// The capability id is registered, but every provider bound to it
+    /// failed its own probe (not installed, not reachable, etc.). Never
+    /// returned as a disguised success — callers must treat this as a hard
+    /// failure, not a "capability not attempted" no-op.
+    #[error("no provider available for capability {capability_id}: {message}")]
+    #[serde(rename_all = "camelCase")]
+    CapabilityProviderUnavailable { capability_id: String, message: String },
 }
 
 // ---------- From impls ----------
@@ -166,7 +184,9 @@ mod tests {
 
     #[test]
     fn io_serializes_with_message() {
-        let err = AppError::Io { message: "ENOENT".into() };
+        let err = AppError::Io {
+            message: "ENOENT".into(),
+        };
         let v: Value = serde_json::to_value(&err).unwrap();
         assert_eq!(v["code"], "io");
         assert_eq!(v["message"], "ENOENT");
@@ -206,7 +226,9 @@ mod tests {
 
     #[test]
     fn internal_serializes_with_message() {
-        let err = AppError::Internal { message: "boom".into() };
+        let err = AppError::Internal {
+            message: "boom".into(),
+        };
         let v: Value = serde_json::to_value(&err).unwrap();
         assert_eq!(v["code"], "internal");
         assert_eq!(v["message"], "boom");
@@ -214,7 +236,9 @@ mod tests {
 
     #[test]
     fn paranoid_mode_blocked_serializes_with_feature() {
-        let err = AppError::ParanoidModeBlocked { feature: "corpus_refresh".into() };
+        let err = AppError::ParanoidModeBlocked {
+            feature: "corpus_refresh".into(),
+        };
         let v: Value = serde_json::to_value(&err).unwrap();
         assert_eq!(v["code"], "paranoid_mode_blocked");
         assert_eq!(v["feature"], "corpus_refresh");
@@ -222,16 +246,23 @@ mod tests {
 
     #[test]
     fn github_rate_limited_serializes_with_camel_case_reset_at() {
-        let err = AppError::GithubRateLimited { reset_at: 1_700_000_000 };
+        let err = AppError::GithubRateLimited {
+            reset_at: 1_700_000_000,
+        };
         let v: Value = serde_json::to_value(&err).unwrap();
         assert_eq!(v["code"], "github_rate_limited");
         assert_eq!(v["resetAt"], 1_700_000_000u64);
-        assert!(v.get("reset_at").is_none(), "must not emit snake_case `reset_at`");
+        assert!(
+            v.get("reset_at").is_none(),
+            "must not emit snake_case `reset_at`"
+        );
     }
 
     #[test]
     fn keychain_unavailable_serializes_with_message() {
-        let err = AppError::KeychainUnavailable { message: "no entry".into() };
+        let err = AppError::KeychainUnavailable {
+            message: "no entry".into(),
+        };
         let v: Value = serde_json::to_value(&err).unwrap();
         assert_eq!(v["code"], "keychain_unavailable");
     }
@@ -243,7 +274,9 @@ mod tests {
 
     #[test]
     fn scope_required_serializes_with_scope() {
-        let err = AppError::ScopeRequired { scope: "public_repo".into() };
+        let err = AppError::ScopeRequired {
+            scope: "public_repo".into(),
+        };
         let v: Value = serde_json::to_value(&err).unwrap();
         assert_eq!(v["code"], "scope_required");
         assert_eq!(v["scope"], "public_repo");
@@ -261,7 +294,9 @@ mod tests {
 
     #[test]
     fn signature_verification_failed_serializes_with_message() {
-        let err = AppError::SignatureVerificationFailed { message: "bad signature".into() };
+        let err = AppError::SignatureVerificationFailed {
+            message: "bad signature".into(),
+        };
         let v: Value = serde_json::to_value(&err).unwrap();
         assert_eq!(v["code"], "signature_verification_failed");
     }
@@ -274,6 +309,45 @@ mod tests {
         };
         let v: Value = serde_json::to_value(&err).unwrap();
         assert_eq!(v["code"], "downgrade_rejected");
+    }
+
+    #[test]
+    fn unknown_capability_serializes_with_camel_case_capability_id() {
+        let err = AppError::UnknownCapability {
+            capability_id: "dataset.frobnicate".into(),
+        };
+        let v: Value = serde_json::to_value(&err).unwrap();
+        assert_eq!(v["code"], "unknown_capability");
+        assert_eq!(v["capabilityId"], "dataset.frobnicate");
+        assert!(v.get("capability_id").is_none());
+    }
+
+    #[test]
+    fn capability_provider_unavailable_serializes_with_camel_case_fields() {
+        let err = AppError::CapabilityProviderUnavailable {
+            capability_id: "dataset.dedup".into(),
+            message: "soup: command not found".into(),
+        };
+        let v: Value = serde_json::to_value(&err).unwrap();
+        assert_eq!(v["code"], "capability_provider_unavailable");
+        assert_eq!(v["capabilityId"], "dataset.dedup");
+        assert_eq!(v["message"], "soup: command not found");
+    }
+
+    #[test]
+    fn unknown_capability_and_provider_unavailable_are_distinct_codes() {
+        // The whole point of having two variants: a caller must be able to
+        // branch on `code` and tell "no such capability" apart from "known
+        // capability, nothing available right now" — never a single
+        // generic failure for both.
+        let unknown = code_of(&AppError::UnknownCapability {
+            capability_id: "x".into(),
+        });
+        let unavailable = code_of(&AppError::CapabilityProviderUnavailable {
+            capability_id: "x".into(),
+            message: "m".into(),
+        });
+        assert_ne!(unknown, unavailable);
     }
 
     #[test]

@@ -1,27 +1,27 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import { invoke } from "@tauri-apps/api/core";
   import { open as openDialog } from "@tauri-apps/plugin-dialog";
-  import ChevronDown from "@lucide/svelte/icons/chevron-down";
-  import CopyIcon from "@lucide/svelte/icons/copy";
-  import DownloadIcon from "@lucide/svelte/icons/download";
   import PlayIcon from "@lucide/svelte/icons/play";
-  import PlusIcon from "@lucide/svelte/icons/plus";
   import PaperclipIcon from "@lucide/svelte/icons/paperclip";
   import XIcon from "@lucide/svelte/icons/x";
   import SquareIcon from "@lucide/svelte/icons/square";
-  import InstallModal from "./InstallModal.svelte";
+  import PlusIcon from "@lucide/svelte/icons/plus";
+  import ArrowLeftIcon from "@lucide/svelte/icons/arrow-left";
+  import CheckIcon from "@lucide/svelte/icons/check";
   import Button from "./Button.svelte";
   import { corpus } from "$lib/stores/corpus.svelte";
   import { runbooks } from "$lib/stores/runbooks.svelte";
   import { projects } from "$lib/stores/projects.svelte";
   import { runs } from "$lib/stores/runs.svelte";
   import { toast } from "$lib/stores/toast.svelte";
-  import { i18n } from "$lib/stores/i18n.svelte";
-  import { INTENTOS_CAPABILITIES, composePipeline, routeIntent } from "$lib/data/intentosCapabilities";
-  import type { Agent, Runbook, RunEvent } from "$lib/types";
+  import { ui } from "$lib/stores/ui.svelte";
+  import { CREATION_CATALOG, findCatalogProduct, INTENTOS_CAPABILITIES, planSolution } from "$lib/data/intentosCapabilities";
+  import type { SolutionProposal } from "$lib/data/intentosCapabilities";
+  import type { Agent, AutomaticProject, Mission, RunEvent } from "$lib/types";
 
   const LEGACY_DRAFT_KEY = "intentos.productionBrief.v1";
-  const DEFAULT_SIGNATURE = "Dirección creativa inspirada en la nueva ola de estudios digitales de Japón y Corea: tipografía protagonista y cinética, composición editorial con asimetría intencional, maximalismo controlado, capas y texturas, microinteracciones con propósito y narrativa visual mediante scroll. Usar 3D, WebGL o medios mixtos solo cuando refuercen la identidad del producto. El resultado debe sentirse vivo, memorable y propio, nunca como una plantilla SaaS genérica. Mantener siempre jerarquía clara, accesibilidad, respuesta móvil, rendimiento y facilidad de uso.";
+  const DEFAULT_SIGNATURE = "Resolver el trabajo real descrito por la intención y recomendar la forma computacional más adecuada, sin asumir de antemano web, aplicación, documento o formato. El resultado debe ser operable, propio y verificable; nunca presentar mocks, datos simulados o funciones incompletas como terminadas. Aplicar claridad, accesibilidad, seguridad, rendimiento, trazabilidad y facilidad de uso cuando correspondan al producto. Cada entrega debe incluir evidencia suficiente para que Reality Check compare lo construido con la propuesta aprobada por el NCTO.";
   onMount(() => {
     // Security baseline v0.1: production briefs can contain client data and
     // must never live in plaintext WebView storage. Remove the legacy draft
@@ -31,66 +31,73 @@
     corpus.ensureLoaded(); runbooks.load(); projects.refresh(); runs.load();
   });
   const bySlug = $derived(new Map(corpus.agents.map((a) => [a.slug, a])));
-  const rosterSlugs = (rb: Runbook) => rb.roster.flatMap((g) => g.agents);
-  const resolvedSlugs = (rb: Runbook) => rosterSlugs(rb).filter((s) => bySlug.has(s));
-  const resolve = (slugs: string[]): { slug: string; agent: Agent | undefined }[] => slugs.map((slug) => ({ slug, agent: bySlug.get(slug) }));
-  const title = (rb: Runbook) => i18n.optional(`runbooks.item.${rb.slug}.title`, rb.title);
-  const summary = (rb: Runbook) => i18n.optional(`runbooks.item.${rb.slug}.summary`, rb.summary);
   let intent = $state("");
-  let audience = $state("");
-  let businessGoal = $state("");
-  let requiredFeatures = $state("");
-  let visualDirection = $state("");
-  let references = $state("");
-  let availableAssets = $state("");
-  let signature = $state(DEFAULT_SIGNATURE);
   let attachments = $state<string[]>([]);
   let constraints = $state("");
   let acceptance = $state("");
-  let briefOpen = $state(false);
   let projectPath = $state("");
+  let useExistingProject = $state(false);
   let selectedSlug = $state("");
-  let selectedCapabilityId = $state("auto");
-  let openSlug = $state<string | null>(null);
-  let deployRb = $state<Runbook | null>(null);
+  let proposal = $state<SolutionProposal | null>(null);
+  let previousProposal = $state<SolutionProposal | null>(null);
+  let proposalChanges = $state<string[]>([]);
+  let proposalRevision = $state(0);
+  let rejectionReason = $state("");
+  let rejecting = $state(false);
+  let approving = $state(false);
   let validation = $state("");
+  let catalogDraftActive = $state(false);
+  let loadedCatalogProductId = $state<string | null>(null);
+  const catalogProduct = $derived(findCatalogProduct(ui.catalogProductId));
+  const catalogArea = $derived(CREATION_CATALOG.find((area) => area.products.some((product) => product.id === ui.catalogProductId)) ?? null);
   const selected = $derived(runbooks.list.find((r) => r.slug === selectedSlug) ?? null);
-  const routed = $derived(routeIntent(`${intent}\n${audience}\n${requiredFeatures}\n${businessGoal}\n${visualDirection}\n${references}\n${constraints}\n${acceptance}`));
-  const activeCapability = $derived(INTENTOS_CAPABILITIES.find((item) => item.id === selectedCapabilityId) ?? routed.capability);
-  const activeCapabilities = $derived(selectedCapabilityId === "auto" ? routed.capabilities : [activeCapability]);
-  const activePipeline = $derived(composePipeline(activeCapabilities));
+  const activeCapabilities = $derived(proposal?.capabilities ?? []);
+  const activePipeline = $derived(proposal?.pipeline ?? []);
+  const activeCapability = $derived(activeCapabilities[0] ?? INTENTOS_CAPABILITIES[0]);
   const capabilityAgents = $derived(activePipeline.map((stage) => bySlug.get(stage.agent)).filter((agent): agent is Agent => Boolean(agent)));
   const teamReady = $derived(capabilityAgents.length === activePipeline.length);
-  const provider = $derived(runs.providers.find((p) => p.available) ?? null);
-  const canStart = $derived(Boolean(intent.trim() && projectPath && selected && provider && teamReady && !runs.starting && runs.current?.status !== "running" && runs.current?.status !== "queued"));
+  // Two providers can both report "available" (Codex CLI's own probe only
+  // checks that the binary runs `--version` — it has no idea whether the
+  // account behind it still has usage quota). Auto-picking the first one
+  // would silently keep sending runs to a Codex install that is actually
+  // out of quota. Default to the old behavior (first available, Codex
+  // first in the list from runtime_providers) but let the person override
+  // it explicitly when more than one engine is usable.
+  let selectedProviderId = $state("");
+  const availableProviders = $derived(runs.providers.filter((p) => p.available));
+  const provider = $derived(availableProviders.find((p) => p.id === selectedProviderId) ?? availableProviders[0] ?? null);
+  $effect(() => { if (availableProviders.length && !availableProviders.some((p) => p.id === selectedProviderId)) selectedProviderId = availableProviders[0].id; });
+  const canPropose = $derived(Boolean(intent.trim() && !runs.starting && runs.current?.status !== "running" && runs.current?.status !== "queued"));
   const output = $derived(runs.events.filter((item) => item.event.kind === "output"));
-  const briefCount = $derived([audience, businessGoal, requiredFeatures, visualDirection, signature, references, availableAssets || attachments.length ? "assets" : "", constraints, acceptance].filter((value) => value.trim()).length);
 
   $effect(() => { if (!selectedSlug && runbooks.list.length) selectedSlug = runbooks.list[0].slug; });
-  $effect(() => { if (!projectPath && projects.list.length) projectPath = projects.list[0].path; });
+  $effect(() => {
+    const productId = ui.catalogProductId;
+    if (productId === loadedCatalogProductId) return;
+    loadedCatalogProductId = productId;
+    catalogDraftActive = false;
+    intent = "";
+    proposal = null;
+    previousProposal = null;
+    proposalChanges = [];
+    proposalRevision = 0;
+    validation = "";
+  });
   $effect(() => {
     if (!runs.current) return;
-    if (!projectPath || projectPath === projects.list[0]?.path) projectPath = runs.current.projectPath;
+    projectPath = runs.current.projectPath;
+    useExistingProject = true;
     if (runbooks.list.some((rb) => rb.slug === runs.current?.runbookId)) selectedSlug = runs.current.runbookId;
-    // A restored run must never be presented beside the default capability
-    // for an empty new-intent form. Rehydrate its immutable routing decision.
-    if (!intent.trim() && selectedCapabilityId === "auto" && runs.current.capabilityId) {
-      selectedCapabilityId = runs.current.capabilityId;
-    }
   });
 
-  function productionBrief(): string {
+  function productionBrief(sourceProposal: SolutionProposal | null = proposal): string {
+    const capabilities = sourceProposal?.capabilities ?? activeCapabilities;
+    const pipeline = sourceProposal?.pipeline ?? activePipeline;
     const sections = [
       ["INTENCIÓN DEL PRODUCTO", intent],
-      ["CAPACIDADES INTENTOS ACTIVADAS", activeCapabilities.map((capability) => `${capability.label}: ${capability.description}`).join("\n")],
-      ["PIPELINE ESPECIALISTA", activePipeline.map((stage, index) => `${index + 1}. ${stage.label}: ${bySlug.get(stage.agent)?.name ?? stage.agent}`).join("\n")],
-      ["USUARIO OBJETIVO", audience],
-      ["OBJETIVO COMERCIAL", businessGoal],
-      ["FUNCIONES OBLIGATORIAS", requiredFeatures],
-      ["DIRECCIÓN VISUAL", visualDirection],
-      ["SELLO PROPIO INTENTOS", signature],
-      ["REFERENCIAS VISUALES", references],
-      ["DATOS Y ACTIVOS DISPONIBLES", availableAssets],
+      ["CAPACIDADES INTENTOS ACTIVADAS", capabilities.map((capability) => `${capability.label}: ${capability.description}`).join("\n")],
+      ["PIPELINE ESPECIALISTA", pipeline.map((stage, index) => `${index + 1}. ${stage.label}: ${bySlug.get(stage.agent)?.name ?? stage.agent}`).join("\n")],
+      ["ESTÁNDAR INTERNO INTENTOS", DEFAULT_SIGNATURE],
       ["ARCHIVOS ADJUNTOS AUTORIZADOS", attachments.map((path) => `- ${path}`).join("\n")],
       ["RESTRICCIONES Y FUERA DE ALCANCE", constraints],
       ["CRITERIOS DE APROBACIÓN", acceptance],
@@ -112,40 +119,138 @@
   function newIntent() {
     if (runs.current?.status === "running" || runs.current?.status === "queued") return;
     intent = "";
-    audience = "";
-    businessGoal = "";
-    requiredFeatures = "";
-    visualDirection = "";
-    signature = DEFAULT_SIGNATURE;
-    references = "";
-    availableAssets = "";
     attachments = [];
     constraints = "";
     acceptance = "";
-    selectedCapabilityId = "auto";
+    projectPath = "";
+    useExistingProject = false;
+    proposal = null;
+    previousProposal = null;
+    proposalChanges = [];
+    proposalRevision = 0;
+    rejectionReason = "";
+    rejecting = false;
     validation = "";
-    briefOpen = false;
+    catalogDraftActive = false;
+    ui.clearCatalogProduct();
     runs.clearCurrent();
     toast.success("Nueva intención preparada");
   }
 
-  async function start() {
+  function startCatalogProduct() {
+    if (!catalogProduct) return;
+    intent = catalogProduct.intentTemplate;
+    catalogDraftActive = true;
+    proposal = null;
     validation = "";
-    if (!intent.trim()) validation = "Describe la intención del producto.";
-    else if (!projectPath) validation = "Selecciona un proyecto.";
-    else if (!selected) validation = "Selecciona un pipeline.";
-    else if (!provider) validation = "No hay un runtime ejecutable disponible.";
-    else if (!teamReady) validation = "El catálogo activo no contiene los cinco especialistas requeridos para esta capacidad.";
-    if (validation || !selected || !provider) return;
-    try { await runs.start({ intent: productionBrief(), projectPath, runbookId: selected.slug, capabilityId: activeCapability.id, capabilityIds: activeCapabilities.map((item) => item.id), stageIds: activePipeline.map((stage) => stage.id), stageKinds: activePipeline.map((stage) => stage.kind), stageLabels: activePipeline.map((stage) => stage.label), agentSlugs: activePipeline.map((stage) => stage.agent), providerId: provider.id }); }
-    catch (e) { toast.error("No se pudo iniciar IntentOS", String(e)); }
   }
 
-  function activationPrompt(rb: Runbook): string {
-    const roster = rb.roster.map((g) => `- ${g.group} (${g.activation}): ${g.agents.map((s) => bySlug.get(s)?.name ?? s).join(", ")}`).join("\n");
-    return `Activa el pipeline "${title(rb)}" en modo ${rb.mode}.\n${summary(rb)}\n\nEquipo:\n${roster}\n\nVerifica cada etapa con evidencia antes de avanzar.`;
+  function prepareProposal() {
+    validation = "";
+    if (!intent.trim()) validation = "Describe la intención del producto.";
+    if (validation) return;
+    const nextProposal = planSolution({ intent, constraints, acceptance, requiredCapabilityIds: catalogProduct?.capabilityIds });
+    proposalChanges = previousProposal ? proposalDiff(previousProposal, nextProposal) : [];
+    proposal = nextProposal;
+    proposalRevision += 1;
+    rejecting = false;
+    rejectionReason = "";
   }
-  async function copyPrompt(rb: Runbook) { try { await navigator.clipboard.writeText(activationPrompt(rb)); toast.success("Prompt copiado"); } catch (e) { toast.error("No se pudo copiar", String(e)); } }
+
+  function rejectProposal() {
+    if (!rejectionReason.trim()) {
+      validation = "Explica qué debe cambiar antes de generar otra propuesta.";
+      return;
+    }
+    previousProposal = proposal;
+    constraints = [constraints.trim(), `OBSERVACIÓN NCTO (propuesta v${proposalRevision} rechazada): ${rejectionReason.trim()}`].filter(Boolean).join("\n");
+    proposal = null;
+    proposalChanges = [];
+    rejecting = false;
+    toast.success("Observación incorporada; ajusta la intención o genera una nueva propuesta");
+  }
+
+  function proposalDiff(previous: SolutionProposal, next: SolutionProposal): string[] {
+    const changes: string[] = [];
+    if (previous.user !== next.user) changes.push(`Usuario redefinido: ${next.user}`);
+    if (previous.job !== next.job) changes.push("Trabajo y alcance reformulados según la observación NCTO.");
+    if (previous.outcome !== next.outcome) changes.push("Resultado verificable actualizado.");
+    const beforeCapabilities = previous.capabilities.map((item) => item.id).join(",");
+    const afterCapabilities = next.capabilities.map((item) => item.id).join(",");
+    if (beforeCapabilities !== afterCapabilities) changes.push("Capacidades internas y equipo recompuestos.");
+    if (next.revisionNotes.length > previous.revisionNotes.length) changes.push("Nueva observación NCTO incorporada al contrato de construcción.");
+    return changes;
+  }
+
+  async function approveAndStart() {
+    validation = "";
+    if (!proposal || !selected || !provider) { validation = "La propuesta y el runtime deben estar disponibles."; return; }
+    if (!teamReady) { validation = "El catálogo activo no contiene todos los especialistas internos requeridos."; return; }
+    if (useExistingProject && !projectPath) { validation = "Selecciona el proyecto existente."; return; }
+    approving = true;
+    try {
+      // Recompute the approved plan at the decision boundary. This prevents a
+      // stale HMR-era proposal from ever starting an incomplete pipeline.
+      const approvedProposal = planSolution({ intent, constraints, acceptance, requiredCapabilityIds: catalogProduct?.capabilityIds });
+      proposal = approvedProposal;
+      const approvedCapabilities = approvedProposal.capabilities;
+      const approvedPipeline = approvedProposal.pipeline;
+      if (!approvedCapabilities.length || approvedPipeline.length < 5) {
+        throw new Error("El Router no pudo componer el equipo mínimo de producción. Vuelve a visualizar la propuesta.");
+      }
+      if (!useExistingProject && !projectPath) {
+        const created = await invoke<AutomaticProject>("project_create_automatic", { request: { suggestedName: approvedProposal.projectSlug } });
+        projectPath = created.path;
+        projects.register(created.path);
+      }
+      const criteria = [acceptance.trim(), "La solución debe ser operable y no presentar mocks como terminados.", "QA y Reality Check deben aportar evidencia verificable.", "Lo construido debe corresponder a la propuesta aprobada."].filter(Boolean);
+      const draft = await invoke<Mission>("mission_create", { request: {
+        projectPath,
+        objective: intent.trim(),
+        scopeStatement: `PROPUESTA NCTO v${proposalRevision}\nForma recomendada: ${approvedProposal.solutionForm}\nUsuario: ${approvedProposal.user}\nTrabajo: ${approvedProposal.job}\nResultado: ${approvedProposal.outcome}\n\n${productionBrief(approvedProposal)}`,
+        exclusions: constraints.split(/\r?\n/).map((item) => item.trim()).filter(Boolean),
+        acceptanceCriteria: criteria,
+        clientLocale: "es-CL",
+        targetMarkets: [],
+        deliveryLocales: ["es-CL"],
+        agencyJurisdiction: "CL",
+        engagementRegime: "fixed",
+        adjustmentBudget: null,
+        changePolicyNote: "Cualquier cambio respecto de la propuesta aprobada requiere una nueva decisión NCTO.",
+      } });
+      const mission = await invoke<Mission>("mission_update", { request: {
+        id: draft.id,
+        objective: draft.objective,
+        scopeStatement: draft.scopeStatement,
+        exclusions: draft.exclusions,
+        acceptanceCriteria: draft.acceptanceCriteria,
+        clientLocale: draft.clientLocale,
+        targetMarkets: draft.targetMarkets,
+        deliveryLocales: draft.deliveryLocales,
+        agencyJurisdiction: draft.agencyJurisdiction,
+        engagementRegime: draft.engagementRegime,
+        adjustmentBudget: draft.adjustmentBudget,
+        changePolicyNote: draft.changePolicyNote,
+        status: "approved",
+        approvedByNcto: true,
+      } });
+      await runs.start({ intent: productionBrief(approvedProposal), projectPath, runbookId: selected.slug, capabilityId: approvedCapabilities[0].id, capabilityIds: approvedCapabilities.map((item) => item.id), stageIds: approvedPipeline.map((stage) => stage.id), stageKinds: approvedPipeline.map((stage) => stage.kind), stageLabels: approvedPipeline.map((stage) => stage.label), agentSlugs: approvedPipeline.map((stage) => stage.agent), providerId: provider.id, missionId: mission.id });
+    } catch (e) { toast.error("No se pudo iniciar la producción aprobada", readableError(e)); }
+    finally { approving = false; }
+  }
+
+  function readableError(error: unknown): string {
+    if (error instanceof Error && error.message.trim()) return error.message;
+    if (typeof error === "string") return error;
+    if (error && typeof error === "object") {
+      const record = error as Record<string, unknown>;
+      for (const key of ["message", "error", "reason", "detail"]) {
+        if (typeof record[key] === "string" && record[key].trim()) return record[key];
+      }
+      try { return JSON.stringify(error); } catch { /* fall through */ }
+    }
+    return "Error desconocido del motor nativo.";
+  }
   function eventText(event: RunEvent): string {
     if (event.kind === "output") return event.text;
     if (event.kind === "gatePassed") return `Gate aprobado: ${event.stageId}`;
@@ -165,6 +270,10 @@
       toast.success("Cambios aplicados con backup de seguridad");
     } catch (e) { toast.error("No se pudieron aplicar los cambios", String(e)); }
   }
+  async function loadDeliveryReceipt() {
+    try { await runs.loadReceipt(); }
+    catch (e) { toast.error("No se pudo construir el comprobante de entrega", String(e)); }
+  }
   async function discardWorkspace() {
     if (!confirm("Se eliminará únicamente la copia aislada. El proyecto original y los registros de evidencia se conservarán. ¿Descartar copia?")) return;
     try {
@@ -175,59 +284,45 @@
 </script>
 
 <section class="workspace">
-  <header class="head"><div><h1>IntentOS Production</h1><p>Escribe una intención y ejecuta una fábrica de agentes con gates verificables.</p></div><div class="head-actions"><Button variant="secondary" onclick={newIntent} disabled={runs.current?.status === "running" || runs.current?.status === "queued"} ariaLabel="Crear nueva intención"><PlusIcon size={14}/> Nueva intención</Button><span class:ok={provider} class="provider">{provider ? `${provider.label} · ${provider.version ?? "disponible"}` : "Runtime no disponible"}</span></div></header>
+  <header class="head"><div><h1>{catalogProduct && !catalogDraftActive ? "Catálogo de Creación" : "IntentOS Production"}</h1><p>{catalogProduct && !catalogDraftActive ? `${catalogArea?.number} — ${catalogArea?.name}` : "De una intención humana a una entrega tecnológica verificada."}</p></div><div class="head-actions"><Button variant="secondary" onclick={newIntent} disabled={runs.current?.status === "running" || runs.current?.status === "queued"} ariaLabel="Crear nueva intención">Nueva intención</Button>{#if availableProviders.length > 1}<select bind:value={selectedProviderId} class="provider-select" aria-label="Motor de ejecución" disabled={runs.current?.status === "running" || runs.current?.status === "queued"}>{#each availableProviders as p (p.id)}<option value={p.id}>{p.label}</option>{/each}</select>{/if}<span class:ok={provider} class="provider">{provider ? `${provider.label} · ${provider.version ?? "disponible"}` : "Runtime no disponible"}</span></div></header>
   <div class="grid">
     <div class="composer">
+      {#if catalogProduct && !catalogDraftActive}
+        <article class="catalog-detail">
+          <button class="catalog-back" type="button" onclick={() => ui.clearCatalogProduct()}><ArrowLeftIcon size={13}/> Volver al catálogo</button>
+          <span class="eyebrow">{catalogArea?.number} · {catalogArea?.name}</span>
+          <h2>{catalogProduct.name}</h2>
+          <p class="catalog-description">{catalogProduct.description}</p>
+          <section><h3>¿Para qué se usa?</h3><p>{catalogProduct.purpose}</p></section>
+          <section><h3>Puede incluir</h3><ul>{#each catalogProduct.includes as item}<li><CheckIcon size={12}/><span>{item}</span></li>{/each}</ul></section>
+          <section><h3>Para comenzar, IntentOS te pedirá</h3><ul>{#each catalogProduct.requiredInputs as item}<li><CheckIcon size={12}/><span>{item}</span></li>{/each}</ul></section>
+          <div class="catalog-capabilities"><small>IntentOS compondrá internamente</small><p>{catalogProduct.capabilityIds.map((id) => INTENTOS_CAPABILITIES.find((capability) => capability.id === id)?.shortLabel ?? id).join(" + ")}</p></div>
+          <Button variant="primary" onclick={startCatalogProduct} ariaLabel={`Crear ${catalogProduct.name}`}>Crear este producto</Button>
+        </article>
+      {:else}
       <div class="card">
-        <label for="intent">¿Qué producto quieres crear?</label>
-        <textarea id="intent" bind:value={intent} rows="7" placeholder="Describe el problema, usuario, resultado esperado y restricciones…" aria-describedby="intent-help validation"></textarea>
-        <p id="intent-help" class="hint">IntentOS coordinará Project Manager → UX/Arquitectura → Desarrollo ↔ QA → Reality Check.</p>
-        <section class="router" aria-labelledby="router-title">
-          <div class="router-head"><div><strong id="router-title">Router de intención</strong><small>{selectedCapabilityId === "auto" ? (routed.confidence ? `Recomendación automática · ${Math.round(routed.confidence * 100)}%` : "Describe el encargo para clasificarlo") : "Selección manual"}</small></div><span>{activeCapability.shortLabel}</span></div>
-          <label for="capability">Capacidad de la agencia<select id="capability" bind:value={selectedCapabilityId}><option value="auto">Automática — IntentOS decide</option>{#each INTENTOS_CAPABILITIES as capability (capability.id)}<option value={capability.id}>{capability.label}</option>{/each}</select></label>
-          <p>{activeCapabilities.map((item) => item.shortLabel).join(" + ")}</p>
-          <ol class="dynamic-team">{#each activePipeline as stage, index (stage.id)}<li class:missing={!bySlug.has(stage.agent)}><span>{index + 1}</span><div><strong>{stage.label}</strong><small>{bySlug.get(stage.agent)?.name ?? stage.agent}</small></div></li>{/each}</ol>
-          {#if selectedCapabilityId === "auto" && routed.matched.length}<small class="signals">Señales detectadas: {routed.matched.join(", ")}</small>{/if}
-        </section>
-        <button class="brief-toggle" type="button" onclick={() => briefOpen = !briefOpen} aria-expanded={briefOpen} aria-controls="production-brief"><span><strong>Brief de producción</strong><small>{briefCount}/9 campos complementarios</small></span><svg class:rotated={briefOpen} width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></button>
-        {#if briefOpen}
-          <div id="production-brief" class="brief">
-            <label for="audience">Usuario objetivo<textarea id="audience" bind:value={audience} rows="2" placeholder="Quién usará o comprará el producto"></textarea></label>
-            <label for="business-goal">Objetivo comercial<textarea id="business-goal" bind:value={businessGoal} rows="2" placeholder="Qué resultado debe producir para el negocio"></textarea></label>
-            <label for="required-features">Funciones obligatorias<textarea id="required-features" bind:value={requiredFeatures} rows="3" placeholder="Flujos y capacidades que no pueden faltar"></textarea></label>
-            <label for="visual-direction">Dirección visual<textarea id="visual-direction" bind:value={visualDirection} rows="3" placeholder="Personalidad, colores, estilo, nivel de densidad"></textarea></label>
-            <label for="signature">Sello propio IntentOS<textarea id="signature" bind:value={signature} rows="3" placeholder="Rasgos distintivos que deben hacer reconocible este producto; evita interfaces genéricas"></textarea></label>
-            <label for="references">Referencias visuales<textarea id="references" bind:value={references} rows="2" placeholder="URLs, productos o patrones de referencia; indica qué tomar de cada uno"></textarea></label>
-            <label for="assets">Datos y activos disponibles<textarea id="assets" bind:value={availableAssets} rows="2" placeholder="Logo, fotografías, contenido, datos reales y credenciales autorizadas"></textarea></label>
+        {#if catalogProduct}<div class="catalog-context"><span>PRODUCTO SELECCIONADO</span><strong>{catalogProduct.name}</strong><small>La intención es editable. IntentOS mantendrá las capacidades mínimas necesarias.</small></div>{/if}
+        <label for="intent">¿Qué quieres que construya o resuelva IntentOS?</label>
+        <textarea id="intent" bind:value={intent} rows="5" placeholder="Cuéntale a IntentOS qué quieres conseguir…" aria-describedby="intent-help validation" oninput={() => proposal = null}></textarea>
+        <p id="intent-help" class="hint">IntentOS resolverá internamente usuarios, objetivos, capacidades, criterios y plan de trabajo.</p>
+        <details class="options" open={attachments.length > 0 || useExistingProject}>
+          <summary>Archivos o proyecto existente <small>Opcional</small></summary>
+          <div class="options-body">
             <div class="attachments">
-              <div><strong>Archivos adjuntos</strong><small>Los agentes recibirán las rutas autorizadas de estos archivos.</small></div>
+              <div><strong>Archivos autorizados</strong><small>Activos o datos que IntentOS deba utilizar.</small></div>
               <Button variant="secondary" onclick={addAttachments} ariaLabel="Adjuntar archivos"><PaperclipIcon size={14}/> Adjuntar</Button>
               {#if attachments.length}<ul>{#each attachments as path (path)}<li title={path}><span>{fileName(path)}</span><button type="button" onclick={() => removeAttachment(path)} aria-label={`Quitar ${fileName(path)}`}><XIcon size={13}/></button></li>{/each}</ul>{/if}
             </div>
-            <label for="constraints">Restricciones y fuera de alcance<textarea id="constraints" bind:value={constraints} rows="2" placeholder="Qué no debe construir o qué debe respetar"></textarea></label>
-            <label for="acceptance">Criterios de aprobación<textarea id="acceptance" bind:value={acceptance} rows="3" placeholder="Pruebas, navegadores, tamaños y evidencias requeridas"></textarea></label>
+            <label class="existing-toggle"><input type="checkbox" bind:checked={useExistingProject}/> Continuar un proyecto existente</label>
+            {#if useExistingProject}
+              <div class="fields"><label for="project">Proyecto<select id="project" bind:value={projectPath}><option value="">Seleccionar proyecto</option>{#each projects.list as p (p.path)}<option value={p.path}>{p.label}</option>{/each}</select></label><Button variant="secondary" onclick={() => projects.addViaPicker()} ariaLabel="Añadir proyecto"><PlusIcon size={14}/> Añadir</Button></div>
+            {/if}
           </div>
-        {/if}
-        <div class="fields">
-          <label for="project">Proyecto<select id="project" bind:value={projectPath}><option value="">Seleccionar proyecto</option>{#each projects.list as p (p.path)}<option value={p.path}>{p.label}</option>{/each}</select></label>
-          <Button variant="secondary" onclick={() => projects.addViaPicker()} ariaLabel="Añadir proyecto"><PlusIcon size={14}/> Añadir</Button>
-        </div>
-        <label for="pipeline">Pipeline<select id="pipeline" bind:value={selectedSlug}>{#each runbooks.list as rb (rb.slug)}<option value={rb.slug}>{title(rb)}</option>{/each}</select></label>
+        </details>
         {#if validation}<p id="validation" class="error" role="alert">{validation}</p>{/if}
-        {#if !provider && runs.providers.length}<p class="error">{runs.providers[0].unavailableReason ?? "Instala un Codex CLI independiente y autentícalo."}</p>{/if}
-        <Button variant="primary" onclick={start} disabled={!canStart} loading={runs.starting} ariaLabel="Iniciar producción"><PlayIcon size={15}/> Iniciar producción</Button>
+        <Button variant="primary" onclick={prepareProposal} disabled={!canPropose} ariaLabel="Interpretar intención"><PlayIcon size={15}/> Ver propuesta</Button>
       </div>
-
-      <h2>Pipelines disponibles</h2>
-      <ul class="recipes">
-        {#each runbooks.list as rb (rb.slug)}
-          <li>
-            <button class="recipe" onclick={() => openSlug = openSlug === rb.slug ? null : rb.slug} aria-expanded={openSlug === rb.slug} aria-controls={`recipe-${rb.slug}`}><ChevronDown size={15}/><span><strong>{title(rb)}</strong><small>{summary(rb)}</small></span></button>
-            <div class="recipe-actions"><button onclick={() => copyPrompt(rb)}><CopyIcon size={13}/> Copiar prompt</button><button onclick={() => deployRb = rb}><DownloadIcon size={13}/> Desplegar</button></div>
-            {#if openSlug === rb.slug}<div id={`recipe-${rb.slug}`} class="roster">{#each rb.roster as group (group.group)}<section><strong>{group.group}</strong>{#each resolve(group.agents) as item (item.slug)}<span>{item.agent?.emoji ?? "○"} {item.agent?.name ?? item.slug}</span>{/each}</section>{/each}</div>{/if}
-          </li>
-        {/each}
-      </ul>
+      {/if}
     </div>
 
     <aside class="console" aria-live="polite">
@@ -236,27 +331,41 @@
         <ol class="stages">{#each runs.current.stages as stage (stage.id)}<li class:active={stage.status === "running"} aria-current={stage.status === "running" ? "step" : undefined}><span class={`dot ${stage.status}`}></span><div><strong>{stage.label}</strong><small>{stage.agentSlug} · intento {stage.attempt || 1}</small></div><b>{stage.status}</b></li>{/each}</ol>
         {#if runs.current.workspacePath && runs.current.status !== "running" && runs.current.status !== "queued"}
           <section class="workspace-review">
-            <div class="review-actions"><Button variant="secondary" onclick={reviewWorkspace} loading={runs.reviewing}>Revisar cambios</Button><Button variant="primary" onclick={applyWorkspace} loading={runs.applying} disabled={!runs.review?.sourceUnchanged || !runs.review?.changes.length}>Aplicar al original</Button><Button variant="danger" onclick={discardWorkspace} loading={runs.discarding}>Descartar copia</Button></div>
+            <div class="review-actions"><Button variant="secondary" onclick={reviewWorkspace} loading={runs.reviewing}>Revisar cambios</Button>{#if runs.current.status === "succeeded"}<Button variant="secondary" onclick={loadDeliveryReceipt}>Comprobante</Button>{/if}<Button variant="primary" onclick={applyWorkspace} loading={runs.applying} disabled={!runs.review?.sourceUnchanged || !runs.review?.changes.length}>Aplicar al original</Button><Button variant="danger" onclick={discardWorkspace} loading={runs.discarding}>Descartar copia</Button></div>
             {#if runs.review}
               <p class:conflict={!runs.review.sourceUnchanged}>{runs.review.sourceUnchanged ? `${runs.review.changes.length} cambios detectados; el origen no cambió durante la ejecución.` : "El proyecto original cambió durante la ejecución. Aplicación bloqueada para evitar sobrescrituras."}</p>
               {#if runs.review.changes.length}<ul class="change-list">{#each runs.review.changes as change (`${change.kind}:${change.path}`)}<li><b class={change.kind}>{change.kind}</b><span title={change.path}>{change.path}</span></li>{/each}</ul>{/if}
+            {/if}
+            {#if runs.receipt}
+              <div class="delivery-receipt"><strong>{runs.receipt.applied ? "Entrega aplicada" : "Entrega verificada"}</strong><span>{runs.receipt.gates.length} gates aprobados · evidencia {runs.receipt.evidenceComplete ? "completa" : "incompleta"}</span><small title={runs.receipt.evidencePath}>ID {runs.receipt.runId}</small></div>
             {/if}
           </section>
         {/if}
         <div class="log" role="log" aria-live="polite" aria-relevant="additions">{#if runs.events.length === 0}<p>Esperando actividad del runtime…</p>{:else}{#each runs.events as item (item.id)}<div><time>{new Date(item.at).toLocaleTimeString()}</time><pre>{eventText(item.event)}</pre></div>{/each}{/if}</div>
         {#if runs.current.error}<p class="error run-error">{runs.current.error}</p>{/if}
+      {:else if proposal}
+        <section class="proposal" aria-labelledby="proposal-title">
+          <div class="proposal-head"><div><span class="eyebrow">PROPUESTA NCTO · v{proposalRevision}</span><h2 id="proposal-title">{proposal.title}</h2></div><span class="proposal-kind">{proposal.solutionForm}</span></div>
+          <div class="proposal-summary"><article><small>LO QUE ENTENDIÓ INTENTOS</small><p>{proposal.problem}</p></article><article><small>RESULTADO COMPROBABLE</small><p>{proposal.outcome}</p></article></div>
+          {#if proposal.revisionNotes.length}<section class="revision"><strong>Revisión NCTO incorporada</strong><p>{proposal.revisionNotes.at(-1)}</p>{#if proposalChanges.length}<ul>{#each proposalChanges as change}<li>{change}</li>{/each}</ul>{/if}</section>{/if}
+          <details><summary>Ver criterio y plan interno</summary><div class="proposal-internal"><p><strong>Usuario inferido</strong><br/>{proposal.user}</p><p><strong>Trabajo a resolver</strong><br/>{proposal.job}</p><p><strong>Proyecto</strong><br/>Documents / IntentOS Projects / {proposal.projectSlug}</p><p><strong>Capacidades</strong><br/>{proposal.capabilities.map((item) => item.shortLabel).join(" + ")}</p><div class="experience-map"><strong>Experiencia propuesta</strong>{#each proposal.experience as step, index}<div><span>{index + 1}</span><p>{step}</p></div>{/each}</div><ol class="dynamic-team">{#each proposal.pipeline as stage, index (stage.id)}<li class:missing={!bySlug.has(stage.agent)}><div><strong>{index + 1}. {stage.label}</strong><small>Responsable: {bySlug.get(stage.agent)?.name ?? stage.agent}</small></div></li>{/each}</ol></div></details>
+          {#if rejecting}<label for="rejection">¿Qué debe cambiar?<textarea id="rejection" bind:value={rejectionReason} rows="4" placeholder="Explica por qué rechazas esta propuesta y qué dirección debe tomar IntentOS."></textarea></label>{/if}
+          <div class="decision-actions"><Button variant="primary" onclick={approveAndStart} loading={approving} disabled={!provider || !selected || !teamReady}>Aprobar y construir</Button>{#if rejecting}<Button variant="danger" onclick={rejectProposal}>Enviar rechazo razonado</Button>{:else}<Button variant="secondary" onclick={() => rejecting = true}>Rechazar / pedir cambios</Button>{/if}<Button variant="secondary" onclick={() => proposal = null}>Editar intención</Button></div>
+          {#if !provider}<p class="error">El runtime no está disponible; puedes revisar la propuesta, pero no iniciar producción.</p>{/if}
+        </section>
       {:else}
-        <div class="empty"><PlayIcon size={36}/><h2>La fábrica está preparada</h2><p>Selecciona proyecto y pipeline, escribe tu intención e inicia una ejecución.</p></div>
+        <div class="empty"><div class="empty-icon"><PlayIcon size={28}/></div><span class="eyebrow">VISTA PREVIA</span><h2>Tu intención se convertirá en un plan visible</h2><p>IntentOS elegirá internamente capacidades, especialistas y gates. Tú revisarás la solución propuesta antes de que comience la construcción.</p><ol><li>Describe el resultado deseado</li><li>Revisa la propuesta</li><li>Aprueba la construcción</li></ol></div>
       {/if}
     </aside>
   </div>
 </section>
 
-{#if deployRb}<InstallModal title={`Desplegar ${title(deployRb)}`} agentSlugs={resolvedSlugs(deployRb)} onClose={() => deployRb = null}/>{/if}
-
 <style>
-  .workspace{height:100%;display:flex;flex-direction:column;min-height:0}.head{padding:var(--space-3) var(--space-4);border-bottom:1px solid var(--color-border);display:flex;justify-content:space-between;gap:16px;align-items:center}.head h1{font-size:var(--text-h2)}.head p,.hint{color:var(--color-text-secondary);font-size:var(--text-body-sm)}.provider{font-size:11px;padding:5px 9px;border-radius:99px;background:color-mix(in srgb,var(--color-danger) 12%,transparent);color:var(--color-danger)}.provider.ok{background:color-mix(in srgb,var(--color-success) 12%,transparent);color:var(--color-success)}.grid{flex:1;min-height:0;overflow:auto;padding:var(--space-3);display:grid;grid-template-columns:minmax(340px,460px) minmax(380px,1fr);gap:var(--space-3)}.composer{display:flex;flex-direction:column;gap:var(--space-3)}.card,.console,.recipes>li{background:var(--color-surface-raised);border:1px solid var(--color-border);border-radius:var(--radius-lg)}.card{padding:var(--space-4);display:flex;flex-direction:column;gap:10px}label{font-size:var(--text-body-sm);font-weight:var(--fw-semibold);display:flex;flex-direction:column;gap:5px}textarea,select{width:100%;border:1px solid var(--color-border);border-radius:var(--radius-md);background:var(--color-surface);color:var(--color-text-primary);padding:9px;font:inherit}textarea{resize:vertical}.brief-toggle{display:flex;align-items:center;justify-content:space-between;gap:10px;width:100%;padding:10px;border:1px solid var(--color-border);border-radius:var(--radius-md);background:var(--color-surface)}.brief-toggle span{display:flex;flex-direction:column;align-items:flex-start}.brief-toggle small{color:var(--color-text-muted);font-size:11px}.brief-toggle svg{transition:transform .15s ease}.brief-toggle svg.rotated{transform:rotate(180deg)}.brief{display:grid;grid-template-columns:1fr 1fr;gap:10px;padding:10px;border:1px solid var(--color-border);border-radius:var(--radius-md);background:var(--color-surface-sunken)}.brief label:nth-child(n+3),.attachments{grid-column:1/-1}.brief textarea{background:var(--color-surface-raised);font-size:12px}.attachments{display:grid;grid-template-columns:1fr auto;gap:8px;align-items:center;padding:9px;border:1px dashed var(--color-border);border-radius:var(--radius-md)}.attachments>div{display:flex;flex-direction:column}.attachments small{font-size:11px;color:var(--color-text-muted)}.attachments ul{grid-column:1/-1;display:flex;flex-direction:column;gap:4px;list-style:none}.attachments li{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:5px 7px;border-radius:var(--radius-sm);background:var(--color-surface-raised);font-size:11px}.attachments li span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.attachments li button{display:flex;color:var(--color-text-muted)}.fields{display:grid;grid-template-columns:1fr auto;align-items:end;gap:8px}.error{font-size:var(--text-body-sm);color:var(--color-danger)}h2{font-size:var(--text-h3)}.recipes{list-style:none;display:flex;flex-direction:column;gap:8px}.recipes>li{padding:9px}.recipe{display:flex;gap:8px;width:100%;text-align:left}.recipe span{display:flex;flex-direction:column;gap:2px}.recipe small{font-size:12px;color:var(--color-text-secondary)}.recipe-actions{display:flex;gap:8px;justify-content:flex-end}.recipe-actions button{display:flex;gap:4px;align-items:center;color:var(--color-brand);font-size:12px}.roster{border-top:1px solid var(--color-border);margin-top:8px;padding-top:8px;display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px}.roster section,.roster span{display:flex;flex-direction:column;font-size:12px;color:var(--color-text-secondary)}.console{min-height:0;padding:var(--space-4);display:flex;flex-direction:column;gap:var(--space-3)}.run-head{display:flex;justify-content:space-between;gap:10px}.run-head p{font-size:11px;color:var(--color-text-muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:440px}.eyebrow{font-size:10px;color:var(--color-brand);letter-spacing:.08em}.stages{list-style:none;display:flex;flex-direction:column;gap:6px}.stages li{display:grid;grid-template-columns:12px 1fr auto;align-items:center;gap:9px;padding:8px;border-radius:var(--radius-md);background:var(--color-surface)}.stages li.active{outline:1px solid var(--color-brand)}.stages small{display:block;color:var(--color-text-muted);font-size:11px}.stages b{font-size:10px;text-transform:uppercase}.dot{width:9px;height:9px;border-radius:50%;background:var(--color-border)}.dot.running{background:var(--color-brand)}.dot.passed{background:var(--color-success)}.dot.failed{background:var(--color-danger)}.log{flex:1;min-height:180px;overflow:auto;background:var(--color-surface-sunken);border-radius:var(--radius-md);padding:10px}.log div{display:grid;grid-template-columns:76px 1fr;gap:8px;border-bottom:1px solid var(--color-border);padding:5px 0}.log time{font:10px var(--font-mono);color:var(--color-text-muted)}.log pre{white-space:pre-wrap;word-break:break-word;font:11px/1.45 var(--font-mono);color:var(--color-text-secondary)}.empty{margin:auto;text-align:center;max-width:360px;color:var(--color-text-secondary)}.empty h2{color:var(--color-text-primary);margin:10px 0 5px}.run-error{padding:8px;background:color-mix(in srgb,var(--color-danger) 10%,transparent);border-radius:var(--radius-md)}button{cursor:pointer;background:none;color:inherit}@media(max-width:820px){.grid{grid-template-columns:1fr}.console{min-height:520px}.head{align-items:flex-start;flex-direction:column}.fields,.brief{grid-template-columns:1fr}.brief label:nth-child(n){grid-column:auto}.recipe-actions{justify-content:flex-start;flex-wrap:wrap}}@media(prefers-reduced-motion:reduce){*{scroll-behavior:auto!important}.brief-toggle svg{transition:none}}
-  .router{display:flex;flex-direction:column;gap:8px;padding:10px;border:1px solid color-mix(in srgb,var(--color-brand) 45%,var(--color-border));border-radius:var(--radius-md);background:color-mix(in srgb,var(--color-brand) 5%,var(--color-surface-sunken))}.router-head{display:flex;justify-content:space-between;align-items:flex-start;gap:8px}.router-head>div{display:flex;flex-direction:column}.router-head small,.router p,.signals{color:var(--color-text-muted);font-size:11px}.router-head>span{padding:3px 7px;border-radius:99px;background:color-mix(in srgb,var(--color-brand) 14%,transparent);color:var(--color-brand);font-size:10px;font-weight:var(--fw-semibold)}.dynamic-team{display:grid;grid-template-columns:1fr 1fr;gap:5px;list-style:none}.dynamic-team li{display:grid;grid-template-columns:20px 1fr;gap:6px;align-items:center;padding:5px;border-radius:var(--radius-sm);background:var(--color-surface-raised)}.dynamic-team li>span{display:grid;place-items:center;width:18px;height:18px;border-radius:50%;background:color-mix(in srgb,var(--color-brand) 15%,transparent);color:var(--color-brand);font-size:9px;font-weight:700}.dynamic-team li div{min-width:0;display:flex;flex-direction:column}.dynamic-team strong,.dynamic-team small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.dynamic-team strong{font-size:10px}.dynamic-team small{font-size:9px;color:var(--color-text-muted)}.dynamic-team li.missing{outline:1px solid var(--color-danger)}@media(max-width:520px){.dynamic-team{grid-template-columns:1fr}}
+  .workspace{height:100%;display:flex;flex-direction:column;min-height:0;overflow:hidden}.head{flex:0 0 auto;padding:var(--space-3) var(--space-4);border-bottom:1px solid var(--color-border);display:flex;justify-content:space-between;gap:16px;align-items:center}.head h1{font-size:var(--text-h2)}.head p,.hint{color:var(--color-text-secondary);font-size:var(--text-body-sm)}.provider{font-size:11px;padding:5px 9px;border-radius:99px;background:color-mix(in srgb,var(--color-danger) 12%,transparent);color:var(--color-danger)}.provider.ok{background:color-mix(in srgb,var(--color-success) 12%,transparent);color:var(--color-success)}.provider-select{font-size:11px;padding:5px 9px;border-radius:99px;border:1px solid var(--color-border);background:var(--color-surface);color:var(--color-text-primary)}.grid{flex:1;min-height:0;overflow:hidden;padding:var(--space-3);display:grid;grid-template-columns:minmax(340px,460px) minmax(380px,1fr);gap:var(--space-3)}.composer,.console{min-height:0;overflow:auto;scrollbar-gutter:stable}.composer{display:flex;flex-direction:column;gap:var(--space-3)}.card,.console{background:var(--color-surface-raised);border:1px solid var(--color-border);border-radius:var(--radius-lg)}.card{padding:var(--space-4);display:flex;flex-direction:column;gap:10px}label{font-size:var(--text-body-sm);font-weight:var(--fw-semibold);display:flex;flex-direction:column;gap:5px}textarea,select{width:100%;border:1px solid var(--color-border);border-radius:var(--radius-md);background:var(--color-surface);color:var(--color-text-primary);padding:9px;font:inherit}textarea{resize:vertical}.attachments{display:grid;grid-template-columns:1fr auto;gap:8px;align-items:center;padding:9px;border:1px dashed var(--color-border);border-radius:var(--radius-md)}.attachments>div{display:flex;flex-direction:column}.attachments small{font-size:11px;color:var(--color-text-muted)}.attachments ul{grid-column:1/-1;display:flex;flex-direction:column;gap:4px;list-style:none}.attachments li{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:5px 7px;border-radius:var(--radius-sm);background:var(--color-surface-raised);font-size:11px}.attachments li span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.attachments li button{display:flex;color:var(--color-text-muted)}.fields{display:grid;grid-template-columns:1fr auto;align-items:end;gap:8px}.error{font-size:var(--text-body-sm);color:var(--color-danger)}h2{font-size:var(--text-h3)}.console{padding:var(--space-4);display:flex;flex-direction:column;gap:var(--space-3)}.run-head{display:flex;justify-content:space-between;gap:10px}.run-head p{font-size:11px;color:var(--color-text-muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:440px}.eyebrow{font-size:10px;color:var(--color-brand);letter-spacing:.08em}.stages{list-style:none;display:flex;flex-direction:column;gap:6px}.stages li{display:grid;grid-template-columns:12px 1fr auto;align-items:center;gap:9px;padding:8px;border-radius:var(--radius-md);background:var(--color-surface)}.stages li.active{outline:1px solid var(--color-brand)}.stages small{display:block;color:var(--color-text-muted);font-size:11px}.stages b{font-size:10px;text-transform:uppercase}.dot{width:9px;height:9px;border-radius:50%;background:var(--color-border)}.dot.running{background:var(--color-brand)}.dot.passed{background:var(--color-success)}.dot.failed{background:var(--color-danger)}.log{flex:1;min-height:180px;overflow:auto;background:var(--color-surface-sunken);border-radius:var(--radius-md);padding:10px}.log div{display:grid;grid-template-columns:76px 1fr;gap:8px;border-bottom:1px solid var(--color-border);padding:5px 0}.log time{font:10px var(--font-mono);color:var(--color-text-muted)}.log pre{white-space:pre-wrap;word-break:break-word;font:11px/1.45 var(--font-mono);color:var(--color-text-secondary)}.empty{margin:auto;width:min(100%,440px);min-height:300px;padding:32px;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;color:var(--color-text-secondary)}.empty-icon{width:54px;height:54px;display:grid;place-items:center;margin-bottom:14px;border-radius:16px;background:color-mix(in srgb,var(--color-brand) 14%,transparent);color:var(--color-brand)}.empty h2{max-width:360px;color:var(--color-text-primary);margin:8px 0}.empty p{max-width:390px;font-size:var(--text-body-sm);line-height:1.5}.empty ol{display:flex;gap:6px;margin-top:18px;padding:0;list-style:none;counter-reset:steps}.empty li{padding:6px 9px;border:1px solid var(--color-border);border-radius:99px;font-size:10px;color:var(--color-text-muted)}.run-error{padding:8px;background:color-mix(in srgb,var(--color-danger) 10%,transparent);border-radius:var(--radius-md)}button{cursor:pointer}@media(max-width:820px){.workspace{overflow:auto}.grid{overflow:visible;grid-template-columns:1fr}.composer,.console{overflow:visible}.console{min-height:420px}.head{align-items:flex-start;flex-direction:column}.fields{grid-template-columns:1fr}.empty ol{flex-direction:column}.recipe-actions{justify-content:flex-start;flex-wrap:wrap}}@media(prefers-reduced-motion:reduce){*{scroll-behavior:auto!important}}
+  .dynamic-team{display:grid;grid-template-columns:1fr 1fr;gap:5px;list-style:none}.dynamic-team li{padding:7px;border-radius:var(--radius-sm);background:var(--color-surface-raised)}.dynamic-team li div{min-width:0;display:flex;flex-direction:column}.dynamic-team strong,.dynamic-team small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.dynamic-team strong{font-size:10px;color:var(--color-text-primary)}.dynamic-team small{font-size:9px;color:var(--color-text-muted)}.dynamic-team li.missing{outline:1px solid var(--color-danger)}@media(max-width:520px){.dynamic-team{grid-template-columns:1fr}}
   .head-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
-  .workspace-review{display:flex;flex-direction:column;gap:8px;padding:9px;border:1px solid var(--color-border);border-radius:var(--radius-md);background:var(--color-surface)}.review-actions{display:flex;gap:7px;flex-wrap:wrap}.workspace-review p{font-size:11px;color:var(--color-success)}.workspace-review p.conflict{color:var(--color-danger)}.change-list{max-height:160px;overflow:auto;list-style:none;display:flex;flex-direction:column;gap:3px}.change-list li{display:grid;grid-template-columns:58px 1fr;gap:7px;font:10px var(--font-mono)}.change-list span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.change-list b{text-transform:uppercase}.change-list b.added{color:var(--color-success)}.change-list b.modified{color:var(--color-brand)}.change-list b.removed{color:var(--color-danger)}
+  .options{border:1px solid var(--color-border);border-radius:var(--radius-md);background:var(--color-surface)}.options>summary{display:flex;justify-content:space-between;gap:8px;padding:9px;cursor:pointer;font-size:11px;font-weight:var(--fw-semibold)}.options>summary small{color:var(--color-text-muted);font-weight:400}.options-body{display:flex;flex-direction:column;gap:10px;padding:0 9px 9px}.existing-toggle{display:flex;flex-direction:row;align-items:center;gap:8px}.existing-toggle input{width:auto}.proposal{display:flex;flex-direction:column;gap:12px;min-height:0;overflow:auto}.proposal-head{display:flex;justify-content:space-between;gap:12px;align-items:flex-start}.proposal-kind{max-width:220px;padding:5px 8px;border-radius:99px;background:color-mix(in srgb,var(--color-brand) 14%,transparent);color:var(--color-brand);font-size:10px;text-align:center}.proposal-summary{display:grid;grid-template-columns:1fr 1fr;gap:8px}.proposal-summary article{padding:10px;border-radius:var(--radius-md);background:var(--color-surface)}.proposal-summary small{font-size:9px;letter-spacing:.08em;color:var(--color-brand)}.proposal-summary p,.proposal-internal p,.experience-map p{font-size:11px;color:var(--color-text-secondary);white-space:pre-wrap}.proposal-internal{display:flex;flex-direction:column;gap:9px;padding-top:9px}.proposal-internal>p{padding:8px;border-radius:var(--radius-sm);background:var(--color-surface)}.experience-map{display:flex;flex-direction:column;gap:6px}.experience-map div{display:grid;grid-template-columns:24px 1fr;gap:8px;align-items:center;padding:8px;background:var(--color-surface);border-radius:var(--radius-md)}.experience-map span{display:grid;place-items:center;width:22px;height:22px;border-radius:50%;background:color-mix(in srgb,var(--color-brand) 16%,transparent);color:var(--color-brand);font-size:10px;font-weight:700}.proposal details{padding:9px;border:1px solid var(--color-border);border-radius:var(--radius-md)}.proposal summary{cursor:pointer;font-size:11px;color:var(--color-text-secondary)}.decision-actions{display:flex;gap:8px;flex-wrap:wrap}
+  .revision{padding:11px;border:1px solid color-mix(in srgb,var(--color-brand) 45%,var(--color-border));border-radius:var(--radius-md);background:color-mix(in srgb,var(--color-brand) 7%,var(--color-surface))}.revision p,.revision li{font-size:11px;color:var(--color-text-secondary)}.revision ul{margin:7px 0 0 18px;display:flex;flex-direction:column;gap:3px}
+  .workspace-review{display:flex;flex-direction:column;gap:8px;padding:9px;border:1px solid var(--color-border);border-radius:var(--radius-md);background:var(--color-surface)}.review-actions{display:flex;gap:7px;flex-wrap:wrap}.workspace-review p{font-size:11px;color:var(--color-success)}.workspace-review p.conflict{color:var(--color-danger)}.delivery-receipt{display:flex;flex-direction:column;gap:2px;padding:9px;border-radius:var(--radius-md);background:color-mix(in srgb,var(--color-success) 10%,var(--color-surface));color:var(--color-success)}.delivery-receipt span,.delivery-receipt small{font-size:10px;color:var(--color-text-secondary)}.change-list{max-height:160px;overflow:auto;list-style:none;display:flex;flex-direction:column;gap:3px}.change-list li{display:grid;grid-template-columns:58px 1fr;gap:7px;font:10px var(--font-mono)}.change-list span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.change-list b{text-transform:uppercase}.change-list b.added{color:var(--color-success)}.change-list b.modified{color:var(--color-brand)}.change-list b.removed{color:var(--color-danger)}
+  .catalog-detail{padding:var(--space-4);display:flex;flex-direction:column;gap:14px;background:var(--color-surface-raised);border:1px solid var(--color-border);border-radius:var(--radius-lg)}.catalog-detail h2{font-size:22px}.catalog-description{font-size:13px;line-height:1.55;color:var(--color-text-secondary)}.catalog-detail section{padding-top:11px;border-top:1px solid var(--color-border)}.catalog-detail h3{margin-bottom:6px;font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--color-text-muted)}.catalog-detail section p,.catalog-detail li{font-size:11px;line-height:1.5;color:var(--color-text-secondary)}.catalog-detail ul{display:flex;flex-direction:column;gap:5px;list-style:none}.catalog-detail li{display:flex;align-items:center;gap:7px}.catalog-detail li :global(svg){flex:none;color:var(--color-success)}.catalog-back{align-self:flex-start;display:flex;align-items:center;gap:5px;color:var(--color-text-muted);font-size:10px}.catalog-back:hover{color:var(--color-text-primary)}.catalog-capabilities{padding:10px;border-radius:var(--radius-md);background:color-mix(in srgb,var(--color-brand) 8%,var(--color-surface))}.catalog-capabilities small,.catalog-context span{font-size:9px;letter-spacing:.08em;color:var(--color-brand)}.catalog-capabilities p{margin-top:3px;font-size:11px}.catalog-context{display:flex;flex-direction:column;gap:2px;padding:9px;border-radius:var(--radius-md);background:color-mix(in srgb,var(--color-brand) 8%,var(--color-surface))}.catalog-context strong{font-size:12px}.catalog-context small{font-size:10px;color:var(--color-text-muted)}
 </style>

@@ -5,6 +5,10 @@
   reconciliation, both scopes, domain module map, frontend sections.
 - `contracts.md` — **the build spec**: core types, install-target matrix, command surface,
   frontend stores, determinism rules. Build against this.
+- `intentosAgencyModel.md` — verified map of divisions, professions, eight operational
+  capabilities, five runtime functions, current inventory drift, and the next agency gate.
+- `intentosNavigationCharter.md` — APPROVED v2 architecture: Hunter, Mission/Engagement,
+  Factory, Offer/Delivery — what exists, what's next (Fase 3+). Read before extending IntentOS.
 - `decisions.md` — ADRs (fork, Plan B, corpus-copy, state tracking, hash-match provenance,
   both scopes, vulns→Quality/services→Tools/Snapshots→Loadouts, open: updater key).
 - `phases/phase-roadmap.md` — Phase 0–6 plan + parallelization map.

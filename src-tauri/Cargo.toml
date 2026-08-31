@@ -81,6 +81,12 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # `serde_urlencoded` is already pulled in transitively by `reqwest`
 # but `url` (parsing) is not. Keep this dep tight.
 url = "2"
+temporalio-client = "0.7.0"
+temporalio-common = "0.7.0"
+temporalio-macros = "0.7.0"
+temporalio-sdk = "0.7.0"
+temporalio-workflow = "0.7.0"
+futures = "0.3"
 
 # Native macOS window vibrancy (NSVisualEffectView) — gives the sidebar that
 # "frosted glass" look the rest of macOS uses. Cross-platform crate; we only

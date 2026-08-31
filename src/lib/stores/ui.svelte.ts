@@ -137,6 +137,9 @@ class UiStore {
   /** Key of the team open in the Teams detail pane (`preset:<slug>` /
       `saved:<id>`); null = the team list. In ui so back/forward restores it. */
   teamsSelected: string | null = $state(null);
+  /** Product selected from the creation catalog. It is transient navigation
+      context, never a persisted project or an instruction to execute. */
+  catalogProductId: string | null = $state(null);
 
   /** Back/forward history of app locations + the cursor into it. */
   navStack: NavLocation[] = $state([]);
@@ -185,6 +188,7 @@ class UiStore {
 
   setSection(s: SidebarSection) {
     this.section = s;
+    if (s !== "runbooks") this.catalogProductId = null;
     // Navigating to ANY section closes the package detail slide-over and resets
     // the Projects detail to its list (a fresh sidebar click lands on the list).
     this.selectedPackage = null;
@@ -192,6 +196,14 @@ class UiStore {
     this.teamsSelected = null;
     this.commitNav();
   }
+
+  /** Open a product explanation before the user decides to create it. */
+  openCatalogProduct(productId: string) {
+    this.catalogProductId = productId;
+    this.setSection("runbooks");
+  }
+
+  clearCatalogProduct() { this.catalogProductId = null; }
 
   /** Open the Projects detail pane for a project path (null = back to the list).
       A nav location, so the title-bar back button returns to the list. Also

@@ -52,6 +52,34 @@ aarch64+x64 signed/notarized DMGs **+ updater tarballs**, Linux deb/rpm/AppImage
 
 **Workflow (from 2026-06-16):** ALL changes go through a **branch → PR → merge to `main`**. No direct commits to main.
 
+## IntentOS Navigation Charter v2 — APPROVED — 2026-08-23
+
+Full architecture reconstruction (Hunter, IntentOS/Agency, Factory, Mission/Engagement,
+Offer/Delivery) reviewed by the NCTO in two passes and approved. Persisted at
+`memory-bank/intentosNavigationCharter.md` — **read that file before extending IntentOS
+beyond what's built**. Key resequencing: Hunter's first narrow experiment (Legacy Hunter
+candidate) now comes right after a minimal Mission/Engagement, not at the end of the
+roadmap. Fase 0 (Agency + Runtime v0.1) and Fase 1 (`agencyRamosLink.ts` guard) were
+already done; this persistence is Fase 2. **Fase 3 (Mission/Engagement mínimo) is next
+and has NOT been started** — needs an explicit go-ahead from Wladimir before any code is
+touched. This is a separate line of work from Runtime v0.1 (frozen at `404f4b1`, untouched)
+and from the divisions/agency-organization rework noted above.
+
+## Mission v1 (Agency Operating Specification) — implemented, verification pending — 2026-08-23
+
+Following NCTO approval of four architecture-review passes plus a real-world Agency Operational
+Pattern Survey, implemented the minimal Fase 3 Mission/Engagement layer: new `mission.rs`
+(Mission type, persistence, 4 commands, deterministic `mission_brief()`), additive edits to
+`lib.rs` (module + command registration) and `runtime.rs` (`mission_id` optional on
+StartRunRequest/RunSummary; `stage_prompt()` interpolates the brief only when attached — output
+is byte-identical to v0.1 otherwise, covered by a new explicit test). `types.rs`/`state.rs`
+untouched. See `intentosNavigationCharter.md` for the corrected Fase 3 text and
+`decisions.md`/`agentLog.md` for the full record.
+
+**Pending**: git branch creation and `cargo test` — no terminal/device_bash access to this
+machine in the session that wrote the code. Frontend (Runbooks.svelte / lib/types.ts /
+lib/api.ts) not yet touched — needs a dedicated read-then-implement pass. See NEXT-SESSION.md.
+
 ## ✅ v0.2.0 — first feature release + LIVE auto-update — SHIPPED (2026-06-23, PRs #21 + #22; `main` @ 16182e5)
 - **Auto-update is on.** Endpoint `agencyagents.app/updater.json` (Caddy on `umacbookpro` from `~/Sites/agency-agents/`,
   sibling vhost to the live `brew-browser.zerologic.com` manifest). **Dedicated agency signing key `ABF5AFD8`**

@@ -19,6 +19,7 @@
 import { invoke } from "@tauri-apps/api/core";
 
 import { i18n } from "$lib/stores/i18n.svelte";
+import { AGENCY_DEPARTMENTS, AGENCY_RAMAS, AGENCY_VERTICALS, agencyDepartment, agencyLens, agentMatchesOrganization, departmentSlugForAgent } from "$lib/data/agencyOrganization";
 import type { Agent, Category } from "$lib/types";
 
 class CorpusStore {
@@ -120,17 +121,30 @@ class CorpusStore {
    * for a stable, deterministic scan order.
    */
   tiles = $derived.by<Category[]>(() => {
-    const out = this.categories.map((c) => ({
-      ...c,
-      label: i18n.optional(`category.${c.slug}`, c.label),
-      count: c.count > 0 ? c.count : (this.countsByCategory.get(c.slug) ?? 0),
-    }));
+    const counts = new Map<string, number>();
+    for (const agent of this.agents) {
+      const slug = departmentSlugForAgent(agent);
+      counts.set(slug, (counts.get(slug) ?? 0) + 1);
+    }
+    const out: Category[] = AGENCY_DEPARTMENTS
+      .filter((department) => (counts.get(department.slug) ?? 0) > 0)
+      .map((department) => ({ ...department, count: counts.get(department.slug) ?? 0 }));
+    const knownSources = new Set(AGENCY_DEPARTMENTS.flatMap((department) => department.sourceCategories));
+    for (const category of this.categories) {
+      if (knownSources.has(category.slug)) continue;
+      const count = counts.get(category.slug) ?? this.countsByCategory.get(category.slug) ?? 0;
+      if (count > 0) out.push({ ...category, label: i18n.optional(`category.${category.slug}`, category.label), count });
+    }
     out.sort((a, b) => a.label.localeCompare(b.label));
     return out;
   });
 
   /** Pretty label for a category slug. Falls back to the slug. */
   labelOf(slug: string): string {
+    const department = agencyDepartment(slug);
+    if (department) return department.label;
+    const lens = agencyLens(slug);
+    if (lens) return lens.label;
     const label = this.categories.find((c) => c.slug === slug)?.label ?? slug;
     return i18n.optional(`category.${slug}`, label);
   }
@@ -138,12 +152,20 @@ class CorpusStore {
   /** Brand color (hex) for a division slug, from the catalog metadata. Falls
       back to a neutral grey for an unknown slug. */
   colorOf(slug: string): string {
+    const department = agencyDepartment(slug);
+    if (department) return department.color;
+    const lens = agencyLens(slug);
+    if (lens) return lens.color;
     return this.categories.find((c) => c.slug === slug)?.color ?? "#94A3B8";
   }
 
   /** Lucide icon NAME for a division slug, from the catalog metadata. Falls
       back to "HelpCircle" (resolveCategoryIcon's own fallback) for unknowns. */
   iconOf(slug: string): string {
+    const department = agencyDepartment(slug);
+    if (department) return department.icon;
+    const lens = agencyLens(slug);
+    if (lens) return lens.icon;
     return this.categories.find((c) => c.slug === slug)?.icon ?? "HelpCircle";
   }
 
@@ -155,13 +177,37 @@ class CorpusStore {
   filtered(categorySlug: string | null, query: string): Agent[] {
     const q = query.trim().toLowerCase();
     const out = this.agents.filter((a) => {
-      if (categorySlug && a.category !== categorySlug) return false;
+      if (categorySlug && !agentMatchesOrganization(a, categorySlug)) return false;
       if (!q) return true;
       const hay = `${a.name} ${a.description} ${a.vibe ?? ""}`.toLowerCase();
       return hay.includes(q);
     });
     out.sort((a, b) => a.name.localeCompare(b.name));
     return out;
+  }
+
+  departmentOf(agent: Pick<Agent, "slug" | "category">): string {
+    return departmentSlugForAgent(agent);
+  }
+
+  agentSlugsForDivision(slug: string): string[] {
+    return this.agents.filter((agent) => agentMatchesOrganization(agent, slug)).map((agent) => agent.slug);
+  }
+
+  organizationTiles(kind: "departments" | "ramos" | "verticals"): Category[] {
+    if (kind === "departments") return this.tiles;
+    const definitions = kind === "ramos" ? AGENCY_RAMAS : AGENCY_VERTICALS;
+    return definitions.map((lens) => ({
+      slug: lens.slug,
+      label: lens.label,
+      icon: lens.icon,
+      color: lens.color,
+      count: this.agents.filter((agent) => agentMatchesOrganization(agent, lens.slug)).length,
+    }));
+  }
+
+  matchesDivision(agent: Pick<Agent, "slug" | "category">, slug: string): boolean {
+    return agentMatchesOrganization(agent, slug);
   }
 }
 

@@ -1,6 +1,6 @@
 /** IntentOS runtime projection. The Rust backend remains the source of truth. */
 import { Channel, invoke } from "@tauri-apps/api/core";
-import type { RunEvent, RunSummary, RuntimeProvider, RuntimeReview, StartRunRequest } from "$lib/types";
+import type { DeliveryReceipt, RunEvent, RunSummary, RuntimeProvider, RuntimeReview, StartRunRequest } from "$lib/types";
 
 export interface TimestampedRunEvent {
   id: number;
@@ -18,6 +18,7 @@ class RunsStore {
   cancelling = $state(false);
   error: string | null = $state(null);
   review: RuntimeReview | null = $state(null);
+  receipt: DeliveryReceipt | null = $state(null);
   reviewing = $state(false);
   applying = $state(false);
   discarding = $state(false);
@@ -48,6 +49,7 @@ class RunsStore {
     this.error = null;
     this.events = [];
     this.review = null;
+    this.receipt = null;
     this.sequence = 0;
     const onEvent = new Channel<RunEvent>();
     onEvent.onmessage = (event) => this.accept(event);
@@ -98,10 +100,19 @@ class RunsStore {
     this.applying = true;
     try {
       this.review = await invoke<RuntimeReview>("runtime_apply", { runId: this.current.id });
+      this.receipt = await invoke<DeliveryReceipt>("runtime_delivery_receipt", { runId: this.current.id });
       return this.review;
     } finally {
       this.applying = false;
     }
+  }
+
+  async loadReceipt(): Promise<DeliveryReceipt | null> {
+    if (!this.current || this.current.status !== "succeeded") return null;
+    this.receipt = await invoke<DeliveryReceipt>("runtime_delivery_receipt", {
+      runId: this.current.id,
+    });
+    return this.receipt;
   }
 
   async discardCurrentWorkspace(): Promise<void> {
@@ -112,6 +123,7 @@ class RunsStore {
       this.current = { ...this.current, workspacePath: null };
       this.upsert(this.current);
       this.review = null;
+      this.receipt = null;
     } finally {
       this.discarding = false;
     }
@@ -123,6 +135,7 @@ class RunsStore {
     this.events = [];
     this.error = null;
     this.review = null;
+    this.receipt = null;
     this.sequence = 0;
   }
 

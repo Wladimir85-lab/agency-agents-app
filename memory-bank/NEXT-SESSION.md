@@ -19,7 +19,45 @@ morning hours, after Runtime v0.1's code was already in place. It has no memory-
 documentation yet — read the live diff before continuing it, and don't conflate it with the
 runtime closure above.
 
-Read this first after a compaction. Then `activeContext.md`, `agentLog.md` (append-only history),
+## IntentOS Navigation Charter v2 — APPROVED (2026-08-23); Fase 3 next, NOT started
+
+Read `intentosNavigationCharter.md` for the full approved architecture (Hunter,
+Mission/Engagement, Factory, Offer/Delivery, the phased build sequence). Fase 0 (Agency +
+Runtime v0.1) and Fase 1 (`agencyRamosLink.ts`) are done; this persistence is Fase 2.
+**Fase 3 (Mission/Engagement mínimo — extend `ProjectInfo` with an open mission-type
+field) is the next planned step and has not been started.** Do not begin it, or any Hunter
+work, without an explicit go-ahead from the NCTO (Wladimir) in a live session — the charter
+records the approved sequence, it is not authorization to start building.
+
+## Mission v1 — implementation done, verification pending — 2026-08-23
+
+`mission.rs` (new), `lib.rs` and `runtime.rs` (additive edits) were written to this repository
+in a session that had file read/write access to this machine but no terminal/device_bash. Two
+steps remain before this can be committed:
+
+1. Create a branch and inspect the diff:
+   ```
+   cd agency-agents-app
+   git checkout -b feature/mission-v1
+   git status
+   git diff
+   ```
+2. Build and run the full test suite (must all pass, including the pre-existing Runtime v0.1
+   tests unchanged, plus the new mission.rs and runtime.rs tests):
+   ```
+   cd src-tauri
+   cargo test
+   ```
+   Pay particular attention to `stage_prompt_without_mission_omits_the_brief_section` in
+   runtime.rs — that is the explicit backward-compatibility guarantee for Runtime v0.1.
+3. If everything passes, commit on the branch and let the NCTO decide on merge.
+
+Not yet done, deliberately out of this pass: frontend wiring (Runbooks.svelte, lib/types.ts,
+lib/api.ts — a Mission creation/selection UI), sourceLocale + locale propagation, Policy Ledger,
+a third gate signal distinct from PASS/FAIL, and Mission Brief mid-run versioning. See
+`intentosNavigationCharter.md` Fase 3 entry and `decisions.md` for the full rationale.
+
+Read this first after a compaction. Then `activeContext.md`, `intentosNavigationCharter.md`, `agentLog.md` (append-only history),
 `phases/phase-roadmap.md`, `contracts.md`, `systemPatterns.md`, `decisions.md`.
 
 ## ⏩ CURRENT (2026-06-23) — read `activeContext.md` for the live picture

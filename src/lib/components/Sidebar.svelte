@@ -8,6 +8,8 @@
   import Activity from "@lucide/svelte/icons/activity";
   import PanelLeftClose from "@lucide/svelte/icons/panel-left-close";
   import PanelLeftOpen from "@lucide/svelte/icons/panel-left-open";
+  import Layers3 from "@lucide/svelte/icons/layers-3";
+  import ChevronRight from "@lucide/svelte/icons/chevron-right";
 
   import { ui } from "$lib/stores/ui.svelte";
   import { corpus } from "$lib/stores/corpus.svelte";
@@ -15,6 +17,7 @@
   import { i18n } from "$lib/stores/i18n.svelte";
   import { shortcut } from "$lib/util/platform";
   import type { SidebarSection } from "$lib/types";
+  import { CREATION_CATALOG } from "$lib/data/intentosCapabilities";
 
   interface NavItem {
     id: SidebarSection;
@@ -60,6 +63,7 @@
 
   /** Footer: live corpus size — the app's own at-a-glance status. */
   const agentCount = $derived(corpus.agents.length);
+  let openCatalogArea = $state<string | null>("frontend");
 </script>
 
 <aside
@@ -86,6 +90,30 @@
   </div>
 
   <nav>
+    <section class="creation-catalog" aria-label="Catálogo de creación">
+      {#if ui.sidebarCollapsed}
+        <button class="catalog-rail" type="button" title="Abrir Catálogo de Creación" aria-label="Abrir Catálogo de Creación" onclick={() => ui.toggleSidebarCollapsed()}><Layers3 size={17}/></button>
+      {:else}
+        <div class="catalog-title"><Layers3 size={14}/><span>CATÁLOGO</span></div>
+        <p class="catalog-subtitle">¿Qué quieres crear?</p>
+        {#each CREATION_CATALOG as area (area.id)}
+          {@const expanded = openCatalogArea === area.id}
+          <div class="catalog-area">
+            <button class="area-trigger" type="button" aria-expanded={expanded} onclick={() => openCatalogArea = expanded ? null : area.id}>
+              <b>{area.number}</b><span>{area.name}</span><ChevronRight class={expanded ? "expanded" : undefined} size={13}/>
+            </button>
+            {#if expanded}
+              <ul class="products">
+                {#each area.products as product (product.id)}
+                  <li><button class:active={ui.catalogProductId === product.id} type="button" title={product.description} onclick={() => ui.openCatalogProduct(product.id)}>{product.name}</button></li>
+                {/each}
+              </ul>
+            {/if}
+          </div>
+        {/each}
+      {/if}
+    </section>
+    {#if !ui.sidebarCollapsed}<div class="nav-divider"><span>ESPACIOS</span></div>{/if}
     <ul>
       {#each nav as item (item.id)}
         {@const isActive = ui.section === item.id}
@@ -161,6 +189,7 @@
 
   nav { flex: 1; padding: var(--space-2); overflow-y: auto; }
   ul { display: flex; flex-direction: column; gap: 1px; }
+  .creation-catalog{margin-bottom:8px}.catalog-rail{width:100%;height:34px;display:grid;place-items:center;border-radius:var(--radius-md);color:var(--color-brand)}.catalog-rail:hover{background:var(--color-brand-subtle)}.catalog-title{display:flex;align-items:center;gap:7px;padding:5px 9px 1px;color:var(--color-brand);font-size:10px;font-weight:800;letter-spacing:.12em}.catalog-subtitle{padding:0 9px 7px;color:var(--color-text-muted);font-size:10px}.catalog-area{margin-bottom:1px}.area-trigger{display:grid;grid-template-columns:22px 1fr 14px;align-items:center;gap:5px;width:100%;min-height:30px;padding:5px 8px;border-radius:var(--radius-md);color:var(--color-text-secondary);text-align:left}.area-trigger:hover{background:var(--color-surface-raised);color:var(--color-text-primary)}.area-trigger b{font:9px var(--font-mono);color:var(--color-brand)}.area-trigger span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px;font-weight:600}.area-trigger :global(svg){transition:transform 140ms ease}.area-trigger :global(svg.expanded){transform:rotate(90deg)}.products{margin:2px 0 6px 28px!important;padding-left:7px;border-left:1px solid var(--color-border)}.products button{width:100%;padding:5px 6px;border-radius:var(--radius-sm);color:var(--color-text-muted);font-size:10px;line-height:1.25;text-align:left}.products button:hover,.products button.active{background:var(--color-brand-subtle);color:var(--color-cask-on-subtle)}.nav-divider{display:flex;align-items:center;gap:6px;margin:9px 8px 5px;color:var(--color-text-muted);font-size:8px;letter-spacing:.14em}.nav-divider:after{content:"";height:1px;flex:1;background:var(--color-border)}
 
   .nav-item {
     display: flex;

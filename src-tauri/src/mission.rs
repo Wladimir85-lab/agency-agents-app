@@ -30,6 +30,80 @@ use crate::util::fs::{atomic_write, read_capped};
 const MAX_MISSION_FILE_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_TEXT_FIELD_CHARS: usize = 20_000;
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateAutomaticProjectRequest {
+    pub suggested_name: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AutomaticProject {
+    pub name: String,
+    pub path: String,
+}
+
+fn safe_project_slug(value: &str) -> String {
+    let mut slug = String::new();
+    let mut separator = false;
+    for ch in value.chars().flat_map(char::to_lowercase) {
+        if ch.is_ascii_alphanumeric() {
+            slug.push(ch);
+            separator = false;
+        } else if !separator && !slug.is_empty() {
+            slug.push('-');
+            separator = true;
+        }
+        if slug.len() >= 54 {
+            break;
+        }
+    }
+    while slug.ends_with('-') {
+        slug.pop();
+    }
+    if slug.is_empty() {
+        "nuevo-proyecto".into()
+    } else {
+        slug
+    }
+}
+
+#[tauri::command]
+pub async fn project_create_automatic(
+    request: CreateAutomaticProjectRequest,
+) -> Result<AutomaticProject, AppError> {
+    let documents = dirs::document_dir().ok_or_else(|| AppError::Internal {
+        message: "could not resolve the Documents directory".into(),
+    })?;
+    let root = documents.join("IntentOS Projects");
+    tokio::fs::create_dir_all(&root).await?;
+    let slug = safe_project_slug(request.suggested_name.trim());
+    let mut candidate = root.join(&slug);
+    let mut suffix = 2u16;
+    while tokio::fs::try_exists(&candidate).await? {
+        candidate = root.join(format!("{slug}-{suffix}"));
+        suffix = suffix.saturating_add(1);
+    }
+    tokio::fs::create_dir_all(&candidate).await?;
+    let metadata_dir = candidate.join(".intentos");
+    tokio::fs::create_dir_all(&metadata_dir).await?;
+    let metadata = serde_json::to_vec_pretty(&serde_json::json!({
+        "schemaVersion": 1,
+        "name": request.suggested_name.trim(),
+        "createdBy": "IntentOS",
+        "createdAt": Utc::now(),
+    }))?;
+    atomic_write(&metadata_dir.join("project.json"), &metadata).await?;
+    Ok(AutomaticProject {
+        name: candidate
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(&slug)
+            .to_string(),
+        path: candidate.to_string_lossy().to_string(),
+    })
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum EngagementRegime {
@@ -459,5 +533,16 @@ mod tests {
         assert_eq!(mission.engagement_regime, EngagementRegime::Fixed);
         assert_eq!(mission.status, MissionStatus::Draft);
         assert!(!mission.approved_by_ncto);
+    }
+
+    #[test]
+    fn automatic_project_slug_rejects_path_syntax() {
+        assert_eq!(
+            safe_project_slug("../../Proyecto: Caja 2026"),
+            "proyecto-caja-2026"
+        );
+        assert_eq!(safe_project_slug("   "), "nuevo-proyecto");
+        let slug = safe_project_slug("A\\B/C");
+        assert!(!slug.contains(['/', '\\']));
     }
 }

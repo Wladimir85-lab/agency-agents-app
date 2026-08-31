@@ -4,16 +4,20 @@
 //! Tauri Builder + invoke_handler registration; every command lives
 //! in `commands::*`.
 
+mod capability_resolution;
 mod commands;
 mod corpus;
 mod error;
+mod fabric;
 mod github;
 mod install;
 mod mission;
 mod registry;
 mod render;
 mod runtime;
+mod soup;
 mod state;
+mod temporal;
 mod types;
 mod util;
 
@@ -70,8 +74,9 @@ pub fn run() {
     // Best-effort tracing setup — silent if RUST_LOG is unset.
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn,agency_agents_app=info")),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+                tracing_subscriber::EnvFilter::new("warn,agency_agents_app=info")
+            }),
         )
         .try_init();
 
@@ -101,12 +106,16 @@ pub fn run() {
         .on_window_event(|window, event| {
             use tauri::Manager;
             use tauri_plugin_window_state::{AppHandleExt, StateFlags};
-            if matches!(event, tauri::WindowEvent::Resized(_) | tauri::WindowEvent::Moved(_)) {
+            if matches!(
+                event,
+                tauri::WindowEvent::Resized(_) | tauri::WindowEvent::Moved(_)
+            ) {
                 let _ = window.app_handle().save_window_state(StateFlags::all());
             }
         })
         .setup(|app| {
             state::initialize(app)?;
+            temporal::spawn_worker_supervisor();
             // Phase 15 — spawn the auto-check scheduler. The task
             // sleeps for 24h between wakes, re-reads the live settings
             // on each cycle (so a user toggling auto-check off mid-run
@@ -122,7 +131,9 @@ pub fn run() {
                 // sidebar and main panes; the WebView background must be set
                 // transparent in CSS (see app.css :root) for the blur to show.
                 use tauri::Manager;
-                use window_vibrancy::{apply_vibrancy, NSVisualEffectMaterial, NSVisualEffectState};
+                use window_vibrancy::{
+                    apply_vibrancy, NSVisualEffectMaterial, NSVisualEffectState,
+                };
                 if let Some(window) = app.get_webview_window("main") {
                     let _ = apply_vibrancy(
                         &window,
@@ -187,6 +198,7 @@ pub fn run() {
             install::projects_list,
             install::loadout_export,
             install::loadout_import,
+            fabric::fabric_status,
             // Mission/Engagement — Agency Operating Specification v1. Purely
             // additive: Runtime v0.1's commands and contract below are
             // unchanged. Mission is deliberately its own module, independent
@@ -195,14 +207,35 @@ pub fn run() {
             mission::mission_get,
             mission::mission_list,
             mission::mission_update,
+            mission::project_create_automatic,
             runtime::runtime_providers,
             runtime::runtime_start,
             runtime::runtime_cancel,
             runtime::runtime_get,
             runtime::runtime_list,
             runtime::runtime_review,
+            runtime::runtime_delivery_receipt,
             runtime::runtime_apply,
             runtime::runtime_discard_workspace,
+            temporal::temporal_status,
+            temporal::temporal_start_mission,
+            temporal::temporal_mission_status,
+            temporal::temporal_approve_mission,
+            temporal::temporal_reject_mission,
+            temporal::temporal_cancel_mission,
+            // Soup — additive dataset capability (inspect/validate/dedup).
+            // Not a ModelGateway binding, not a CapabilityCatalog/
+            // WorkflowOrchestrator duplicate: see soup.rs module docs.
+            soup::soup_status,
+            soup::soup_inspect_dataset,
+            soup::soup_validate_dataset,
+            soup::soup_dedup_dataset,
+            // CapabilityResolution — resolves a computational need (e.g.
+            // dataset.dedup) to whichever registered provider is available
+            // right now, without the caller naming the provider. Soup is
+            // today's only registered provider; see capability_resolution.rs.
+            capability_resolution::capability_resolve,
+            capability_resolution::capability_invoke,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -284,10 +317,7 @@ fn build_app_menu<R: tauri::Runtime>(
         .build()
 }
 
-fn handle_menu_event<R: tauri::Runtime>(
-    app: &tauri::AppHandle<R>,
-    event: tauri::menu::MenuEvent,
-) {
+fn handle_menu_event<R: tauri::Runtime>(app: &tauri::AppHandle<R>, event: tauri::menu::MenuEvent) {
     use tauri::Emitter;
     match event.id().as_ref() {
         MENU_EVENT_ABOUT => {

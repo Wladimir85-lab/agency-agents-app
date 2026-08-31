@@ -15,7 +15,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tauri::{ipc::Channel, State};
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use uuid::Uuid;
 
@@ -26,6 +26,13 @@ use crate::state::AppState;
 use crate::util::fs::{atomic_write, read_capped};
 
 const PROVIDER_ID: &str = "codexCli";
+// Second runtime provider: Claude Code CLI. Added as a manually-selectable
+// fallback so a run does not have to sit blocked when Codex CLI has no
+// remaining usage quota. Kept as its own id/probe/execution path rather than
+// generalizing run_codex_stage, so the already-verified Codex path (evidence
+// sanitization, watchdog, cancellation — all covered by real tests run on
+// Windows) is never touched by this addition.
+const CLAUDE_PROVIDER_ID: &str = "claudeCode";
 const MAX_INTENT_CHARS: usize = 20_000;
 const MAX_RUN_FILE_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_EVENT_TEXT_CHARS: usize = 8_000;
@@ -231,6 +238,31 @@ fn run_evidence_dir(app_data: &Path, id: &str) -> PathBuf {
     app_data.join("state").join("run-evidence").join(id)
 }
 
+/// Convert internal stage identifiers into portable filename components.
+fn evidence_file_component(value: &str) -> String {
+    let mut out = String::with_capacity(value.len().min(120));
+    let mut separator = false;
+    for ch in value.chars() {
+        let valid =
+            !ch.is_control() && !matches!(ch, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*');
+        if valid && out.len() < 120 {
+            out.push(ch);
+            separator = false;
+        } else if !separator && !out.is_empty() {
+            out.push('_');
+            separator = true;
+        }
+    }
+    while out.ends_with([' ', '.', '_']) {
+        out.pop();
+    }
+    if out.is_empty() {
+        "stage".into()
+    } else {
+        out
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 struct ManifestEntry {
@@ -256,6 +288,35 @@ pub struct RuntimeReview {
     workspace_path: String,
     source_unchanged: bool,
     changes: Vec<WorkspaceChange>,
+}
+
+/// Immutable delivery-facing proof assembled from the persisted run, gate
+/// states, manifests and explicit apply record. This is intentionally derived
+/// from evidence on disk instead of trusting a provider's prose.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeliveryReceipt {
+    run_id: String,
+    mission_id: Option<String>,
+    intent: String,
+    verified: bool,
+    evidence_complete: bool,
+    applied: bool,
+    completed_at: Option<DateTime<Utc>>,
+    gates: Vec<RunStage>,
+    changes: Vec<WorkspaceChange>,
+    evidence_path: String,
+}
+
+fn delivery_evidence_complete(run: &RunSummary, evidence_dir: &Path) -> bool {
+    run.stages.iter().all(|stage| {
+        let component = evidence_file_component(&stage.id);
+        (1..=stage.attempt.max(1)).any(|attempt| {
+            evidence_dir
+                .join(format!("{component}-{attempt}-after.manifest.json"))
+                .is_file()
+        })
+    })
 }
 
 fn walk_files(root: &Path) -> Result<Vec<PathBuf>, AppError> {
@@ -388,8 +449,18 @@ async fn persist_manifest(
         })??;
     let dir = run_evidence_dir(app_data, run_id);
     tokio::fs::create_dir_all(&dir).await?;
+    // `name` is frequently built from a composite stage id (e.g.
+    // "systems-data:architecture-1-before"). Sanitize it the same way the
+    // stdout/stderr evidence writer does — every filename derived from a
+    // stage id must go through this single chokepoint, not be sanitized
+    // ad hoc at each call site. Without this, the `:` in the id is
+    // interpreted by NTFS as an Alternate Data Stream separator, the
+    // rename from the `.tmp` sibling fails with "the parameter is
+    // incorrect" (os error 87), and the manifest silently never gets
+    // written (see `run_codex_stage` / `evidence_file_component`).
+    let safe_name = evidence_file_component(name);
     atomic_write(
-        &dir.join(format!("{name}.manifest.json")),
+        &dir.join(format!("{safe_name}.manifest.json")),
         &serde_json::to_vec_pretty(&entries)?,
     )
     .await
@@ -603,7 +674,7 @@ fn clean_text(s: &str) -> String {
         .filter(|c| *c == '\n' || *c == '\t' || !c.is_control())
         .take(MAX_EVENT_TEXT_CHARS)
         .collect();
-    for marker in ["OPENAI_API_KEY=", "CODEX_API_KEY="] {
+    for marker in ["OPENAI_API_KEY=", "CODEX_API_KEY=", "ANTHROPIC_API_KEY="] {
         if let Some(pos) = out.find(marker) {
             out.truncate(pos);
             out.push_str("[redacted]");
@@ -709,9 +780,113 @@ fn codex_binary() -> PathBuf {
     PathBuf::from("codex")
 }
 
+// Same shape and same honesty limitation as probe_codex: this only proves
+// the `claude` binary exists and runs `--version` successfully within a
+// short timeout. It says nothing about whether the account behind it is
+// logged in or has remaining usage — exactly the gap we found in probe_codex
+// (a quota-exhausted or logged-out CLI would still probe as "available").
+// runtime_start still has to attempt a real stage and fail honestly if the
+// provider rejects the request; this probe only gates the obviously-broken
+// case (binary missing / not executable) before spending a run on it.
+async fn probe_claude() -> RuntimeProvider {
+    let result = tokio::time::timeout(
+        Duration::from_secs(4),
+        claude_command().arg("--version").output(),
+    )
+    .await;
+    match result {
+        Ok(Ok(out)) if out.status.success() => RuntimeProvider {
+            id: CLAUDE_PROVIDER_ID.into(),
+            label: "Claude Code".into(),
+            available: true,
+            version: Some(
+                clean_text(&String::from_utf8_lossy(&out.stdout))
+                    .trim()
+                    .to_string(),
+            ),
+            unavailable_reason: None,
+        },
+        Ok(Ok(out)) => RuntimeProvider {
+            id: CLAUDE_PROVIDER_ID.into(),
+            label: "Claude Code".into(),
+            available: false,
+            version: None,
+            unavailable_reason: Some(clean_text(&String::from_utf8_lossy(&out.stderr))),
+        },
+        Ok(Err(e)) => RuntimeProvider {
+            id: CLAUDE_PROVIDER_ID.into(),
+            label: "Claude Code".into(),
+            available: false,
+            version: None,
+            unavailable_reason: Some(e.to_string()),
+        },
+        Err(_) => RuntimeProvider {
+            id: CLAUDE_PROVIDER_ID.into(),
+            label: "Claude Code".into(),
+            available: false,
+            version: None,
+            unavailable_reason: Some("provider probe timed out".into()),
+        },
+    }
+}
+
+fn claude_binary() -> PathBuf {
+    // npm installs global bins under %APPDATA%\npm on Windows as a .cmd
+    // shim (there is no nested vendor binary like Codex's install layout).
+    // Resolve the absolute path so the spawned process does not depend on
+    // the app's inherited PATH being fresh (e.g. a window opened before
+    // `npm install -g` ran would otherwise fail to find it by bare name).
+    #[cfg(target_os = "windows")]
+    if let Some(appdata) = std::env::var_os("APPDATA") {
+        let native = PathBuf::from(appdata).join("npm/claude.cmd");
+        if native.is_file() {
+            return native;
+        }
+    }
+    PathBuf::from("claude")
+}
+
+/// Windows-safe process builder for the `claude` CLI.
+///
+/// Root cause found during the first live test: npm's Windows install of
+/// `claude` is a `.cmd` batch shim, not a native PE executable (unlike
+/// Codex, which ships a real `.exe`). Spawning a `.cmd` directly through
+/// tokio::process::Command works for a short call with no stdin — which is
+/// exactly why probe_claude()'s `--version` check reported "available" —
+/// but a prompt piped over stdin (what every real stage does) never
+/// reached the underlying process: run_claude_stage sat at zero output
+/// until the watchdog fired repeatedly and the run had to be cancelled.
+/// Routing through an explicit `cmd /C` spawns it the same way typing
+/// `claude` into an interactive shell does, with stdio piped correctly end
+/// to end.
+///
+/// Known follow-up, not fixed here: cancelling a Claude Code stage now
+/// kills the `cmd.exe` wrapper via `kill_on_drop`, which does not
+/// guarantee the underlying `node.exe` process (claude.cmd's real worker)
+/// also dies — Windows does not propagate process termination to children
+/// without a Job Object. Codex's cancellation guarantee (verified earlier
+/// this session against Task Manager) does not automatically extend to
+/// this provider. Left as a known gap rather than guessed at blind.
+fn claude_command() -> Command {
+    #[cfg(target_os = "windows")]
+    {
+        let mut cmd = Command::new("cmd");
+        cmd.arg("/C").arg(claude_binary());
+        cmd
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        Command::new(claude_binary())
+    }
+}
+
 #[tauri::command]
 pub async fn runtime_providers() -> Result<Vec<RuntimeProvider>, AppError> {
-    Ok(vec![probe_codex().await])
+    // Codex first preserves today's default (Runbooks.svelte auto-picks the
+    // first available provider) for everyone who already has working Codex
+    // quota; Claude Code only becomes the pick when Codex is unavailable —
+    // or when a user explicitly selects it from the new provider dropdown.
+    Ok(vec![probe_codex().await, probe_claude().await])
 }
 
 #[tauri::command]
@@ -794,6 +969,35 @@ pub async fn runtime_review(
 ) -> Result<RuntimeReview, AppError> {
     let run = load_run(&state, &run_id).await?;
     build_review(&state, &run).await
+}
+
+#[tauri::command]
+pub async fn runtime_delivery_receipt(
+    state: State<'_, AppState>,
+    run_id: String,
+) -> Result<DeliveryReceipt, AppError> {
+    let run = load_run(&state, &run_id).await?;
+    if run.status != RunStatus::Succeeded {
+        return Err(AppError::InvalidArgument {
+            message: "delivery receipt requires a run that passed every gate".into(),
+        });
+    }
+    let evidence_dir = run_evidence_dir(&state.app_data_dir, &run.id);
+    let evidence_complete = delivery_evidence_complete(&run, &evidence_dir);
+    let applied_manifest = evidence_dir.join("applied-source.manifest.json");
+    let review = build_review(&state, &run).await?;
+    Ok(DeliveryReceipt {
+        run_id: run.id,
+        mission_id: run.mission_id,
+        intent: run.intent,
+        verified: run.stages.iter().all(|stage| stage.status == "passed"),
+        evidence_complete,
+        applied: applied_manifest.is_file() && review.source_unchanged && review.changes.is_empty(),
+        completed_at: run.completed_at,
+        gates: run.stages,
+        changes: review.changes,
+        evidence_path: evidence_dir.to_string_lossy().into_owned(),
+    })
 }
 
 #[tauri::command]
@@ -975,23 +1179,36 @@ pub async fn runtime_start(
             message: "intent must contain 1 to 20000 characters".into(),
         });
     }
-    if request.provider_id != PROVIDER_ID {
+    if request.provider_id != PROVIDER_ID && request.provider_id != CLAUDE_PROVIDER_ID {
         return Err(AppError::InvalidArgument {
             message: "unsupported runtime provider".into(),
         });
     }
     validate_start_request(&request)?;
-    // Codex CLI is an outbound provider even though it is launched as a local
-    // child process. The same fail-closed network policy that protects GitHub,
-    // catalog sync, and updates must therefore gate the runtime before the
-    // project is inspected or any provider process is started.
-    state.require_network("runtime_codex").await?;
+    // Codex CLI and Claude Code are both outbound providers even though they
+    // are launched as local child processes. The same fail-closed network
+    // policy that protects GitHub, catalog sync, and updates must therefore
+    // gate the runtime before the project is inspected or any provider
+    // process is started.
+    let is_claude = request.provider_id == CLAUDE_PROVIDER_ID;
+    state
+        .require_network(if is_claude {
+            "runtime_claude"
+        } else {
+            "runtime_codex"
+        })
+        .await?;
     let project = validate_project(&request.project_path, &state.app_data_dir)?;
-    let provider = probe_codex().await;
+    let provider = if is_claude {
+        probe_claude().await
+    } else {
+        probe_codex().await
+    };
     if !provider.available {
         return Err(AppError::InvalidArgument {
             message: format!(
-                "Codex CLI is not executable: {}",
+                "{} is not executable: {}",
+                provider.label,
                 provider.unavailable_reason.unwrap_or_default()
             ),
         });
@@ -1003,9 +1220,29 @@ pub async fn runtime_start(
         .iter()
         .filter_map(|slug| catalog.get(slug).map(|agent| (slug.clone(), agent.body)))
         .collect();
-    if profiles.len() != request.agent_slugs.len() {
+    // NOTE: `profiles` is keyed by slug (a HashMap), so it naturally collapses
+    // duplicate slugs. `agent_slugs` is a per-stage array and legitimately
+    // contains the same slug more than once whenever two selected
+    // capabilities share an agent at the same roster position. Comparing
+    // `profiles.len()` against `agent_slugs.len()` therefore produces a false
+    // positive on any runbook with a repeated (but perfectly valid) agent.
+    // The correct check is "does every requested slug resolve", not "do the
+    // counts match" — so we check membership per slug instead.
+    let unresolved: Vec<&str> = request
+        .agent_slugs
+        .iter()
+        .map(String::as_str)
+        .filter(|slug| !profiles.contains_key(*slug))
+        .collect();
+    if !unresolved.is_empty() {
+        let mut unresolved_sorted = unresolved.clone();
+        unresolved_sorted.sort_unstable();
+        unresolved_sorted.dedup();
         return Err(AppError::InvalidArgument {
-            message: "every runbook agent must resolve to a real catalog persona".into(),
+            message: format!(
+                "every runbook agent must resolve to a real catalog persona (unresolved: {})",
+                unresolved_sorted.join(", ")
+            ),
         });
     }
     // Mission is loaded once, at run start, and never re-read mid-run —
@@ -1111,20 +1348,36 @@ pub async fn runtime_start(
                         .as_deref()
                         .unwrap_or(&current.project_path),
                 );
-                let _ = persist_manifest(
+                if let Err(e) = persist_manifest(
                     &app_data,
                     &current.id,
                     &format!("{stage_id}-{attempt}-before"),
                     &workspace,
                 )
-                .await;
+                .await
+                {
+                    // Do not fail the run over a "before" snapshot — but do
+                    // not swallow it either. A silently-dropped manifest
+                    // write is exactly how a real problem (e.g. an invalid
+                    // filename, a full disk) looked identical to "nothing
+                    // happened yet".
+                    let _ = on_event.send(RunEvent::Output {
+                        run_id: current.id.clone(),
+                        stage_id: stage_id.clone(),
+                        stream: "system".into(),
+                        text: format!(
+                            "No se pudo guardar el manifiesto 'before' de esta etapa (evidencia incompleta, la etapa continúa igualmente): {e}"
+                        ),
+                    });
+                }
                 let prompt = stage_prompt(
                     &current,
                     index,
                     profiles.get(&current.stages[index].agent_slug),
                     mission.as_ref(),
                 );
-                match run_codex_stage(
+                match run_provider_stage(
+                    &current.provider_id,
                     &workspace,
                     &prompt,
                     &current.id,
@@ -1136,13 +1389,23 @@ pub async fn runtime_start(
                 .await
                 {
                     Ok(true) => {
-                        let _ = persist_manifest(
+                        if let Err(e) = persist_manifest(
                             &app_data,
                             &current.id,
                             &format!("{stage_id}-{attempt}-after"),
                             &workspace,
                         )
-                        .await;
+                        .await
+                        {
+                            let _ = on_event.send(RunEvent::Output {
+                                run_id: current.id.clone(),
+                                stage_id: stage_id.clone(),
+                                stream: "system".into(),
+                                text: format!(
+                                    "No se pudo guardar el manifiesto 'after' de esta etapa (evidencia incompleta; la etapa igual se marca como pasada porque el agente entregó INTENTOS_GATE:PASS): {e}"
+                                ),
+                            });
+                        }
                         passed = true;
                         break;
                     }
@@ -1173,7 +1436,8 @@ pub async fn runtime_start(
                             "The QA gate failed on attempt {attempt}. This is a remediation pass. Inspect the QA evidence and implement every in-scope requirement that is still missing; do not limit the repair to your catalog specialty. Fix the root causes and run the relevant checks.\n\n{}",
                             stage_prompt(&current, development_index, profiles.get(&current.stages[development_index].agent_slug), mission.as_ref())
                         );
-                        if !run_codex_stage(
+                        if !run_provider_stage(
+                            &current.provider_id,
                             &workspace,
                             &fix_prompt,
                             &current.id,
@@ -1201,13 +1465,23 @@ pub async fn runtime_start(
                         });
                     }
                     Ok(false) => {
-                        let _ = persist_manifest(
+                        if let Err(e) = persist_manifest(
                             &app_data,
                             &current.id,
                             &format!("{stage_id}-{attempt}-after"),
                             &workspace,
                         )
-                        .await;
+                        .await
+                        {
+                            let _ = on_event.send(RunEvent::Output {
+                                run_id: current.id.clone(),
+                                stage_id: stage_id.clone(),
+                                stream: "system".into(),
+                                text: format!(
+                                    "No se pudo guardar el manifiesto 'after' de esta etapa (evidencia incompleta): {e}"
+                                ),
+                            });
+                        }
                         let _ = on_event.send(RunEvent::GateFailed {
                             run_id: current.id.clone(),
                             stage_id: stage_id.clone(),
@@ -1339,6 +1613,11 @@ async fn run_codex_stage(
     evidence_dir: &Path,
     channel: &Channel<RunEvent>,
 ) -> Result<bool, AppError> {
+    // Complex architecture and implementation stages routinely exceed thirty
+    // minutes. The former 30-minute ceiling killed healthy Codex processes at
+    // an arbitrary wall-clock boundary and incorrectly marked them as agent
+    // failures. Keep a finite safety ceiling, but size it for real production.
+    const MAX_STAGE_RUNTIME: Duration = Duration::from_secs(60 * 60 * 2);
     let execution = async {
         let mut child = Command::new(codex_binary())
             .args([
@@ -1350,9 +1629,9 @@ async fn run_codex_stage(
             ])
             .arg("--cd")
             .arg(project)
-            .arg(prompt)
+            .arg("-")
             .current_dir(project)
-            .stdin(Stdio::null())
+            .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true)
@@ -1360,6 +1639,11 @@ async fn run_codex_stage(
             .map_err(|e| AppError::Io {
                 message: format!("could not start Codex CLI: {e}"),
             })?;
+        let mut stdin = child.stdin.take().ok_or_else(|| AppError::Internal {
+            message: "runtime stdin unavailable".into(),
+        })?;
+        stdin.write_all(prompt.as_bytes()).await?;
+        stdin.shutdown().await?;
         let stdout = child.stdout.take().ok_or_else(|| AppError::Internal {
             message: "runtime stdout unavailable".into(),
         })?;
@@ -1386,42 +1670,345 @@ async fn run_codex_stage(
         });
         let mut lines = BufReader::new(stdout).lines();
         let mut combined = String::new();
-        while let Some(line) = lines.next_line().await? {
-            let text = clean_text(&line);
-            combined.push_str(&text);
-            combined.push('\n');
-            let _ = channel.send(RunEvent::Output {
-                run_id: run_id.into(),
-                stage_id: stage_id.into(),
-                stream: "stdout".into(),
-                text,
-            });
+        // Inactivity watchdog: MAX_STAGE_RUNTIME is a hard safety ceiling on
+        // total wall-clock time, not a signal of health — a stage that is
+        // genuinely working for 90 minutes and one that has been silently
+        // hung for 90 minutes look identical to it. Track time since the
+        // last real line of output instead, and surface a distinct "system"
+        // event when that goes quiet for too long. This never kills the
+        // stage on its own — a human can decide to cancel; it only makes a
+        // stall observable instead of indistinguishable from progress.
+        const STALL_WARNING_INTERVAL: Duration = Duration::from_secs(5 * 60);
+        let mut last_progress_at = tokio::time::Instant::now();
+        // `next_check_at` is deliberately separate from `last_progress_at`:
+        // it is when the watchdog should look again, not when progress last
+        // happened. Reusing `last_progress_at` for both would make the
+        // deadline stay in the past forever once a stall starts, firing the
+        // warning on every loop iteration instead of every 5 minutes.
+        let mut next_check_at = last_progress_at + STALL_WARNING_INTERVAL;
+        let mut currently_stalled = false;
+        loop {
+            tokio::select! {
+                line = lines.next_line() => {
+                    let Some(line) = line? else { break; };
+                    let text = clean_text(&line);
+                    combined.push_str(&text);
+                    combined.push('\n');
+                    last_progress_at = tokio::time::Instant::now();
+                    next_check_at = last_progress_at + STALL_WARNING_INTERVAL;
+                    if currently_stalled {
+                        currently_stalled = false;
+                        let _ = channel.send(RunEvent::Output {
+                            run_id: run_id.into(),
+                            stage_id: stage_id.into(),
+                            stream: "system".into(),
+                            text: "El agente volvió a producir salida; ya no está inactivo.".into(),
+                        });
+                    }
+                    let _ = channel.send(RunEvent::Output {
+                        run_id: run_id.into(),
+                        stage_id: stage_id.into(),
+                        stream: "stdout".into(),
+                        text,
+                    });
+                }
+                _ = tokio::time::sleep_until(next_check_at) => {
+                    currently_stalled = true;
+                    let waited = last_progress_at.elapsed().as_secs();
+                    let _ = channel.send(RunEvent::Output {
+                        run_id: run_id.into(),
+                        stage_id: stage_id.into(),
+                        stream: "system".into(),
+                        text: format!(
+                            "[watchdog] Sin salida nueva del agente hace {waited}s. Puede seguir trabajando en segundo plano (límite duro: 2h); si crees que está bloqueado, puedes cancelar la ejecución."
+                        ),
+                    });
+                    next_check_at = tokio::time::Instant::now() + STALL_WARNING_INTERVAL;
+                }
+            }
         }
         let status = child.wait().await?;
         let captured_stderr = stderr_task.await.unwrap_or_default();
         tokio::fs::create_dir_all(evidence_dir).await?;
+        let evidence_stage_id = evidence_file_component(stage_id);
         atomic_write(
-            &evidence_dir.join(format!("{stage_id}-{attempt}.stdout.log")),
+            &evidence_dir.join(format!("{evidence_stage_id}-{attempt}.stdout.log")),
             combined.as_bytes(),
         )
         .await?;
         atomic_write(
-            &evidence_dir.join(format!("{stage_id}-{attempt}.stderr.log")),
+            &evidence_dir.join(format!("{evidence_stage_id}-{attempt}.stderr.log")),
             captured_stderr.as_bytes(),
         )
         .await?;
         Ok::<bool, AppError>(status.success() && output_gate_passed(&combined))
     };
-    tokio::time::timeout(Duration::from_secs(60 * 30), execution)
+    tokio::time::timeout(MAX_STAGE_RUNTIME, execution)
         .await
         .map_err(|_| AppError::Io {
-            message: "runtime stage timed out".into(),
+            message: "runtime stage exceeded the 2-hour safety limit".into(),
         })?
+}
+
+/// Claude Code CLI channel. Deliberately a full, independent copy of
+/// run_codex_stage's process/watchdog/evidence machinery rather than a
+/// shared abstraction: run_codex_stage is already verified (real cargo
+/// test + cargo build runs, plus a live end-to-end run) and this addition
+/// must not risk that path. Only the child-process spawn spec differs.
+///
+/// Flags:
+/// - `-p` (print mode) with no query argument + the prompt piped over
+///   stdin: same non-interactive, single-shot invocation shape as Codex's
+///   `exec ... -`.
+/// - `--output-format stream-json --verbose`: line-delimited JSON events,
+///   same treatment as Codex's `--json` — we do not parse the JSON
+///   structure, we just forward each raw line as evidence/output. The
+///   final assistant message text (and therefore the INTENTOS_GATE
+///   sentinel) is still a literal substring of that JSON, so
+///   output_gate_passed keeps working unmodified.
+/// - `--dangerously-skip-permissions`: without it, Claude Code would stop
+///   to ask interactive permission for file writes / bash commands, which
+///   has no TTY to answer it here and would hang indefinitely — exactly
+///   the silent-stall failure mode this whole audit exists to prevent.
+///   This is the direct analog of Codex's `--sandbox workspace-write`: the
+///   process only ever runs inside `workspace`, which copy_workspace()
+///   already isolated from the user's real project before either provider
+///   is invoked. Full write access inside that throwaway copy carries the
+///   same blast radius as Codex's sandbox, not a larger one.
+async fn run_claude_stage(
+    project: &Path,
+    prompt: &str,
+    run_id: &str,
+    stage_id: &str,
+    attempt: u8,
+    evidence_dir: &Path,
+    channel: &Channel<RunEvent>,
+) -> Result<bool, AppError> {
+    const MAX_STAGE_RUNTIME: Duration = Duration::from_secs(60 * 60 * 2);
+    let execution = async {
+        let mut child = claude_command()
+            .args([
+                "-p",
+                "--output-format",
+                "stream-json",
+                "--verbose",
+                "--dangerously-skip-permissions",
+            ])
+            .current_dir(project)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .map_err(|e| AppError::Io {
+                message: format!("could not start Claude Code: {e}"),
+            })?;
+        let mut stdin = child.stdin.take().ok_or_else(|| AppError::Internal {
+            message: "runtime stdin unavailable".into(),
+        })?;
+        // Write stdin concurrently with reading stdout instead of writing it
+        // all up front. Claude Code starts emitting stdout (its initial
+        // `{"type":"system","subtype":"init",...}` line) almost immediately
+        // on startup, before it has necessarily finished reading stdin. A
+        // small manual test prompt never fills the OS pipe buffer, so the
+        // old sequential write-then-read never showed a problem — but a real
+        // production-sized prompt (several KB, catalog persona + mission
+        // brief + intent) is big enough that the child can block writing to
+        // an unread stdout pipe while we are still blocked writing the tail
+        // of stdin, deadlocking both sides forever with zero output. Moving
+        // the write into its own task (mirroring `stderr_task` below) lets
+        // both directions make progress at the same time.
+        let prompt_owned = prompt.to_string();
+        let stdin_task = tokio::spawn(async move {
+            stdin.write_all(prompt_owned.as_bytes()).await?;
+            stdin.shutdown().await?;
+            Ok::<(), std::io::Error>(())
+        });
+        let stdout = child.stdout.take().ok_or_else(|| AppError::Internal {
+            message: "runtime stdout unavailable".into(),
+        })?;
+        let stderr = child.stderr.take().ok_or_else(|| AppError::Internal {
+            message: "runtime stderr unavailable".into(),
+        })?;
+        let err_channel = channel.clone();
+        let err_run = run_id.to_string();
+        let err_stage = stage_id.to_string();
+        let stderr_task = tokio::spawn(async move {
+            let mut captured = String::new();
+            let mut lines = BufReader::new(stderr).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                captured.push_str(&clean_text(&line));
+                captured.push('\n');
+                let _ = err_channel.send(RunEvent::Output {
+                    run_id: err_run.clone(),
+                    stage_id: err_stage.clone(),
+                    stream: "stderr".into(),
+                    text: clean_text(&line),
+                });
+            }
+            captured
+        });
+        let mut lines = BufReader::new(stdout).lines();
+        let mut combined = String::new();
+        const STALL_WARNING_INTERVAL: Duration = Duration::from_secs(5 * 60);
+        let mut last_progress_at = tokio::time::Instant::now();
+        let mut next_check_at = last_progress_at + STALL_WARNING_INTERVAL;
+        let mut currently_stalled = false;
+        loop {
+            tokio::select! {
+                line = lines.next_line() => {
+                    let Some(line) = line? else { break; };
+                    let text = clean_text(&line);
+                    combined.push_str(&text);
+                    combined.push('\n');
+                    last_progress_at = tokio::time::Instant::now();
+                    next_check_at = last_progress_at + STALL_WARNING_INTERVAL;
+                    if currently_stalled {
+                        currently_stalled = false;
+                        let _ = channel.send(RunEvent::Output {
+                            run_id: run_id.into(),
+                            stage_id: stage_id.into(),
+                            stream: "system".into(),
+                            text: "El agente volvió a producir salida; ya no está inactivo.".into(),
+                        });
+                    }
+                    let _ = channel.send(RunEvent::Output {
+                        run_id: run_id.into(),
+                        stage_id: stage_id.into(),
+                        stream: "stdout".into(),
+                        text,
+                    });
+                }
+                _ = tokio::time::sleep_until(next_check_at) => {
+                    currently_stalled = true;
+                    let waited = last_progress_at.elapsed().as_secs();
+                    let _ = channel.send(RunEvent::Output {
+                        run_id: run_id.into(),
+                        stage_id: stage_id.into(),
+                        stream: "system".into(),
+                        text: format!(
+                            "[watchdog] Sin salida nueva del agente hace {waited}s. Puede seguir trabajando en segundo plano (límite duro: 2h); si crees que está bloqueado, puedes cancelar la ejecución."
+                        ),
+                    });
+                    next_check_at = tokio::time::Instant::now() + STALL_WARNING_INTERVAL;
+                }
+            }
+        }
+        let status = child.wait().await?;
+        let captured_stderr = stderr_task.await.unwrap_or_default();
+        // The write task should already be finished (stdout is closed once
+        // the process exits, which only happens after it's done reading
+        // stdin in practice), so this join is just to surface a genuine
+        // write failure rather than silently discarding it — same spirit as
+        // `stderr_task` above, but the write side is fallible, not just
+        // absent, so unwrap_or_default() would hide a real error here.
+        match stdin_task.await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                return Err(AppError::Io {
+                    message: format!("failed writing prompt to Claude Code stdin: {e}"),
+                });
+            }
+            Err(e) => {
+                return Err(AppError::Internal {
+                    message: format!("stdin writer task panicked: {e}"),
+                });
+            }
+        }
+        tokio::fs::create_dir_all(evidence_dir).await?;
+        let evidence_stage_id = evidence_file_component(stage_id);
+        atomic_write(
+            &evidence_dir.join(format!("{evidence_stage_id}-{attempt}.stdout.log")),
+            combined.as_bytes(),
+        )
+        .await?;
+        atomic_write(
+            &evidence_dir.join(format!("{evidence_stage_id}-{attempt}.stderr.log")),
+            captured_stderr.as_bytes(),
+        )
+        .await?;
+        Ok::<bool, AppError>(status.success() && output_gate_passed(&combined))
+    };
+    tokio::time::timeout(MAX_STAGE_RUNTIME, execution)
+        .await
+        .map_err(|_| AppError::Io {
+            message: "runtime stage exceeded the 2-hour safety limit".into(),
+        })?
+}
+
+/// Single dispatch point so the two call sites inside runtime_start's spawned
+/// task do not need to know which provider a run picked — they just pass the
+/// RunSummary's own `provider_id` through. Keeping this as an explicit match
+/// (rather than a trait object or function pointer) makes an unsupported id
+/// a compile-visible, exhaustively-checked error path instead of a silent
+/// fallback to the wrong provider.
+async fn run_provider_stage(
+    provider_id: &str,
+    project: &Path,
+    prompt: &str,
+    run_id: &str,
+    stage_id: &str,
+    attempt: u8,
+    evidence_dir: &Path,
+    channel: &Channel<RunEvent>,
+) -> Result<bool, AppError> {
+    if provider_id == CLAUDE_PROVIDER_ID {
+        run_claude_stage(project, prompt, run_id, stage_id, attempt, evidence_dir, channel).await
+    } else {
+        run_codex_stage(project, prompt, run_id, stage_id, attempt, evidence_dir, channel).await
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Regression test for the "before"/"after" workspace-manifest bug: the
+    // stdout/stderr evidence writer already sanitized composite stage ids
+    // (see `evidence_filename_is_portable_for_composite_stage_ids` below),
+    // but `persist_manifest` built its filename from the raw, unsanitized
+    // name at three call sites in the run loop. On Windows, a stage id like
+    // "systems-data:architecture" made the rename from the `.tmp` sibling
+    // fail with os error 87 ("the parameter is incorrect"), because NTFS
+    // reads the `:` as an Alternate Data Stream separator — and because
+    // those calls were `let _ = ...`, the failure was completely silent.
+    // This exercises `persist_manifest` itself (now the single chokepoint
+    // that sanitizes `name`) end to end against a real temp directory, so a
+    // regression here fails loudly instead of vanishing again.
+    #[tokio::test]
+    async fn persist_manifest_sanitizes_composite_names_on_disk() {
+        let app_data = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        fs::write(workspace.path().join("a.txt"), b"hello").unwrap();
+
+        persist_manifest(
+            app_data.path(),
+            "run-1",
+            "systems-data:architecture-1-before",
+            workspace.path(),
+        )
+        .await
+        .expect("persist_manifest must not fail on a colon-bearing stage id");
+
+        let evidence_dir = run_evidence_dir(app_data.path(), "run-1");
+        assert!(
+            evidence_dir
+                .join("systems-data_architecture-1-before.manifest.json")
+                .exists(),
+            "manifest should be written under the sanitized filename"
+        );
+        assert!(
+            !evidence_dir
+                .join("systems-data:architecture-1-before.manifest.json")
+                .exists(),
+            "the raw colon-bearing name must never be used as a path component"
+        );
+        // The failure mode this regresses against also left a stray,
+        // zero-byte file at the pre-colon prefix (Windows silently created
+        // the ADS "base" file before the rename failed). Assert it is gone
+        // too, so a future regression can't hide behind "the real manifest
+        // exists elsewhere" while still leaving this litter behind.
+        assert!(!evidence_dir.join("systems-data").exists());
+    }
     fn valid_request() -> StartRunRequest {
         StartRunRequest {
             intent: "Build a verified product".into(),
@@ -1436,6 +2023,18 @@ mod tests {
             provider_id: PROVIDER_ID.into(),
             mission_id: None,
         }
+    }
+    #[test]
+    fn evidence_filename_is_portable_for_composite_stage_ids() {
+        assert_eq!(
+            evidence_file_component("systems-data:architecture"),
+            "systems-data_architecture"
+        );
+        assert_eq!(
+            evidence_file_component("bad<>:\"/\\|?*stage. "),
+            "bad_stage"
+        );
+        assert_eq!(evidence_file_component(":"), "stage");
     }
     #[test]
     fn rejects_root_project() {
@@ -1706,6 +2305,50 @@ mod tests {
         normalize_terminal_state(&mut run);
         assert_eq!(run.stages[2].status, "failed");
         assert!(run.current_stage.is_none());
+    }
+
+    #[test]
+    fn delivery_evidence_requires_an_after_manifest_for_every_gate() {
+        let dir = tempfile::tempdir().unwrap();
+        let now = Utc::now();
+        let mut stages = initial_stages(&[], &[], &[], &[]);
+        for stage in &mut stages {
+            stage.status = "passed".into();
+            stage.attempt = 1;
+            let component = evidence_file_component(&stage.id);
+            fs::write(
+                dir.path()
+                    .join(format!("{component}-1-after.manifest.json")),
+                b"[]",
+            )
+            .unwrap();
+        }
+        let run = RunSummary {
+            id: "delivery-run".into(),
+            intent: "build and verify".into(),
+            project_path: "/tmp/project".into(),
+            workspace_path: Some("/tmp/workspace".into()),
+            runbook_id: "startup-mvp".into(),
+            capability_id: "digital-experience".into(),
+            capability_ids: vec!["digital-experience".into()],
+            provider_id: PROVIDER_ID.into(),
+            mission_id: None,
+            status: RunStatus::Succeeded,
+            current_stage: None,
+            stages,
+            created_at: now,
+            updated_at: now,
+            completed_at: Some(now),
+            error: None,
+        };
+        assert!(delivery_evidence_complete(&run, dir.path()));
+        let missing = evidence_file_component(&run.stages[0].id);
+        fs::remove_file(
+            dir.path()
+                .join(format!("{missing}-1-after.manifest.json")),
+        )
+        .unwrap();
+        assert!(!delivery_evidence_complete(&run, dir.path()));
     }
     #[test]
     fn iot_development_prompt_owns_the_full_vertical() {

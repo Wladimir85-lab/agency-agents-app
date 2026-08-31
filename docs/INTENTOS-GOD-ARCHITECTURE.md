@@ -1,0 +1,85 @@
+# IntentOS GOD — Authoritative Architecture
+
+**Status:** active foundation (2026-08-27)  
+**Owner:** IntentOS  
+**Product boundary:** private, sovereign AI-native IDE/factory. Agency Agents is a capability source, not the factory.
+
+## Governing principle
+
+> Maximum internal sophistication. Minimum human complexity.
+
+The human supplies intent, judgment and irreversible product decisions. IntentOS owns the internal complexity required to turn that intent into a working, verified and deliverable technological result.
+
+## End-to-end lifecycle
+
+`intent -> mission -> capability composition -> isolated construction -> QA -> Reality Check -> review -> apply -> delivery receipt`
+
+The current vertical is real and incremental:
+
+1. Esmeralda's production surface captures intent and proposes a visible solution.
+2. An approved `Mission` persists objective, scope, exclusions and acceptance criteria.
+3. IntentOS selects reusable professional capabilities from the Agency Agents corpus.
+4. The native orchestrator creates an isolated workspace and runs a variable staged workflow.
+5. Model-provider adapters execute each stage. Their output is not trusted as proof by itself.
+6. QA can return work to Development; Reality Check remains a mandatory final gate.
+7. File manifests and stage evidence are persisted independently of conversational output.
+8. The human reviews the delta; apply is conflict-checked and backup-first.
+9. A delivery receipt is derived from persisted run state, gate state, manifests and apply evidence.
+
+## IntentOS Fabric contracts
+
+The backend command `fabric_status` is the machine-readable source for active bindings. Contract names are owned by IntentOS; every implementation can be replaced without redefining the product.
+
+| IntentOS capability | Contract | Active binding | Boundary |
+|---|---|---|---|
+| Human interface | `IntentInterface` | Esmeralda | intent and judgment, not orchestration internals |
+| Professional knowledge | `CapabilityCatalog` | Agency Agents corpus | knowledge/capabilities only |
+| Orchestration | `WorkflowOrchestrator` | IntentOS Runtime v1 | owns workflow, state, repair and gates |
+| Models | `ModelGateway` | runtime provider adapters | Codex/Claude today; OmniRoute is only a candidate binding |
+| Tools | `ToolGateway` | Tauri command registry | policy-controlled tool access |
+| Execution | `ExecutionEnvironment` | isolated workspace | source remains protected until explicit apply |
+| Memory | `EngineeringMemory` | run evidence store | current truth, manifests and decisions |
+| Verification | `VerificationGate` | QA/Reality Loop | explicit PASS/FAIL with remediation |
+| Delivery | `DeliveryPublisher` | review/apply/receipt | verified and applied are separate states |
+
+NeMo, OmniRoute, Theia, Daytona, E2B and future systems may implement one or more contracts. None is an architectural identity of IntentOS.
+
+## Chassis decision ADR-001
+
+**Decision: KEEP SvelteKit + Tauri for this stage. Do not migrate to Theia or Electron.**
+
+Evidence from this repository:
+
+- Production build succeeds on the current SvelteKit/Tauri application.
+- `svelte-check` reports zero errors (current warnings are local unused CSS in `Runbooks.svelte`).
+- The Rust core passes 295 tests with one environment-dependent parity test ignored.
+- Tauri already provides the security-sensitive native boundary, persistent state, filesystem isolation, child-process execution, channels and backup-first apply path.
+- The current user journey already reaches Mission -> isolated runtime -> QA/Reality gates -> reviewed apply. A chassis migration would replace working system boundaries before a demonstrated limitation exists.
+
+Theia is a serious **EXTRACT/WATCH** candidate. Its official architecture provides a modular desktop/browser IDE platform, frontend/backend separation, dependency-injection extension points, VS Code extension compatibility and an AI framework. Those capabilities matter when IntentOS needs industrial editor, terminal, LSP, debugging or extension-host functionality. They do not yet justify replacing the working product shell, because Theia's Node/Electron backend and UI composition would impose a second platform model and a migration of the existing Rust/Tauri security boundary.
+
+**Reopen this decision only with a benchmark** against a concrete missing capability. Required evidence: integration spike, cold start/RAM, packaged size, terminal/PTY behavior, LSP/editor integration, extension isolation, Windows reliability, security boundary, migration cost and preservation of the Esmeralda experience.
+
+## Reality boundary
+
+Passing unit tests, type checks and production builds proves structural correctness. It does not prove native visual behavior or that external CLIs have quota, credentials and reliable cancellation on every OS. A full release gate still requires a native end-to-end run that creates a small product, passes QA and Reality Check, reviews the resulting delta, applies it and opens the delivery receipt.
+
+## Current state and next increments
+
+Completed in this foundation:
+
+- IntentOS-owned Fabric registry with replaceable bindings.
+- Mission-linked autonomous runtime preserved.
+- Evidence-derived delivery receipt added to backend and production UI.
+- Existing Agency Agents corpus retained as a capability source.
+- Chassis decision recorded from repository evidence.
+
+Next increments, in order:
+
+1. Replace hard-coded provider branching with a tested `ModelGateway` adapter interface.
+2. Version engineering decisions and supersession in `EngineeringMemory`.
+3. Promote tools to schema-described, policy-checked capabilities (MCP-compatible where useful).
+4. Add process-tree containment on Windows and selectable local/container/remote execution adapters.
+5. Run a native golden-path factory mission and retain screenshots, logs, manifests and receipt as release evidence.
+6. Benchmark Theia components only when editor/LSP/terminal scope enters an approved mission.
+

@@ -224,3 +224,65 @@ PASS/FAIL marker wins; a successful process alone is insufficient. **Alternative
 NeMo/Switchyard, multiple providers, parallel execution, new personas and autonomous deployment. **Consequences**:
 v0.1 remains a local experimental branch extension, not an Agency Agents release or a production autonomous
 agency. The next architectural gate is human approval plus structured evidence/diff control, not more capability.
+
+
+### 2026-08-23: IntentOS Navigation Charter v2 - approved architecture for Hunter/Mission/Offer-Delivery layers
+
+**Status**: Approved by the NCTO (Wladimir). **Context**: IntentOS's next layers (Hunter,
+Mission/Engagement, Offer/Delivery, and the dual-nature mission patterns Legacy Modernization
+and Fabrica de Trabajos Digitales) needed their architecture fixed before any of them get built,
+so future work doesn't duplicate what Departments/Ramos/Verticales/Capabilities already do.
+**Decision**: adopt the meta-flow `Mundo -> Hunter -> Opportunity -> NCTO -> Mission ->
+IntentOS/Agency -> Factory -> Resultado -> Offer/Delivery -> Mercado -> Evidencia -> Aprendizaje
+-> (loop to Hunter)`; treat `Opportunity` as a shared domain contract (not a module) produced by
+Hunter Core and consumed by NCTO/Mission; classify Legacy Modernization and Fabrica de Trabajos
+Digitales as two-faced (a Hunter Core discovery mode + a separate Mission execution pattern,
+except Organization Compression's execution face, which stays undecided); declassify synthetic
+media from "future Capability" to "undecided strategy"; and resequence the build so
+Mission/Engagement minimo (Fase 3) precedes Hunter's first narrow experiment (Fase 4), which
+precedes closing one real Opportunity->NCTO->Mission->Agency/Runtime->Resultado loop (Fase 5).
+**Alternatives rejected**: waiting until a late phase to validate Hunter (rejected - the NCTO
+wants the core commercial hypothesis tested early, not after heavy infrastructure exists);
+classifying Fabrica de Trabajos Digitales and Legacy Modernization purely as mission types
+(rejected - their discovery half belongs to Hunter, not Mission); asserting synthetic media as
+a future Capability (rejected - premature, no real case yet). **Consequences**: the full charter
+lives at `memory-bank/intentosNavigationCharter.md`; Runtime v0.1 (`404f4b1`) is unaffected -
+nothing in this decision touches its code, contracts, or five-stage pipeline. Fase 3 is the next
+open item and has not been started.
+
+### 2026-08-23: Mission v1 (Agency Operating Specification) - additive extension to Runtime v0.1
+
+**Status**: Implemented, pending branch creation + cargo test (no terminal access this session).
+
+**Context**: Four architecture-review passes (Mission Brief / Team Briefing, internationalization,
+organizational compression, and pattern-extraction methodology) converged on a minimal Fase 3
+scope. Before committing to a schema, an Agency Operational Pattern Survey was run against
+real-world evidence (software/web/design/AI agencies, cross-border contract practice, boutique
+vs. structured organizations) rather than designing from assumption. The survey confirmed the
+general shape of Mission/Mission Brief/locale fields/Change Request as data, found one real
+correction (Change Request is two layers, not one binary rule), one new field (agency's own
+jurisdiction, not only the client's), and reconfirmed that Policy Ledger's schema is not yet
+decided. Results were consolidated into an Agency Operating Specification v1 and contrasted
+against the actual repository (types.rs, state.rs, runtime.rs, lib.rs) before writing any code.
+
+**Decision**: Implement only what the Specification classified as needing implementation: a new
+`Mission` type (src-tauri/src/mission.rs), independent of `ProjectInfo` and of `RunSummary`,
+persisted the same way runs are. `StartRunRequest`/`RunSummary` gain an optional `mission_id` -
+purely additive. `stage_prompt()` interpolates a deterministic Mission Brief (`mission_brief()`)
+ahead of the raw intent only when a Mission is attached; output is byte-identical to Runtime
+v0.1's original format when it is not. Locale/market/jurisdiction fields and Change Request
+parameters are plain data on Mission - no rules engine, no Policy Ledger, no third gate signal.
+
+**Alternatives rejected**: extending `ProjectInfo` (wrong extension point - it belongs to the
+unrelated Projects install-tracking registry, confirmed by direct inspection of types.rs).
+Building a Policy Ledger engine now (schema still not evidence-backed enough per the survey).
+Adding a third NEEDS_NCTO_DECISION gate signal now (would touch Runtime v0.1's frozen PASS/FAIL
+contract - deferred instead). Modeling Change Request as a single binary rule (survey evidence
+showed two distinct layers - revision budget vs. formal change - captured as two separate data
+fields instead of one).
+
+**Consequences**: Runtime v0.1 (404f4b1) is unmodified in behavior for every caller that omits
+mission_id - verified by a new explicit backward-compatibility unit test. Frontend (Runbooks.svelte,
+lib/types.ts, lib/api.ts) was not touched this pass and needs its own read-then-implement pass.
+Git branch creation and `cargo test` were not run in this session (no device_bash/terminal access
+to this machine) and remain the immediate next step - see NEXT-SESSION.md.

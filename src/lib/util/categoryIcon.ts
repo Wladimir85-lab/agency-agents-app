@@ -19,22 +19,33 @@
 import type { Component } from "svelte";
 
 import Brain from "@lucide/svelte/icons/brain";
+import BadgeCheck from "@lucide/svelte/icons/badge-check";
+import BadgeDollarSign from "@lucide/svelte/icons/badge-dollar-sign";
+import BookOpen from "@lucide/svelte/icons/book-open";
 import Briefcase from "@lucide/svelte/icons/briefcase";
+import BriefcaseBusiness from "@lucide/svelte/icons/briefcase-business";
 import Cloud from "@lucide/svelte/icons/cloud";
+import CloudCog from "@lucide/svelte/icons/cloud-cog";
 import Code from "@lucide/svelte/icons/code";
+import Cpu from "@lucide/svelte/icons/cpu";
 import Database from "@lucide/svelte/icons/database";
 import FileCode from "@lucide/svelte/icons/file-code";
 import FileText from "@lucide/svelte/icons/file-text";
 import Gamepad2 from "@lucide/svelte/icons/gamepad-2";
 import Globe from "@lucide/svelte/icons/globe";
 import GraduationCap from "@lucide/svelte/icons/graduation-cap";
+import Glasses from "@lucide/svelte/icons/glasses";
+import HeartPulse from "@lucide/svelte/icons/heart-pulse";
 import HelpCircle from "@lucide/svelte/icons/help-circle";
 import Lock from "@lucide/svelte/icons/lock";
 import MessageSquare from "@lucide/svelte/icons/message-square";
 import Music from "@lucide/svelte/icons/music";
 import Palette from "@lucide/svelte/icons/palette";
+import PanelsTopLeft from "@lucide/svelte/icons/panels-top-left";
 import PenTool from "@lucide/svelte/icons/pen-tool";
 import Settings from "@lucide/svelte/icons/settings";
+import RadioTower from "@lucide/svelte/icons/radio-tower";
+import Shapes from "@lucide/svelte/icons/shapes";
 import Terminal from "@lucide/svelte/icons/terminal";
 import Video from "@lucide/svelte/icons/video";
 
@@ -55,23 +66,34 @@ import Target from "@lucide/svelte/icons/target";
 import TrendingUp from "@lucide/svelte/icons/trending-up";
 
 const ICONS: Record<string, Component> = {
+  BadgeCheck,
+  BadgeDollarSign,
+  BookOpen,
   Brain,
   Briefcase,
+  BriefcaseBusiness,
   Cloud,
+  CloudCog,
   Code,
+  Cpu,
   Database,
   FileCode,
   FileText,
   Gamepad2,
+  Glasses,
   Globe,
   GraduationCap,
   HelpCircle,
+  HeartPulse,
   Lock,
   MessageSquare,
   Music,
   Palette,
+  PanelsTopLeft,
   PenTool,
   Settings,
+  RadioTower,
+  Shapes,
   Terminal,
   Video,
   // Agency categories

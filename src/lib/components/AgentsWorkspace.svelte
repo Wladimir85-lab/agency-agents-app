@@ -183,7 +183,7 @@
   const divisionMeta = $derived.by(() => {
     const slug = ui.agentsCategory;
     if (!slug || query.trim() || selectMode) return null;
-    const slugs = corpus.agents.filter((a) => a.category === slug).map((a) => a.slug);
+    const slugs = corpus.agentSlugsForDivision(slug);
     if (slugs.length === 0) return null;
     const label = corpus.labelOf(slug);
     const fallback = divisionPrompt(slug, label);

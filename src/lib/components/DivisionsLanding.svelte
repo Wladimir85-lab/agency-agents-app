@@ -28,6 +28,8 @@
   let selectMode = $state(false);
   let selected = $state<Set<string>>(new Set());
   let modalOpen = $state(false);
+  type OrganizationView = "departments" | "ramos" | "verticals";
+  let organizationView = $state<OrganizationView>("departments");
 
   function enterSelect() { selectMode = true; }
   function exitSelect() { selectMode = false; selected = new Set(); }
@@ -37,7 +39,7 @@
     else next.add(slug);
     selected = next;
   }
-  const tiles = $derived(corpus.tiles);
+  const tiles = $derived(corpus.organizationTiles(organizationView));
   const allSelected = $derived(tiles.length > 0 && tiles.every((c) => selected.has(c.slug)));
   const someSelected = $derived(selected.size > 0 && !allSelected);
   function toggleAll() {
@@ -53,16 +55,18 @@
 
   // Installed-agent count per division, for an at-a-glance "deployed" hint.
   const installedByDivision = $derived.by<Map<string, number>>(() => {
-    const bySlug = new Map<string, string>(); // agent slug -> division
-    for (const a of corpus.agents) bySlug.set(a.slug, a.category);
+    const bySlug = new Map(corpus.agents.map((agent) => [agent.slug, agent]));
     const seen = new Set<string>(); // distinct agent slugs with any live install
     for (const r of install.installed) {
       if (r.state !== "removed") seen.add(r.slug);
     }
     const m = new Map<string, number>();
     for (const slug of seen) {
-      const div = bySlug.get(slug);
-      if (div) m.set(div, (m.get(div) ?? 0) + 1);
+      const agent = bySlug.get(slug);
+      if (!agent) continue;
+      for (const tile of tiles) {
+        if (corpus.matchesDivision(agent, tile.slug)) m.set(tile.slug, (m.get(tile.slug) ?? 0) + 1);
+      }
     }
     return m;
   });
@@ -110,6 +114,12 @@
     {/if}
   </div>
 
+  <div class="org-tabs" role="tablist" aria-label="Perspectiva de la agencia">
+    <button class:active={organizationView === "departments"} onclick={() => { organizationView = "departments"; exitSelect(); }}>Departamentos</button>
+    <button class:active={organizationView === "ramos"} onclick={() => { organizationView = "ramos"; exitSelect(); }}>8 ramos</button>
+    <button class:active={organizationView === "verticals"} onclick={() => { organizationView = "verticals"; exitSelect(); }}>Verticales</button>
+  </div>
+
   <ul class="rows">
     {#each tiles as c (c.slug)}
       {@const Icon = resolveCategoryIcon(c.icon)}
@@ -138,7 +148,7 @@
 </div>
 
 {#if modalOpen}
-  {@const slugs = corpus.agents.filter((a) => selected.has(a.category)).map((a) => a.slug)}
+  {@const slugs = corpus.agents.filter((a) => [...selected].some((division) => corpus.matchesDivision(a, division))).map((a) => a.slug)}
   {@const dTitle = selected.size === 1 ? i18n.t("divisions.deployOneTitle", { division: corpus.labelOf([...selected][0]) }) : i18n.t("divisions.deployManyTitle", { count: selected.size })}
   <InstallModal title={dTitle} agentSlugs={slugs} onClose={() => (modalOpen = false)} />
 {/if}
@@ -156,6 +166,10 @@
   }
   .lead { display: inline-flex; align-items: center; gap: 6px; font-size: var(--text-body-sm); color: var(--color-text-muted); font-weight: var(--fw-semibold); text-transform: uppercase; letter-spacing: 0.04em; }
   .spacer { flex: 1; }
+  .org-tabs { display: flex; gap: 4px; padding: 8px var(--space-3); border-bottom: 1px solid var(--color-border); }
+  .org-tabs button { padding: 5px 10px; border-radius: var(--radius-md); color: var(--color-text-secondary); background: transparent; cursor: pointer; font-size: var(--text-body-sm); }
+  .org-tabs button:hover { color: var(--color-brand); background: color-mix(in srgb, var(--color-brand) 9%, transparent); }
+  .org-tabs button.active { color: var(--color-brand); background: color-mix(in srgb, var(--color-brand) 14%, transparent); font-weight: var(--fw-semibold); }
   .count { font-size: var(--text-body-sm); color: var(--color-text-secondary); margin-right: auto; }
 
   .ghost {

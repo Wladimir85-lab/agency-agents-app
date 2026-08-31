@@ -740,3 +740,63 @@ Noted but explicitly untouched: a divisions/agency-organization rework
 `corpus.svelte.ts`, `categoryIcon.ts`, `presetTeams.ts`) started 2026-08-23 in the early
 morning, after this closure's code was already in place — a separate line of work, not
 reviewed or continued here.
+
+## 2026-08-23 — IntentOS Navigation Charter v2 APPROVED (Hunter/Agency/Factory/Mission/Offer-Delivery), persisted
+The full IntentOS architecture reconstruction requested this session went through two NCTO
+review passes. First pass (ten corrections): Hunter's validation loop moved earlier in the
+build sequence (no longer waits for a late phase); Fabrica de Trabajos Digitales and Legacy
+Modernization were each split into a discovery face (a Hunter Core mode) and an execution face
+(a Mission pattern); synthetic media was declassified from "future Capability" to "undecided
+strategy"; a new Offer/Delivery/Comercializacion conceptual layer was added between Factory and
+Mercado so a technical Resultado is never assumed to be a commercial offer; Opportunity was
+defined as the common object every Hunter mode must produce; Hunter Core was framed as a single
+platform of pluggable strategies, not many independent Hunters; the first Hunter experiment was
+scoped narrow (Legacy Hunter candidate); the NCTO's centrality (GO/NO-GO, commercial
+commitments) was made explicit; and a closing business-principle question was added (IntentOS
+is a business machine for discovering and converting opportunities, not a system for
+administering agents). Second pass (two placement microcorrections): Back-office/Process
+Compression and Organization Compression got named homes as Hunter Core discovery modes (only
+Organization Compression's execution face stays undecided); Opportunity was reclassified from
+"Module" to "entity/shared domain contract produced by Hunter Core, consumed by NCTO/Mission" -
+Hunter Core itself is the module.
+Approved as final by Wladimir (NCTO), 2026-08-23. Persisted as
+memory-bank/intentosNavigationCharter.md (this is Fase 2 of the approved roadmap in that
+file's Section 10). Runtime v0.1 (404f4b1) untouched throughout - no code was read, written, or
+proposed in this line of work. Fase 3 (Mission/Engagement minimo) is the next step and has
+explicitly NOT been started; do not begin it without a live go-ahead from the NCTO.
+
+## 2026-08-23 — Mission v1 implemented (mission.rs, lib.rs, runtime.rs) — Runtime v0.1 preserved
+
+Following NCTO approval of the Agency Operating Specification v1 (itself grounded in a real-world
+Agency Operational Pattern Survey across software/web/AI agencies, cross-border contract practice,
+and boutique-vs-structured comparison), implemented the minimal Fase 3 Mission/Engagement layer.
+
+New: src-tauri/src/mission.rs — Mission struct (objective, scope_statement, exclusions,
+acceptance_criteria, client_locale/target_markets/delivery_locales, agency_jurisdiction,
+engagement_regime, adjustment_budget, change_policy_note, status, approved_by_ncto), disk
+persistence at state/missions/<id>.json mirroring the existing run-persistence pattern exactly,
+mission_create/mission_get/mission_list/mission_update Tauri commands, and the pure
+mission_brief() serialization function (deterministic — no LLM, no agent, no interpretation).
+
+Edited: lib.rs (registers `mod mission;` + the 4 new commands, alongside the untouched
+runtime:: registrations). runtime.rs (StartRunRequest.mission_id and RunSummary.mission_id,
+both Option<String> with #[serde(default)] — same precedent as the existing capability_id
+field; stage_prompt() interpolates the Mission Brief immediately before USER INTENT: only
+when a Mission is attached — output is byte-identical to Runtime v0.1's original format!
+when mission_id is absent). New tests: mission_brief determinism, mission_brief section
+presence/absence, and an explicit backward-compatibility test asserting the brief section
+does not appear when no Mission is attached.
+
+types.rs and state.rs: unchanged. ProjectInfo (the pre-existing Projects install-tracking
+registry) was correctly identified as the wrong Fase 3 extension point in an earlier analysis
+pass and was not touched — Mission is its own independent type instead.
+
+Deferred, per the Operating Specification: sourceLocale, locale propagation logic,
+localization QA, a Policy Ledger engine, a third gate signal distinct from PASS/FAIL, Mission
+Brief mid-run versioning, and frontend UI (Runbooks.svelte / lib/types.ts / lib/api.ts were
+not modified this pass — need a dedicated read-then-implement pass before touching them).
+
+**Still pending, could not be completed in this session**: creating a dedicated git branch and
+running `cargo test` — this session had no device_bash/terminal access to this machine. See
+NEXT-SESSION.md for the exact commands. Runtime v0.1 (404f4b1)'s own contract, IDs, and
+five-stage pipeline were not modified; every change here is additive and optional.

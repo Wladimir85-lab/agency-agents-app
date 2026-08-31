@@ -1,5 +1,7 @@
 # Agency Agents
 
+> IntentOS architecture work is documented in [`docs/INTENTOS-GOD-ARCHITECTURE.md`](docs/INTENTOS-GOD-ARCHITECTURE.md). Agency Agents is retained as a professional capability source; IntentOS owns the factory.
+
 > A native installer for AI agents.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)

@@ -222,7 +222,12 @@ mod tests {
             message: "x".into(),
         })
         .await;
-        for feat in ["trending_fetch", "cask_icon_from_homepage", "catalog_refresh", "runtime_codex"] {
+        for feat in [
+            "trending_fetch",
+            "cask_icon_from_homepage",
+            "catalog_refresh",
+            "runtime_codex",
+        ] {
             let r = state.require_network(feat).await;
             match r {
                 Err(AppError::ParanoidModeBlocked { feature }) => {
@@ -232,5 +237,4 @@ mod tests {
             }
         }
     }
-
 }

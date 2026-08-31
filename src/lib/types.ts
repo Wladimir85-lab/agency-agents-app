@@ -446,6 +446,7 @@ export interface StartRunRequest {
   stageLabels: string[];
   agentSlugs: string[];
   providerId: string;
+  missionId?: string | null;
 }
 
 export interface RunSummary {
@@ -458,6 +459,7 @@ export interface RunSummary {
   capabilityId: string;
   capabilityIds: string[];
   providerId: string;
+  missionId?: string | null;
   status: RunStatus;
   currentStage: string | null;
   stages: RunStage[];
@@ -465,6 +467,31 @@ export interface RunSummary {
   updatedAt: string;
   completedAt: string | null;
   error: string | null;
+}
+
+export interface Mission {
+  id: string;
+  projectPath: string;
+  objective: string;
+  scopeStatement: string;
+  exclusions: string[];
+  acceptanceCriteria: string[];
+  clientLocale: string | null;
+  targetMarkets: string[];
+  deliveryLocales: string[];
+  agencyJurisdiction: string | null;
+  engagementRegime: "fixed" | "variable" | "retainer";
+  adjustmentBudget: string | null;
+  changePolicyNote: string | null;
+  status: "draft" | "approved" | "inProduction" | "delivered" | "inSupport" | "closed";
+  approvedByNcto: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AutomaticProject {
+  name: string;
+  path: string;
 }
 
 export type RuntimeOutputStream = "stdout" | "stderr";
@@ -482,6 +509,33 @@ export interface RuntimeReview {
   workspacePath: string;
   sourceUnchanged: boolean;
   changes: WorkspaceChange[];
+}
+
+export interface DeliveryReceipt {
+  runId: string;
+  missionId: string | null;
+  intent: string;
+  verified: boolean;
+  evidenceComplete: boolean;
+  applied: boolean;
+  completedAt: string | null;
+  gates: RunStage[];
+  changes: WorkspaceChange[];
+  evidencePath: string;
+}
+
+export interface FabricBinding {
+  capability: string;
+  contract: string;
+  activeBinding: string;
+  replacementPolicy: "replaceable";
+}
+
+export interface FabricStatus {
+  owner: "IntentOS";
+  principle: string;
+  shell: string;
+  bindings: FabricBinding[];
 }
 
 export type RunEvent =
