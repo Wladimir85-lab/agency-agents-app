@@ -79,6 +79,12 @@ pub fn status() -> FabricStatus {
                 "replaceable",
             ),
             binding(
+                "showroom",
+                "ShowroomPublisher",
+                "localPreviewV1",
+                "replaceable",
+            ),
+            binding(
                 "delivery",
                 "DeliveryPublisher",
                 "reviewApplyReceipt",
@@ -128,7 +134,7 @@ mod tests {
     fn intentos_owns_every_contract_and_external_bindings_are_replaceable() {
         let fabric = status();
         assert_eq!(fabric.owner, "IntentOS");
-        assert_eq!(fabric.bindings.len(), 10);
+        assert_eq!(fabric.bindings.len(), 11);
         assert!(fabric
             .bindings
             .iter()
@@ -136,6 +142,9 @@ mod tests {
         assert!(fabric.bindings.iter().any(|binding| {
             binding.contract == "CapabilityCatalog"
                 && binding.active_binding == "agencyAgentsCorpus"
+        }));
+        assert!(fabric.bindings.iter().any(|binding| {
+            binding.contract == "ShowroomPublisher" && binding.active_binding == "localPreviewV1"
         }));
     }
 

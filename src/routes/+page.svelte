@@ -7,7 +7,7 @@
   import Teams from "$lib/components/Teams.svelte";
   import Projects from "$lib/components/Projects.svelte";
   import AgentsWorkspace from "$lib/components/AgentsWorkspace.svelte";
-  import ToolsView from "$lib/components/ToolsView.svelte";
+  import IntentToolsView from "$lib/components/IntentToolsView.svelte";
   import ActivityHistory from "$lib/components/ActivityHistory.svelte";
   import Runbooks from "$lib/components/Runbooks.svelte";
   import CommandPalette from "$lib/components/CommandPalette.svelte";
@@ -215,7 +215,7 @@
           {#if ui.section === "dashboard"}
             <AgencyDashboard />
           {:else if ui.section === "tools"}
-            <ToolsView />
+            <IntentToolsView />
           {:else if ui.section === "teams"}
             <Teams />
           {:else if ui.section === "projects"}

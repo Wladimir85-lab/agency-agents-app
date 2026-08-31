@@ -12,7 +12,7 @@ The human supplies intent, judgment and irreversible product decisions. IntentOS
 
 ## End-to-end lifecycle
 
-`intent -> mission -> capability composition -> isolated construction -> QA -> Reality Check -> review -> apply -> delivery receipt`
+`intent -> proposal -> interactive showroom -> approval -> mission -> capability composition -> isolated construction -> QA -> Reality Check -> review -> apply -> delivery receipt`
 
 The current vertical is real and incremental:
 
@@ -41,9 +41,28 @@ The backend command `fabric_status` is the machine-readable source for active bi
 | Execution | `ExecutionEnvironment` | isolated workspace | source remains protected until explicit apply |
 | Memory | `EngineeringMemory` | run evidence store | current truth, manifests and decisions |
 | Verification | `VerificationGate` | QA/Reality Loop | explicit PASS/FAIL with remediation |
+| Interactive preview | `ShowroomPublisher` | local preview v1 | makes the desire visible before full production; shareable hosting remains an adapter |
 | Delivery | `DeliveryPublisher` | review/apply/receipt | verified and applied are separate states |
 
 NeMo, OmniRoute, Theia, Daytona, E2B and future systems may implement one or more contracts. None is an architectural identity of IntentOS.
+
+## Builders, internal tools and external engines
+
+Codex and Claude are engineering systems used to build IntentOS from outside the product. They are not architectural organs of the finished factory. The inherited Agency Agents tool installers (Gemini CLI, Qwen Code, Kimi, OpenClaw and similar applications) remain available as compatibility integrations, but they are classified as **external engines**, not as IntentOS tools.
+
+IntentOS tools are owned capabilities: files and code, terminal and processes, browser and interactive preview, data operations, testing, security/isolation, media production and verified delivery. NVIDIA Build, NVIDIA local inference, open models and future providers supply computation beneath those contracts without becoming the human-facing product model.
+
+## Showroom before production
+
+IntentOS must make the desire visible before committing to full production. The Showroom is an interactive, shareable proposal used to validate experience, navigation and the central flow with the NCTO or client. Every simulated behavior must be labelled honestly. Approval of the Showroom creates the production commitment; it is not itself proof that persistence, integrations, security or operations are complete.
+
+The product therefore distinguishes three times:
+
+1. **T1 — visible desire:** interactive showroom with a reviewable URL or local embedded preview.
+2. **T2 — functional product:** real central flow and persistence.
+3. **T3 — verified delivery:** QA, Reality Check, ownership artifacts, apply and receipt.
+
+"Built" never means hidden in an isolated workspace. A completed outcome must be visible, verifiable, recoverable and deliverable.
 
 ## Chassis decision ADR-001
 
