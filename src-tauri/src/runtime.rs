@@ -882,10 +882,8 @@ fn claude_command() -> Command {
 
 #[tauri::command]
 pub async fn runtime_providers() -> Result<Vec<RuntimeProvider>, AppError> {
-    // Codex first preserves today's default (Runbooks.svelte auto-picks the
-    // first available provider) for everyone who already has working Codex
-    // quota; Claude Code only becomes the pick when Codex is unavailable —
-    // or when a user explicitly selects it from the new provider dropdown.
+    // Ordered internal bindings. Runbooks consumes the first healthy runtime;
+    // provider identity is deliberately absent from the human intention flow.
     Ok(vec![probe_codex().await, probe_claude().await])
 }
 
