@@ -36,6 +36,19 @@
     }
   }
 
+  async function stopLocalModel() {
+    localModelBusy = true;
+    localModelError = "";
+    try {
+      localModel = await invoke<LocalModelStatus>("local_model_stop");
+    } catch (error) {
+      localModelError = String(error);
+      await refreshLocalModel().catch(() => undefined);
+    } finally {
+      localModelBusy = false;
+    }
+  }
+
   onMount(() => {
     void refreshLocalModel()
       .catch(() => (localModel = null));
@@ -90,6 +103,10 @@
               <button class="motor-action" disabled={localModelBusy || !localModel.serverExecutable || !localModel.modelPath} onclick={startLocalModel}>
                 {localModelBusy ? "Encendiendo…" : "Encender motor local"}
               </button>
+            {:else if index === 0 && localModel && localModel.sovereignReady}
+              <button class="motor-action secondary" disabled={localModelBusy} onclick={stopLocalModel}>
+                {localModelBusy ? "Apagando…" : "Apagar motor local"}
+              </button>
             {/if}
           </div>
         </article>
@@ -123,6 +140,7 @@
   .card-title{display:flex;align-items:center;justify-content:space-between;gap:10px}.card-title h3{margin:1px 0 7px;color:var(--color-text-primary);font-size:14px}.card-title span{padding:3px 7px;border-radius:999px;background:var(--color-surface-sunken);color:var(--color-text-muted);font:9px var(--font-mono)}
   article p{margin:0;color:var(--color-text-muted);font-size:12px;line-height:1.5}
   .motor-action{margin-top:11px;padding:7px 10px;border:1px solid color-mix(in srgb,var(--color-brand) 55%,var(--color-border));border-radius:8px;background:var(--color-brand-subtle);color:var(--color-brand);font-size:11px;font-weight:650}
+  .motor-action.secondary{border-color:var(--color-border);background:var(--color-surface-sunken);color:var(--color-text-muted)}
   .motor-action:disabled{cursor:not-allowed;opacity:.5}
   .legacy{flex:1;min-height:0;border-top:1px solid var(--color-border)}
   @media(max-width:760px){header{flex-direction:column}.grid{grid-template-columns:1fr}.principle,.external-note{align-items:flex-start;flex-direction:column}}

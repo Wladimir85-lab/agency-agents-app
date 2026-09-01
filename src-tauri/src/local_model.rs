@@ -23,6 +23,7 @@ const ENDPOINT_ENV: &str = "INTENTOS_LOCAL_MODEL_ENDPOINT";
 const RUNNER_VERSION: &str = "b10516";
 const MODEL_FILE: &str = "qwen2.5-coder-1.5b-instruct-q4_k_m.gguf";
 const MAX_PROMPT_BYTES: usize = 32 * 1024;
+const PID_FILE: &str = "runner.pid";
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -105,6 +106,143 @@ fn managed_model(app_data_dir: &Path) -> PathBuf {
         .join("local-model")
         .join("models")
         .join(MODEL_FILE)
+}
+
+fn pid_file_path(app_data_dir: &Path) -> PathBuf {
+    app_data_dir.join("local-model").join(PID_FILE)
+}
+
+/// Best-effort: record the PID of a runner IntentOS just spawned, so a
+/// later `local_model_stop` can still reach it after this process (and its
+/// in-memory `Child` handle) is gone — e.g. a crashed or force-closed
+/// previous session left the runner orphaned but listening on loopback.
+fn record_pid(app_data_dir: &Path, pid: u32) {
+    let _ = std::fs::write(pid_file_path(app_data_dir), pid.to_string());
+}
+
+fn clear_pid_file(app_data_dir: &Path) {
+    let _ = std::fs::remove_file(pid_file_path(app_data_dir));
+}
+
+/// Stop a runner IntentOS no longer holds an in-memory `Child` handle for —
+/// this process restarted, or a prior session exited (crashed, force-closed)
+/// without running `local_model_stop` first. Tries the PID IntentOS itself
+/// recorded at spawn time; failing that, falls back to whichever process is
+/// actually bound to the configured loopback port, which also covers a
+/// runner that predates the PID file or was started outside IntentOS
+/// entirely (e.g. by hand during development). Either way, a PID is only
+/// ever killed after confirming it still names the managed `llama-server`
+/// executable — never an arbitrary/reused PID.
+async fn stop_orphaned_runner(app_data_dir: &Path) -> bool {
+    if kill_recorded_pid(app_data_dir).await {
+        return true;
+    }
+    let Some(port) = configured_port() else {
+        return false;
+    };
+    let Some(pid) = find_pid_on_port(port).await else {
+        return false;
+    };
+    if !process_is_llama_server(pid).await {
+        return false;
+    }
+    kill_pid(pid).await
+}
+
+async fn kill_recorded_pid(app_data_dir: &Path) -> bool {
+    let Ok(raw) = std::fs::read_to_string(pid_file_path(app_data_dir)) else {
+        return false;
+    };
+    let Ok(pid) = raw.trim().parse::<u32>() else {
+        clear_pid_file(app_data_dir);
+        return false;
+    };
+    if !process_is_llama_server(pid).await {
+        clear_pid_file(app_data_dir);
+        return false;
+    }
+    let killed = kill_pid(pid).await;
+    clear_pid_file(app_data_dir);
+    killed
+}
+
+fn configured_port() -> Option<u16> {
+    let endpoint = env::var(ENDPOINT_ENV).unwrap_or_else(|_| DEFAULT_ENDPOINT.into());
+    url::Url::parse(&endpoint)
+        .ok()
+        .and_then(|u| u.port_or_known_default())
+}
+
+#[cfg(windows)]
+async fn find_pid_on_port(port: u16) -> Option<u32> {
+    let mut command = Command::new("netstat");
+    command.args(["-ano", "-p", "TCP"]);
+    command.creation_flags(0x08000000);
+    let out = command.output().await.ok()?;
+    let needle = format!(":{port}");
+    String::from_utf8_lossy(&out.stdout).lines().find_map(|line| {
+        let cols: Vec<&str> = line.split_whitespace().collect();
+        if cols.len() == 5 && cols[0] == "TCP" && cols[1].ends_with(&needle) && cols[3] == "LISTENING" {
+            cols[4].parse::<u32>().ok()
+        } else {
+            None
+        }
+    })
+}
+
+#[cfg(not(windows))]
+async fn find_pid_on_port(port: u16) -> Option<u32> {
+    let out = Command::new("lsof")
+        .args(["-t", "-iTCP", &format!(":{port}"), "-sTCP:LISTEN"])
+        .output()
+        .await
+        .ok()?;
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .next()
+        .and_then(|s| s.trim().parse::<u32>().ok())
+}
+
+#[cfg(windows)]
+async fn process_is_llama_server(pid: u32) -> bool {
+    let filter = format!("PID eq {pid}");
+    let mut command = Command::new("tasklist");
+    command.args(["/FI", &filter, "/NH", "/FO", "CSV"]);
+    command.creation_flags(0x08000000);
+    match command.output().await {
+        Ok(out) => String::from_utf8_lossy(&out.stdout).contains("llama-server"),
+        Err(_) => false,
+    }
+}
+
+#[cfg(not(windows))]
+async fn process_is_llama_server(pid: u32) -> bool {
+    match std::fs::read_to_string(format!("/proc/{pid}/comm")) {
+        Ok(name) => name.trim().contains("llama-server"),
+        Err(_) => false,
+    }
+}
+
+#[cfg(windows)]
+async fn kill_pid(pid: u32) -> bool {
+    let mut command = Command::new("taskkill");
+    command.args(["/PID", &pid.to_string(), "/F"]);
+    command.creation_flags(0x08000000);
+    command
+        .output()
+        .await
+        .map(|out| out.status.success())
+        .unwrap_or(false)
+}
+
+#[cfg(not(windows))]
+async fn kill_pid(pid: u32) -> bool {
+    Command::new("kill")
+        .args(["-9", &pid.to_string()])
+        .output()
+        .await
+        .map(|out| out.status.success())
+        .unwrap_or(false)
 }
 
 fn discover_server(app_data_dir: &Path) -> Option<PathBuf> {
@@ -258,7 +396,11 @@ pub async fn local_model_start(state: State<'_, AppState>) -> Result<LocalModelS
     {
         command.creation_flags(0x08000000);
     }
-    *guard = Some(command.spawn()?);
+    let child = command.spawn()?;
+    if let Some(pid) = child.id() {
+        record_pid(&state.app_data_dir, pid);
+    }
+    *guard = Some(child);
     drop(guard);
     for _ in 0..40 {
         let status = status_at(&state.app_data_dir).await;
@@ -277,6 +419,13 @@ pub async fn local_model_stop(state: State<'_, AppState>) -> Result<LocalModelSt
     let mut guard = state.local_model_process.lock().await;
     if let Some(mut child) = guard.take() {
         child.kill().await?;
+        clear_pid_file(&state.app_data_dir);
+    } else {
+        // No in-memory handle — this process didn't spawn the runner
+        // that's answering on loopback (e.g. a prior IntentOS session
+        // exited without stopping it first). Fall back to the PID
+        // IntentOS itself recorded at spawn time.
+        stop_orphaned_runner(&state.app_data_dir).await;
     }
     drop(guard);
     Ok(status_at(&state.app_data_dir).await)
