@@ -54,6 +54,16 @@ pub fn status() -> FabricStatus {
                 "runtimeProviderAdapters",
                 "replaceable",
             ),
+            // Detection and health boundary for IntentOS-owned inference.
+            // This is deliberately separate from the active ModelGateway:
+            // local execution must not be claimed until a native server,
+            // authorised model and NVIDIA acceleration pass the readiness gate.
+            binding(
+                "sovereignInference",
+                "LocalModelGateway",
+                "localGatewayFoundationV1",
+                "replaceable",
+            ),
             binding(
                 "tooling",
                 "ToolGateway",
@@ -134,7 +144,7 @@ mod tests {
     fn intentos_owns_every_contract_and_external_bindings_are_replaceable() {
         let fabric = status();
         assert_eq!(fabric.owner, "IntentOS");
-        assert_eq!(fabric.bindings.len(), 11);
+        assert_eq!(fabric.bindings.len(), 12);
         assert!(fabric
             .bindings
             .iter()
@@ -145,6 +155,10 @@ mod tests {
         }));
         assert!(fabric.bindings.iter().any(|binding| {
             binding.contract == "ShowroomPublisher" && binding.active_binding == "localPreviewV1"
+        }));
+        assert!(fabric.bindings.iter().any(|binding| {
+            binding.contract == "LocalModelGateway"
+                && binding.active_binding == "localGatewayFoundationV1"
         }));
     }
 

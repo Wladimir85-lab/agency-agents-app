@@ -1,4 +1,7 @@
 <script lang="ts">
+  import { onMount } from "svelte";
+  import { invoke } from "@tauri-apps/api/core";
+  import type { LocalModelStatus } from "$lib/types";
   import ToolsView from "./ToolsView.svelte";
   import Braces from "@lucide/svelte/icons/braces";
   import Terminal from "@lucide/svelte/icons/terminal";
@@ -8,11 +11,27 @@
   import Image from "@lucide/svelte/icons/image";
   import ShieldCheck from "@lucide/svelte/icons/shield-check";
   import PackageCheck from "@lucide/svelte/icons/package-check";
+  import Cpu from "@lucide/svelte/icons/cpu";
 
   type Lens = "internal" | "engines";
   let lens: Lens = $state("internal");
+  let localModel = $state<LocalModelStatus | null>(null);
 
-  const capabilities = [
+  onMount(() => {
+    void invoke<LocalModelStatus>("local_model_status")
+      .then((status) => (localModel = status))
+      .catch(() => (localModel = null));
+  });
+
+  const capabilities = $derived([
+    {
+      icon: Cpu,
+      name: "Motor local soberano",
+      detail: localModel?.sovereignReady
+        ? "Inferencia local disponible, aislada de proveedores pagados y lista para IntentOS."
+        : localModel?.blockers[0] ?? "Comprobando llama.cpp, modelo local y aceleración NVIDIA…",
+      state: localModel?.sovereignReady ? "Operativo" : "No preparado",
+    },
     { icon: Braces, name: "Editor y archivos", detail: "Crea, modifica, compara y versiona los artefactos del proyecto.", state: "Activo" },
     { icon: Terminal, name: "Terminal y procesos", detail: "Ejecuta compiladores, servidores y tareas con límites y trazabilidad.", state: "Activo" },
     { icon: Globe2, name: "Navegador y Showroom", detail: "Abre el resultado, comprueba salud y prepara una muestra interactiva compartible.", state: "En construcción" },
@@ -21,7 +40,7 @@
     { icon: Image, name: "Medios y experiencia", detail: "Produce y verifica recursos visuales, documentos y experiencias interactivas.", state: "Preparado" },
     { icon: ShieldCheck, name: "Seguridad y aislamiento", detail: "Protege el proyecto original y controla archivos, procesos, red y secretos.", state: "Activo" },
     { icon: PackageCheck, name: "Entrega", detail: "Prepara revisión, aplicación, paquete, repositorio y publicación verificable.", state: "Activo" },
-  ] as const;
+  ]);
 </script>
 
 <section class="intent-tools">

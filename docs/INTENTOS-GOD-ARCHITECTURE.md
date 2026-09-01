@@ -1,6 +1,6 @@
 # IntentOS GOD — Authoritative Architecture
 
-**Status:** active foundation (2026-08-27)  
+**Status:** active foundation (2026-08-31)
 **Owner:** IntentOS  
 **Product boundary:** private, sovereign AI-native IDE/factory. Agency Agents is a capability source, not the factory.
 
@@ -37,6 +37,7 @@ The backend command `fabric_status` is the machine-readable source for active bi
 | Professional knowledge | `CapabilityCatalog` | Agency Agents corpus | knowledge/capabilities only |
 | Orchestration | `WorkflowOrchestrator` | IntentOS Runtime v1 | owns workflow, state, repair and gates |
 | Models | `ModelGateway` | runtime provider adapters | Codex/Claude today; OmniRoute is only a candidate binding |
+| Sovereign inference | `LocalModelGateway` | local gateway foundation v1 | detects only loopback inference, an authorised local model and NVIDIA acceleration; it is not yet the production runtime |
 | Tools | `ToolGateway` | Tauri command registry | policy-controlled tool access |
 | Execution | `ExecutionEnvironment` | isolated workspace | source remains protected until explicit apply |
 | Memory | `EngineeringMemory` | run evidence store | current truth, manifests and decisions |
@@ -51,6 +52,14 @@ NeMo, OmniRoute, Theia, Daytona, E2B and future systems may implement one or mor
 Codex and Claude are engineering systems used to build IntentOS from outside the product. They are not architectural organs of the finished factory. The inherited Agency Agents tool installers (Gemini CLI, Qwen Code, Kimi, OpenClaw and similar applications) remain available as compatibility integrations, but they are classified as **external engines**, not as IntentOS tools.
 
 IntentOS tools are owned capabilities: files and code, terminal and processes, browser and interactive preview, data operations, testing, security/isolation, media production and verified delivery. NVIDIA Build, NVIDIA local inference, open models and future providers supply computation beneath those contracts without becoming the human-facing product model.
+
+### Local inference decision ADR-002
+
+**Decision: BUILD an IntentOS-owned, OpenAI-compatible local gateway around native `llama.cpp`; do not adopt Ollama as an architectural dependency and do not claim NVIDIA NIM compatibility on this machine without a verified runtime.**
+
+The gateway contract is independent of the runner and model. Its first readiness probe requires all of the following: a loopback endpoint, a healthy loaded model, an explicitly authorised local model file, and NVIDIA driver availability. NVIDIA Build endpoints may be used for evaluation, but remote free inference does not satisfy the sovereignty gate. Codex and Claude remain external engineering collaborators while the production runtime is migrated behind this contract.
+
+Initial model candidates are replaceable profiles rather than identities: a compact code-specialised model such as Qwen2.5-Coder 7B GGUF, and an NVIDIA Nemotron profile only after its local format, licence and measured RTX 3060 performance are verified. Model quality, latency, VRAM use, tool-call correctness and recovery success must be benchmarked before a profile becomes a default.
 
 ## Showroom before production
 
@@ -95,14 +104,16 @@ Completed in this foundation:
 - Chassis decision recorded from repository evidence.
 - Temporal approval control plane connected to Runbooks: a mission is started, signalled and queried before production begins.
 - Real Temporal-server smoke covers approval, rejection, cancellation and querying a completed workflow for recovery.
+- `LocalModelGateway` foundation reports native server, model, loopback API and NVIDIA readiness without exposing Codex/Claude as user-facing engines.
 
 Temporal's current boundary is deliberate: it owns durable mission decisions and recovery history. IntentOS Runtime still owns construction stages, QA/Reality gates, workspace isolation and delivery evidence. Moving those stages into Temporal Activities remains a future increment and must preserve the existing runtime contracts; the current integration must not be described as fully Temporal-orchestrated execution.
 
 Next increments, in order:
 
-1. Replace hard-coded provider branching with a tested `ModelGateway` adapter interface.
-2. Version engineering decisions and supersession in `EngineeringMemory`.
-3. Promote tools to schema-described, policy-checked capabilities (MCP-compatible where useful).
-4. Add process-tree containment on Windows and selectable local/container/remote execution adapters.
-5. Run a native golden-path factory mission and retain screenshots, logs, manifests and receipt as release evidence.
-6. Benchmark Theia components only when editor/LSP/terminal scope enters an approved mission.
+1. Install and verify the NVIDIA driver/CUDA-compatible native runner, authorise one local GGUF model and pass the `LocalModelGateway` readiness gate.
+2. Route one bounded planning/coding stage through a tested `ModelGateway` adapter with external fallback and evidence; then expand by benchmark, not by branding.
+3. Version engineering decisions and supersession in `EngineeringMemory`.
+4. Promote tools to schema-described, policy-checked capabilities (MCP-compatible where useful).
+5. Add process-tree containment on Windows and selectable local/container/remote execution adapters.
+6. Run a native golden-path factory mission and retain screenshots, logs, manifests and receipt as release evidence.
+7. Benchmark Theia components only when editor/LSP/terminal scope enters an approved mission.

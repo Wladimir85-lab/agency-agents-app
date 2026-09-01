@@ -551,6 +551,19 @@ export interface FabricStatus {
   bindings: FabricBinding[];
 }
 
+export interface LocalModelStatus {
+  gateway: "LocalModelGateway";
+  endpoint: string;
+  loopbackEndpoint: boolean;
+  apiReachable: boolean;
+  apiReady: boolean;
+  serverExecutable: string | null;
+  modelPath: string | null;
+  nvidiaDriverDetected: boolean;
+  sovereignReady: boolean;
+  blockers: string[];
+}
+
 export type RunEvent =
   | { kind: "runUpdated"; run: RunSummary }
   | { kind: "output"; runId: string; stageId: string; stream: RuntimeOutputStream; text: string }
