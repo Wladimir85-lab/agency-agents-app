@@ -16,10 +16,28 @@
   type Lens = "internal" | "engines";
   let lens: Lens = $state("internal");
   let localModel = $state<LocalModelStatus | null>(null);
+  let localModelBusy = $state(false);
+  let localModelError = $state("");
+
+  async function refreshLocalModel() {
+    localModel = await invoke<LocalModelStatus>("local_model_status");
+  }
+
+  async function startLocalModel() {
+    localModelBusy = true;
+    localModelError = "";
+    try {
+      localModel = await invoke<LocalModelStatus>("local_model_start");
+    } catch (error) {
+      localModelError = String(error);
+      await refreshLocalModel().catch(() => undefined);
+    } finally {
+      localModelBusy = false;
+    }
+  }
 
   onMount(() => {
-    void invoke<LocalModelStatus>("local_model_status")
-      .then((status) => (localModel = status))
+    void refreshLocalModel()
       .catch(() => (localModel = null));
   });
 
@@ -28,8 +46,8 @@
       icon: Cpu,
       name: "Motor local soberano",
       detail: localModel?.sovereignReady
-        ? "Inferencia local disponible, aislada de proveedores pagados y lista para IntentOS."
-        : localModel?.blockers[0] ?? "Comprobando llama.cpp, modelo local y aceleración NVIDIA…",
+        ? `Inferencia ${localModel.executionMode === "nvidia" ? "acelerada por NVIDIA" : "local por CPU"}, sin consumo de proveedores pagados.`
+        : localModelError || localModel?.blockers[0] || "Comprobando runner y modelo local…",
       state: localModel?.sovereignReady ? "Operativo" : "No preparado",
     },
     { icon: Braces, name: "Editor y archivos", detail: "Crea, modifica, compara y versiona los artefactos del proyecto.", state: "Activo" },
@@ -62,12 +80,17 @@
       <span>IntentOS selecciona silenciosamente herramientas, conocimiento y motores.</span>
     </div>
     <div class="grid">
-      {#each capabilities as capability (capability.name)}
+      {#each capabilities as capability, index (capability.name)}
         <article>
           <div class="icon"><capability.icon size={20} /></div>
           <div>
             <div class="card-title"><h3>{capability.name}</h3><span>{capability.state}</span></div>
             <p>{capability.detail}</p>
+            {#if index === 0 && localModel && !localModel.sovereignReady}
+              <button class="motor-action" disabled={localModelBusy || !localModel.serverExecutable || !localModel.modelPath} onclick={startLocalModel}>
+                {localModelBusy ? "Encendiendo…" : "Encender motor local"}
+              </button>
+            {/if}
           </div>
         </article>
       {/each}
@@ -99,6 +122,8 @@
   .icon{width:42px;height:42px;display:grid;place-items:center;border-radius:10px;background:var(--color-brand-subtle);color:var(--color-brand)}
   .card-title{display:flex;align-items:center;justify-content:space-between;gap:10px}.card-title h3{margin:1px 0 7px;color:var(--color-text-primary);font-size:14px}.card-title span{padding:3px 7px;border-radius:999px;background:var(--color-surface-sunken);color:var(--color-text-muted);font:9px var(--font-mono)}
   article p{margin:0;color:var(--color-text-muted);font-size:12px;line-height:1.5}
+  .motor-action{margin-top:11px;padding:7px 10px;border:1px solid color-mix(in srgb,var(--color-brand) 55%,var(--color-border));border-radius:8px;background:var(--color-brand-subtle);color:var(--color-brand);font-size:11px;font-weight:650}
+  .motor-action:disabled{cursor:not-allowed;opacity:.5}
   .legacy{flex:1;min-height:0;border-top:1px solid var(--color-border)}
   @media(max-width:760px){header{flex-direction:column}.grid{grid-template-columns:1fr}.principle,.external-note{align-items:flex-start;flex-direction:column}}
 </style>

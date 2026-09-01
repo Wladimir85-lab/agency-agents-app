@@ -201,6 +201,9 @@ pub fn run() {
             install::loadout_import,
             fabric::fabric_status,
             local_model::local_model_status,
+            local_model::local_model_start,
+            local_model::local_model_stop,
+            local_model::local_model_complete,
             // Mission/Engagement — Agency Operating Specification v1. Purely
             // additive: Runtime v0.1's commands and contract below are
             // unchanged. Mission is deliberately its own module, independent

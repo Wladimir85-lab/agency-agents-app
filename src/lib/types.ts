@@ -560,8 +560,16 @@ export interface LocalModelStatus {
   serverExecutable: string | null;
   modelPath: string | null;
   nvidiaDriverDetected: boolean;
+  executionMode: "cpu" | "nvidia";
   sovereignReady: boolean;
   blockers: string[];
+}
+
+export interface LocalCompletion {
+  content: string;
+  model: string;
+  latencyMs: number;
+  local: true;
 }
 
 export type RunEvent =

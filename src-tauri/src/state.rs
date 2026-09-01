@@ -54,6 +54,11 @@ pub struct AppState {
     /// IntentOS runtime jobs. Handles are backend-owned so the renderer can
     /// cancel a known run without ever supplying a process or shell command.
     pub runtime_jobs: Arc<Mutex<HashMap<String, tokio::task::AbortHandle>>>,
+
+    /// Optional llama.cpp process started by IntentOS. Keeping the child in
+    /// backend state gives the renderer start/stop semantics without ever
+    /// receiving an executable path or arbitrary command line.
+    pub local_model_process: Arc<Mutex<Option<tokio::process::Child>>>,
 }
 
 impl AppState {
@@ -90,6 +95,7 @@ impl AppState {
             settings: Arc::new(RwLock::new(settings_state)),
             updater_state: crate::commands::updater::empty_state(),
             runtime_jobs: Arc::new(Mutex::new(HashMap::new())),
+            local_model_process: Arc::new(Mutex::new(None)),
         })
     }
 

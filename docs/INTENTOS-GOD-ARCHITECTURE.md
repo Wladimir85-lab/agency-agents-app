@@ -37,7 +37,7 @@ The backend command `fabric_status` is the machine-readable source for active bi
 | Professional knowledge | `CapabilityCatalog` | Agency Agents corpus | knowledge/capabilities only |
 | Orchestration | `WorkflowOrchestrator` | IntentOS Runtime v1 | owns workflow, state, repair and gates |
 | Models | `ModelGateway` | runtime provider adapters | Codex/Claude today; OmniRoute is only a candidate binding |
-| Sovereign inference | `LocalModelGateway` | local gateway foundation v1 | detects only loopback inference, an authorised local model and NVIDIA acceleration; it is not yet the production runtime |
+| Sovereign inference | `LocalModelGateway` | local gateway foundation v1 | detects loopback inference, an authorised local model and optional hardware acceleration; it is not yet the production runtime |
 | Tools | `ToolGateway` | Tauri command registry | policy-controlled tool access |
 | Execution | `ExecutionEnvironment` | isolated workspace | source remains protected until explicit apply |
 | Memory | `EngineeringMemory` | run evidence store | current truth, manifests and decisions |
@@ -57,9 +57,11 @@ IntentOS tools are owned capabilities: files and code, terminal and processes, b
 
 **Decision: BUILD an IntentOS-owned, OpenAI-compatible local gateway around native `llama.cpp`; do not adopt Ollama as an architectural dependency and do not claim NVIDIA NIM compatibility on this machine without a verified runtime.**
 
-The gateway contract is independent of the runner and model. Its first readiness probe requires all of the following: a loopback endpoint, a healthy loaded model, an explicitly authorised local model file, and NVIDIA driver availability. NVIDIA Build endpoints may be used for evaluation, but remote free inference does not satisfy the sovereignty gate. Codex and Claude remain external engineering collaborators while the production runtime is migrated behind this contract.
+The gateway contract is independent of the runner, model and accelerator. Its readiness probe requires a loopback endpoint, a healthy loaded model, an explicitly authorised local model file and an IntentOS-managed runner. NVIDIA availability is reported independently: acceleration improves performance but does not define sovereignty. NVIDIA Build endpoints may be used for evaluation, but remote free inference does not satisfy the sovereignty gate. Codex and Claude remain external engineering collaborators while the production runtime is migrated behind this contract.
 
 Initial model candidates are replaceable profiles rather than identities: a compact code-specialised model such as Qwen2.5-Coder 7B GGUF, and an NVIDIA Nemotron profile only after its local format, licence and measured RTX 3060 performance are verified. Model quality, latency, VRAM use, tool-call correctness and recovery success must be benchmarked before a profile becomes a default.
+
+The first verified hardware target is an HP Pavilion x360 with an Intel i5-8265U, 8 GB RAM and Intel UHD 620; Windows exposes no NVIDIA adapter on this machine. The bootstrap profile is therefore the official Qwen2.5-Coder 1.5B Instruct Q4_K_M GGUF running through the official llama.cpp CPU build. It is a sovereignty and bounded-task profile, not a claim of frontier-model equivalence. The first direct completion loaded the model in about 7.3 seconds, used about 1.73 GB working memory and produced 156 completion tokens in about 17 seconds.
 
 ## Showroom before production
 
@@ -110,8 +112,8 @@ Temporal's current boundary is deliberate: it owns durable mission decisions and
 
 Next increments, in order:
 
-1. Install and verify the NVIDIA driver/CUDA-compatible native runner, authorise one local GGUF model and pass the `LocalModelGateway` readiness gate.
-2. Route one bounded planning/coding stage through a tested `ModelGateway` adapter with external fallback and evidence; then expand by benchmark, not by branding.
+1. Route one bounded planning/coding stage through the verified local completion command with external fallback and persisted evidence; then expand by benchmark, not by branding.
+2. Benchmark an NVIDIA/CUDA profile only on hardware where an NVIDIA adapter and driver are actually detected.
 3. Version engineering decisions and supersession in `EngineeringMemory`.
 4. Promote tools to schema-described, policy-checked capabilities (MCP-compatible where useful).
 5. Add process-tree containment on Windows and selectable local/container/remote execution adapters.
