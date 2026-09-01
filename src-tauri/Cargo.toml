@@ -120,3 +120,15 @@ keyring = { version = "3", features = ["sync-secret-service", "crypto-rust"] }
 # Wave 3 test pass but kept here so Reality Checker can wire in tests
 # without bumping deps.
 tempfile = "3"
+
+# This Windows development machine has limited disk space. Full debug symbols
+# made the Tauri static library alone exceed 2.8 GB and repeatedly exhausted
+# the drive during linking. Keep dev/test behavior unchanged while producing
+# bounded, reproducible build artifacts; release profiles are unaffected.
+[profile.dev]
+debug = 0
+incremental = false
+
+[profile.test]
+debug = 0
+incremental = false
