@@ -21,6 +21,15 @@
   import type { Agent, AutomaticProject, Mission, RunEvent } from "$lib/types";
 
   const LEGACY_DRAFT_KEY = "intentos.productionBrief.v1";
+  // `selected` (a NEXUS scenario runbook from strategy/runbooks.json) is
+  // optional correlation metadata, not a prerequisite: runtime_start only
+  // needs runbookId to be a non-empty string (validate_start_request) and
+  // uses it as one of several equality keys when matching an interrupted
+  // run to resume — it never looks the id up against any catalog. On a
+  // bundled/unsynced catalog `runbooks.list` is empty (by design — see
+  // runbooks.svelte.ts), which must never block approving a build. When a
+  // real runbook is selected its slug is still used, unchanged.
+  const DEFAULT_RUNBOOK_ID = "intent-build";
   const DEFAULT_SIGNATURE = "Resolver el trabajo real descrito por la intención y recomendar la forma computacional más adecuada, sin asumir de antemano web, aplicación, documento o formato. El resultado debe ser operable, propio y verificable; nunca presentar mocks, datos simulados o funciones incompletas como terminadas. Aplicar claridad, accesibilidad, seguridad, rendimiento, trazabilidad y facilidad de uso cuando correspondan al producto. Cada entrega debe incluir evidencia suficiente para que Reality Check compare lo construido con la propuesta aprobada por el NCTO.";
   onMount(() => {
     // Security baseline v0.1: production briefs can contain client data and
@@ -178,7 +187,7 @@
 
   async function approveAndStart() {
     validation = "";
-    if (!proposal || !selected || !provider) { validation = "La propuesta y el runtime deben estar disponibles."; return; }
+    if (!proposal || !provider) { validation = "La propuesta y el runtime deben estar disponibles."; return; }
     if (!teamReady) { validation = "El catálogo activo no contiene todos los especialistas internos requeridos."; return; }
     if (useExistingProject && !projectPath) { validation = "Selecciona el proyecto existente."; return; }
     approving = true;
@@ -225,7 +234,7 @@
           "Temporal no está disponible ahora mismo; IntentOS registró tu aprobación localmente y sigue igual.",
         );
       }
-      await runs.start({ intent: productionBrief(approvedProposal), projectPath, runbookId: selected.slug, capabilityId: approvedCapabilities[0].id, capabilityIds: approvedCapabilities.map((item) => item.id), stageIds: approvedPipeline.map((stage) => stage.id), stageKinds: approvedPipeline.map((stage) => stage.kind), stageLabels: approvedPipeline.map((stage) => stage.label), agentSlugs: approvedPipeline.map((stage) => stage.agent), providerId: provider.id, missionId: mission.id });
+      await runs.start({ intent: productionBrief(approvedProposal), projectPath, runbookId: selected?.slug ?? DEFAULT_RUNBOOK_ID, capabilityId: approvedCapabilities[0].id, capabilityIds: approvedCapabilities.map((item) => item.id), stageIds: approvedPipeline.map((stage) => stage.id), stageKinds: approvedPipeline.map((stage) => stage.kind), stageLabels: approvedPipeline.map((stage) => stage.label), agentSlugs: approvedPipeline.map((stage) => stage.agent), providerId: provider.id, missionId: mission.id });
     } catch (e) { toast.error("No se pudo iniciar la producción aprobada", readableError(e)); }
     finally { approving = false; }
   }
@@ -341,7 +350,7 @@
           {#if proposal.revisionNotes.length}<section class="revision"><strong>Revisión NCTO incorporada</strong><p>{proposal.revisionNotes.at(-1)}</p>{#if proposalChanges.length}<ul>{#each proposalChanges as change}<li>{change}</li>{/each}</ul>{/if}</section>{/if}
           <details><summary>Ver criterio y plan interno</summary><div class="proposal-internal"><p><strong>Usuario inferido</strong><br/>{proposal.user}</p><p><strong>Trabajo a resolver</strong><br/>{proposal.job}</p><p><strong>Proyecto</strong><br/>Documents / IntentOS Projects / {proposal.projectSlug}</p><p><strong>Capacidades</strong><br/>{proposal.capabilities.map((item) => item.shortLabel).join(" + ")}</p><div class="experience-map"><strong>Experiencia propuesta</strong>{#each proposal.experience as step, index}<div><span>{index + 1}</span><p>{step}</p></div>{/each}</div><ol class="dynamic-team">{#each proposal.pipeline as stage, index (stage.id)}<li class:missing={!bySlug.has(stage.agent)}><div><strong>{index + 1}. {stage.label}</strong><small>Responsable: {bySlug.get(stage.agent)?.name ?? stage.agent}</small></div></li>{/each}</ol></div></details>
           {#if rejecting}<label for="rejection">¿Qué debe cambiar?<textarea id="rejection" bind:value={rejectionReason} rows="4" placeholder="Explica por qué rechazas esta propuesta y qué dirección debe tomar IntentOS."></textarea></label>{/if}
-          <div class="decision-actions"><Button variant="primary" onclick={approveAndStart} loading={approving} disabled={!provider || !selected || !teamReady}>Aprobar y construir</Button>{#if rejecting}<Button variant="danger" onclick={rejectProposal}>Enviar rechazo razonado</Button>{:else}<Button variant="secondary" onclick={() => rejecting = true}>Rechazar / pedir cambios</Button>{/if}<Button variant="secondary" onclick={() => proposal = null}>Editar intención</Button></div>
+          <div class="decision-actions"><Button variant="primary" onclick={approveAndStart} loading={approving} disabled={!provider || !teamReady}>Aprobar y construir</Button>{#if rejecting}<Button variant="danger" onclick={rejectProposal}>Enviar rechazo razonado</Button>{:else}<Button variant="secondary" onclick={() => rejecting = true}>Rechazar / pedir cambios</Button>{/if}<Button variant="secondary" onclick={() => proposal = null}>Editar intención</Button></div>
           {#if !provider}<p class="error">El runtime no está disponible; puedes revisar la propuesta, pero no iniciar producción.</p>{/if}
         </section>
       {:else}
