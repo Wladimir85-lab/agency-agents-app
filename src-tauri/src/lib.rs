@@ -269,50 +269,60 @@ fn build_app_menu<R: tauri::Runtime>(
 ) -> tauri::Result<tauri::menu::Menu<R>> {
     use tauri::menu::{MenuBuilder, MenuItemBuilder, PredefinedMenuItem, SubmenuBuilder};
 
-    let pkg = app.package_info();
+    // Display name for the native menu only — deliberately not `pkg.name`
+    // (that stays "Agency Agents", the crate/productName identity used for
+    // build artifacts and installer metadata). This is purely the label
+    // shown to the user.
+    const APP_DISPLAY_NAME: &str = "IntentOS";
 
     // App menu: About (custom — opens our in-app modal), Settings…, ─, Hide
     // / Hide-Others / Show-All, ─, Quit. The native PredefinedMenuItem::about
     // would open the OS dialog; we route through our own modal instead via
     // a MenuItemBuilder + the menu event so the donate CTA + Anthropic
     // credits render in our UI.
-    let about_item = MenuItemBuilder::new(format!("About {}", pkg.name))
+    let about_item = MenuItemBuilder::new(format!("Acerca de {APP_DISPLAY_NAME}"))
         .id(MENU_EVENT_ABOUT)
         .build(app)?;
-    let settings_item = MenuItemBuilder::new("Settings…")
+    let settings_item = MenuItemBuilder::new("Configuración…")
         .id(MENU_EVENT_SETTINGS)
         .accelerator("CmdOrCtrl+,")
         .build(app)?;
 
-    let app_submenu = SubmenuBuilder::new(app, pkg.name.clone())
+    let app_submenu = SubmenuBuilder::new(app, APP_DISPLAY_NAME)
         .item(&about_item)
         .separator()
         .item(&settings_item)
         .separator()
-        .item(&PredefinedMenuItem::hide(app, None)?)
-        .item(&PredefinedMenuItem::hide_others(app, None)?)
-        .item(&PredefinedMenuItem::show_all(app, None)?)
+        .item(&PredefinedMenuItem::hide(
+            app,
+            Some(&format!("Ocultar {APP_DISPLAY_NAME}")),
+        )?)
+        .item(&PredefinedMenuItem::hide_others(app, Some("Ocultar las demás"))?)
+        .item(&PredefinedMenuItem::show_all(app, Some("Mostrar todas"))?)
         .separator()
-        .item(&PredefinedMenuItem::quit(app, None)?)
+        .item(&PredefinedMenuItem::quit(
+            app,
+            Some(&format!("Salir de {APP_DISPLAY_NAME}")),
+        )?)
         .build()?;
 
     // Standard ancillary menus — Edit (copy/paste/etc.) + Window. Pure
     // PredefinedMenuItems so we don't have to reinvent them.
-    let edit_submenu = SubmenuBuilder::new(app, "Edit")
-        .item(&PredefinedMenuItem::undo(app, None)?)
-        .item(&PredefinedMenuItem::redo(app, None)?)
+    let edit_submenu = SubmenuBuilder::new(app, "Editar")
+        .item(&PredefinedMenuItem::undo(app, Some("Deshacer"))?)
+        .item(&PredefinedMenuItem::redo(app, Some("Rehacer"))?)
         .separator()
-        .item(&PredefinedMenuItem::cut(app, None)?)
-        .item(&PredefinedMenuItem::copy(app, None)?)
-        .item(&PredefinedMenuItem::paste(app, None)?)
-        .item(&PredefinedMenuItem::select_all(app, None)?)
+        .item(&PredefinedMenuItem::cut(app, Some("Cortar"))?)
+        .item(&PredefinedMenuItem::copy(app, Some("Copiar"))?)
+        .item(&PredefinedMenuItem::paste(app, Some("Pegar"))?)
+        .item(&PredefinedMenuItem::select_all(app, Some("Seleccionar todo"))?)
         .build()?;
 
-    let window_submenu = SubmenuBuilder::new(app, "Window")
-        .item(&PredefinedMenuItem::minimize(app, None)?)
-        .item(&PredefinedMenuItem::maximize(app, None)?)
+    let window_submenu = SubmenuBuilder::new(app, "Ventana")
+        .item(&PredefinedMenuItem::minimize(app, Some("Minimizar"))?)
+        .item(&PredefinedMenuItem::maximize(app, Some("Maximizar"))?)
         .separator()
-        .item(&PredefinedMenuItem::close_window(app, None)?)
+        .item(&PredefinedMenuItem::close_window(app, Some("Cerrar"))?)
         .build()?;
 
     MenuBuilder::new(app)
