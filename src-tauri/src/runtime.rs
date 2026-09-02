@@ -693,6 +693,67 @@ fn output_gate_passed(output: &str) -> bool {
     }
 }
 
+// ---------- Reality gate — domain-conditional verification guidance ----------
+//
+// The same single Reality Checker persona is used for every capability —
+// `composePipeline()` in intentosCapabilities.ts creates exactly one
+// `reality-check` stage per run, never one per domain — so this never
+// creates a second Reality Checker or a second pipeline. It only changes
+// what that one stage is told counts as real evidence, mirroring the
+// existing IoT development mandate below: the persona markdown is static
+// text with no templating, so only `stage_prompt` (which already has
+// `run.capability_id`/`capability_ids` in scope) can make this
+// domain-conditional at all.
+
+/// One capability's idea of real, checkable evidence for the reality-check
+/// stage. Falls back to a domain-neutral instruction for any id this list
+/// doesn't recognize (including the empty string on historical runs) —
+/// deliberately never assumes a web/Laravel stack by default, which is
+/// exactly the behavior being replaced.
+fn domain_verification_guidance(capability_id: &str) -> &'static str {
+    match capability_id {
+        "digital-experience" => "- Inspect the actual rendered output: serve/open the built pages and verify DOM structure, responsive behavior at common breakpoints, and basic accessibility (labels, contrast, keyboard focus) with whatever browser/HTTP tooling is available in this workspace.\n- Do not assume Laravel, Blade views, or any specific framework — verify whatever was actually built.",
+        "systems-data" => "- Call the actual endpoints/contracts that were built (not just read the code) and check status codes, error responses, and input validation.\n- Verify persistence round-trips: write data, read it back, and confirm it survives a restart when that is in scope.",
+        "iot" => "- Verify the actual telemetry/protocol path (e.g. MQTT topics, message shapes) end to end, using simulation when physical hardware is unavailable.\n- Confirm alert/automation rules actually fire on the conditions they claim to handle.",
+        "tinyml-edge-ai" => "- Run real inference on representative sample inputs and record actual accuracy/latency numbers, not estimates.\n- Confirm the model artifact and its deployment path genuinely exist in the workspace.",
+        "cybersecurity" => "- Produce real tool/scan output or a reproducible proof-of-concept for every finding — never a narrative claim alone.\n- Diff the actual configuration/permissions against what was supposed to change.",
+        "devops-quality" => "- Check the actual pipeline/deployment status and any observability signal (logs, metrics, health checks) that was supposed to be wired up.\n- Report measured performance numbers from a real run, not assumptions.",
+        "operations-automation" => "- Trigger the actual automation end to end (the real event -> the real action) and confirm it happened, including error/idempotency handling.\n- Inspect integration logs for the calls that actually happened, not a description of intended calls.",
+        "data-decisions" => "- Validate schemas and run the actual transformations/queries against representative sample data; compare output to known-correct expectations.\n- Check that visualizations/reports reflect the real underlying data, not placeholder values.",
+        "ai-agents" => "- Review actual tool-call transcripts and outputs from the agent under test, not a description of what it should do.\n- Check grounding — do its claims match what was actually retrieved/available? — and test its behavior on at least one deliberately bad or edge-case input.",
+        "creative-technology" => "- Inspect the actual rendered output/artifact (frame, export, build) and measured performance (load time, fps) rather than a subjective description.\n- Apply visual/UX criteria only where they are mechanically checkable from the acceptance criteria; do not invent taste-based scoring.",
+        "strategy-product" => "- This stage is not verifying software behavior: confirm the actual deliverable documents/artifacts exist, cover every required section, and cite real research or data rather than fabricated claims presented as findings.\n- Do not ask for screenshots, endpoints, or telemetry — they do not apply to this capability.",
+        _ => "- No specific domain profile is recorded for this run; gather whatever objective evidence (commands run, files produced, outputs inspected) genuinely demonstrates this stage's claims, using the tools actually available in this workspace. Do not assume a web/Laravel stack by default.",
+    }
+}
+
+/// Assembles the reality-check-only guidance section from every capability
+/// this run actually selected (`capability_ids`), falling back to the
+/// single primary `capability_id` for runs that predate the
+/// multi-capability field — same null-safety precedent as
+/// `resumable_run`'s `capability_ids.is_empty()` check elsewhere in this
+/// file. `composePipeline()` only tags the shared reality-check stage with
+/// the primary capability's id, so this is a genuine improvement over that
+/// for combined-capability builds, not just a port of it.
+fn reality_domain_section(run: &RunSummary) -> String {
+    let domains: Vec<&str> = if run.capability_ids.is_empty() {
+        vec![run.capability_id.as_str()]
+    } else {
+        run.capability_ids.iter().map(String::as_str).collect()
+    };
+    let mut section = String::from(
+        "\nDOMAIN VERIFICATION GUIDANCE (what counts as real evidence for this build — additional to, never a replacement for, your own persona's methodology):\n",
+    );
+    for domain in &domains {
+        let label = if domain.is_empty() { "unspecified" } else { domain };
+        section.push_str(&format!(
+            "[{label}]\n{}\n",
+            domain_verification_guidance(domain)
+        ));
+    }
+    section
+}
+
 // ---------- Reality gate — structured criteria (shadow mode) ----------
 //
 // `output_gate_passed` above remains the sole authority for every stage's
@@ -1755,6 +1816,15 @@ fn stage_prompt(
     } else {
         ""
     };
+    // Domain-conditional verification guidance — see "Reality gate —
+    // domain-conditional verification guidance" above. Additive and
+    // reality-stage-only: every other stage's prompt is byte-identical to
+    // before.
+    let domain_guidance = if s.kind == "reality" || s.id == "reality-check" {
+        reality_domain_section(run)
+    } else {
+        String::new()
+    };
     // Shadow-mode structured criteria report — see the "Reality gate —
     // structured criteria" block above `output_gate_passed`. Additive and
     // reality-stage-only: every other stage's prompt is byte-identical to
@@ -1767,7 +1837,7 @@ fn stage_prompt(
         ""
     };
     let workspace = run.workspace_path.as_deref().unwrap_or(&run.project_path);
-    format!("You are the {} agent ({}) in the IntentOS '{}' autonomous pipeline.\n\nINTENTOS ORCHESTRATOR OVERRIDES (highest priority for this run):\n- The USER INTENT below is the authoritative product specification.\n- Catalog persona references to missing templates, memory-bank files, frameworks, scripts, or organizational conventions are optional guidance, not prerequisites.\n- If useful project documentation is missing, create the minimal appropriate documentation yourself from the USER INTENT and continue autonomously.\n- Choose reasonable technical defaults when the user explicitly delegates the choice. Do not fail merely because an auxiliary file, preferred framework, or prior setup is absent.\n- Do not ask the user to implement or configure anything unless human authorization is genuinely required.\n- Stay within the requested scope and do not invent product requirements.\n- This is an isolated working copy. Never access or modify the source project outside WORKSPACE.\n{}\nCATALOG PERSONA INSTRUCTIONS:\n{}\n\n{}USER INTENT:\n{}\nSOURCE PROJECT (read-only reference; do not access): {}\nWORKSPACE: {}\n{}\nWork only inside WORKSPACE. Inspect existing work and perform this stage for real. Run relevant checks. Do not claim success without evidence. End your final response with exactly INTENTOS_GATE:PASS only if this stage genuinely passes; otherwise end with INTENTOS_GATE:FAIL and explain a genuine blocker. Previous stages are present in the workspace.", s.label, s.agent_slug, run.runbook_id, implementation_scope, persona.map(String::as_str).unwrap_or("Catalog persona unavailable; disclose this limitation."), brief_section, run.intent, run.project_path, workspace, criteria_instruction)
+    format!("You are the {} agent ({}) in the IntentOS '{}' autonomous pipeline.\n\nINTENTOS ORCHESTRATOR OVERRIDES (highest priority for this run):\n- The USER INTENT below is the authoritative product specification.\n- Catalog persona references to missing templates, memory-bank files, frameworks, scripts, or organizational conventions are optional guidance, not prerequisites.\n- If useful project documentation is missing, create the minimal appropriate documentation yourself from the USER INTENT and continue autonomously.\n- Choose reasonable technical defaults when the user explicitly delegates the choice. Do not fail merely because an auxiliary file, preferred framework, or prior setup is absent.\n- Do not ask the user to implement or configure anything unless human authorization is genuinely required.\n- Stay within the requested scope and do not invent product requirements.\n- This is an isolated working copy. Never access or modify the source project outside WORKSPACE.\n{}\nCATALOG PERSONA INSTRUCTIONS:\n{}\n\n{}USER INTENT:\n{}\nSOURCE PROJECT (read-only reference; do not access): {}\nWORKSPACE: {}\n{}{}\nWork only inside WORKSPACE. Inspect existing work and perform this stage for real. Run relevant checks. Do not claim success without evidence. End your final response with exactly INTENTOS_GATE:PASS only if this stage genuinely passes; otherwise end with INTENTOS_GATE:FAIL and explain a genuine blocker. Previous stages are present in the workspace.", s.label, s.agent_slug, run.runbook_id, implementation_scope, persona.map(String::as_str).unwrap_or("Catalog persona unavailable; disclose this limitation."), brief_section, run.intent, run.project_path, workspace, domain_guidance, criteria_instruction)
 }
 
 async fn run_codex_stage(
@@ -2561,6 +2631,90 @@ mod tests {
         // The gate sentinel instruction must still be present and unchanged
         // — the structured report is additive, not a replacement.
         assert!(reality_prompt.contains("End your final response with exactly INTENTOS_GATE:PASS"));
+    }
+
+    fn run_with_capabilities(capability_id: &str, capability_ids: Vec<String>) -> RunSummary {
+        let now = Utc::now();
+        RunSummary {
+            id: "run".into(),
+            intent: "Build a verified product".into(),
+            project_path: "/tmp/project".into(),
+            workspace_path: None,
+            runbook_id: "startup-mvp".into(),
+            capability_id: capability_id.into(),
+            capability_ids,
+            mission_id: None,
+            provider_id: PROVIDER_ID.into(),
+            status: RunStatus::Running,
+            current_stage: None,
+            stages: initial_stages(&[], &[], &[], &[]),
+            created_at: now,
+            updated_at: now,
+            completed_at: None,
+            error: None,
+        }
+    }
+
+    #[test]
+    fn stage_prompt_reality_gives_domain_guidance_for_digital_experience() {
+        // Web case: DOM/browser/accessibility guidance, no Laravel assumed,
+        // no IoT-specific telemetry language leaking in.
+        let run = run_with_capabilities("digital-experience", vec!["digital-experience".into()]);
+        let reality_prompt = stage_prompt(&run, 4, None, None);
+        assert!(reality_prompt.contains("DOMAIN VERIFICATION GUIDANCE"));
+        assert!(reality_prompt.contains("[digital-experience]"));
+        assert!(reality_prompt.contains("DOM structure"));
+        // The guidance explicitly tells the model not to assume Laravel —
+        // it names the word only to negate it, never to prescribe it.
+        assert!(reality_prompt.contains("Do not assume Laravel"));
+        assert!(!reality_prompt.contains(".blade.php"));
+        assert!(!reality_prompt.contains("MQTT"));
+    }
+
+    #[test]
+    fn stage_prompt_reality_gives_domain_guidance_for_iot() {
+        // Non-web case: telemetry/protocol guidance, no browser/DOM language.
+        let run = run_with_capabilities("iot", vec!["iot".into()]);
+        let reality_prompt = stage_prompt(&run, 4, None, None);
+        assert!(reality_prompt.contains("[iot]"));
+        assert!(reality_prompt.contains("MQTT"));
+        assert!(!reality_prompt.contains("DOM structure"));
+        assert!(!reality_prompt.contains("resources/views"));
+    }
+
+    #[test]
+    fn stage_prompt_reality_falls_back_to_generic_guidance_for_unknown_capability() {
+        // Historical runs (no capability_id recorded) or a future id this
+        // list doesn't know yet — must get domain-neutral guidance, never
+        // default to assuming a web/Laravel stack.
+        let run = run_with_capabilities("", vec![]);
+        let reality_prompt = stage_prompt(&run, 4, None, None);
+        assert!(reality_prompt.contains("[unspecified]"));
+        assert!(reality_prompt.contains("Do not assume a web/Laravel stack by default"));
+    }
+
+    #[test]
+    fn stage_prompt_reality_covers_every_selected_capability_in_multi_domain_runs() {
+        // composePipeline() only tags the shared reality-check stage with
+        // the primary capability — capability_ids (all selected domains)
+        // must still each get their own guidance block.
+        let run = run_with_capabilities(
+            "iot",
+            vec!["iot".into(), "systems-data".into()],
+        );
+        let reality_prompt = stage_prompt(&run, 4, None, None);
+        assert!(reality_prompt.contains("[iot]"));
+        assert!(reality_prompt.contains("[systems-data]"));
+        assert!(reality_prompt.contains("MQTT"));
+        assert!(reality_prompt.contains("persistence round-trips"));
+    }
+
+    #[test]
+    fn domain_guidance_is_absent_outside_the_reality_stage() {
+        let run = run_with_capabilities("iot", vec!["iot".into()]);
+        // index 2 = "development" in the fallback roster.
+        let development_prompt = stage_prompt(&run, 2, None, None);
+        assert!(!development_prompt.contains("DOMAIN VERIFICATION GUIDANCE"));
     }
 
     #[test]
