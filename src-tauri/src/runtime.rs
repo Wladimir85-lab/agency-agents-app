@@ -693,6 +693,150 @@ fn output_gate_passed(output: &str) -> bool {
     }
 }
 
+// ---------- Reality gate — structured criteria (shadow mode) ----------
+//
+// `output_gate_passed` above remains the sole authority for every stage's
+// PASS/FAIL, including reality-check. Everything below is additive
+// telemetry: the reality-check stage is asked (via `stage_prompt`) to also
+// emit a structured, per-criterion breakdown; if present and well-formed it
+// is persisted as evidence and compared against the sentinel verdict for
+// observability. A missing or malformed block — or any run/persona that
+// predates this — behaves exactly as before: `parse_criteria_result`
+// returns `None` and nothing downstream changes.
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+enum CriterionStatus {
+    Pass,
+    Fail,
+    Unverified,
+}
+
+/// One criterion's verdict, correlated by position rather than by trusting
+/// the model to reproduce criterion text verbatim. `criterion_index` is the
+/// 0-based position in `Mission.acceptance_criteria` — the same order the
+/// ACCEPTANCE CRITERIA list appears in the prompt — so a future consumer
+/// can match a result back to the approved Mission deterministically even
+/// if `criterion` (kept for readability/evidence only) drifts from the
+/// original text.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CriterionResult {
+    criterion_index: usize,
+    criterion: String,
+    status: CriterionStatus,
+    evidence: String,
+    explanation: String,
+}
+
+/// Wire shape asked of the model. Every field is optional/loosely typed on
+/// purpose: a missing or unrecognized `status`, or fields the model omits,
+/// must degrade a single entry to `Unverified`/empty text, never fail the
+/// whole block — only a genuinely unparsable JSON array (or a JSON value
+/// that isn't an array of objects) returns `None` for the full result.
+#[derive(Debug, Clone, Deserialize)]
+struct RawCriterionEntry {
+    #[serde(rename = "criterionIndex")]
+    criterion_index: Option<i64>,
+    criterion: Option<String>,
+    status: Option<String>,
+    evidence: Option<String>,
+    explanation: Option<String>,
+}
+
+/// Best-effort extraction of the `INTENTOS_CRITERIA:` block `stage_prompt`
+/// asks the reality-check stage to emit. Returns `None` whenever the
+/// output cannot be trusted as a real, in-range correlation to the
+/// approved Mission's acceptance criteria: no anchor, no valid JSON array,
+/// an empty array, or — after dropping any entry whose `criterionIndex` is
+/// missing/out of range — nothing left. `criteria_len` is
+/// `Mission.acceptance_criteria.len()` for the run's attached Mission (0
+/// when no Mission is attached, which makes every index out of range by
+/// construction, so `None` is returned — there is nothing to correlate
+/// against).
+fn parse_criteria_result(output: &str, criteria_len: usize) -> Option<Vec<CriterionResult>> {
+    let anchor = output.rfind("INTENTOS_CRITERIA:")?;
+    let after = &output[anchor + "INTENTOS_CRITERIA:".len()..];
+    let start = after.find('[')?;
+    // Parse exactly one JSON value starting at the array open bracket and
+    // stop — this tolerates trailing content (a closing ```` ``` ```` fence,
+    // more prose, the INTENTOS_GATE line itself) without needing to
+    // hand-roll bracket/string-aware scanning.
+    let mut stream =
+        serde_json::Deserializer::from_str(&after[start..]).into_iter::<Vec<RawCriterionEntry>>();
+    let raw = stream.next()?.ok()?;
+    if raw.is_empty() {
+        return None;
+    }
+    let results: Vec<CriterionResult> = raw
+        .into_iter()
+        .filter_map(|entry| {
+            let index = usize::try_from(entry.criterion_index?).ok()?;
+            if index >= criteria_len {
+                return None;
+            }
+            let status = match entry.status.as_deref() {
+                Some("pass") => CriterionStatus::Pass,
+                Some("fail") => CriterionStatus::Fail,
+                _ => CriterionStatus::Unverified,
+            };
+            Some(CriterionResult {
+                criterion_index: index,
+                criterion: entry.criterion.unwrap_or_default(),
+                status,
+                evidence: entry.evidence.unwrap_or_default(),
+                explanation: entry.explanation.unwrap_or_default(),
+            })
+        })
+        .collect();
+    if results.is_empty() {
+        None
+    } else {
+        Some(results)
+    }
+}
+
+/// Shadow-mode side effect only — never returns anything, never touches
+/// `output_gate_passed`'s result. Persists the structured breakdown next to
+/// the existing stdout/stderr evidence (same directory, same naming
+/// convention) when present, and logs a warning when its aggregate verdict
+/// disagrees with the text sentinel, so real disagreement data can be
+/// observed before any future increment considers making it authoritative.
+async fn record_reality_shadow_evidence(
+    evidence_dir: &Path,
+    evidence_stage_id: &str,
+    attempt: u8,
+    run_id: &str,
+    stage_id: &str,
+    combined: &str,
+    criteria_len: usize,
+    sentinel_passed: bool,
+) {
+    let Some(criteria) = parse_criteria_result(combined, criteria_len) else {
+        return;
+    };
+    if let Ok(bytes) = serde_json::to_vec_pretty(&criteria) {
+        let _ = atomic_write(
+            &evidence_dir.join(format!("{evidence_stage_id}-{attempt}.criteria.json")),
+            &bytes,
+        )
+        .await;
+    }
+    let structured_passed = criteria
+        .iter()
+        .all(|c| c.status == CriterionStatus::Pass);
+    if structured_passed != sentinel_passed {
+        tracing::warn!(
+            run_id = %run_id,
+            stage_id = %stage_id,
+            attempt,
+            sentinel_passed,
+            structured_passed,
+            "Reality gate shadow mode: structured criteria verdict disagrees with the text sentinel; sentinel remains authoritative"
+        );
+    }
+}
+
 fn validate_start_request(request: &StartRunRequest) -> Result<(), AppError> {
     let stage_count = request.agent_slugs.len();
     let structured =
@@ -1315,6 +1459,14 @@ pub async fn runtime_start(
     let task_run_id = run_id.clone();
     let handle = tokio::spawn(async move {
         let mut current = run.clone();
+        // Fixed for the whole run — the same value `stage_prompt`'s
+        // ACCEPTANCE CRITERIA list is built from, so a structured criteria
+        // entry's `criterionIndex` is validated against the exact list the
+        // model was actually shown.
+        let criteria_len = mission
+            .as_ref()
+            .map(|m| m.acceptance_criteria.len())
+            .unwrap_or(0);
         current.status = RunStatus::Running;
         current.updated_at = Utc::now();
         let _ = persist_at(&app_data, &current).await;
@@ -1337,6 +1489,7 @@ pub async fn runtime_start(
             });
             let mut passed = false;
             let is_qa = current.stages[index].kind == "qa" || stage_id == "qa";
+            let is_reality = current.stages[index].kind == "reality" || stage_id == "reality-check";
             let max_attempts = if is_qa { 3 } else { 1 };
             while current.stages[index].attempt <= max_attempts {
                 let attempt = current.stages[index].attempt;
@@ -1383,6 +1536,8 @@ pub async fn runtime_start(
                     attempt,
                     &run_evidence_dir(&app_data, &current.id),
                     &on_event,
+                    is_reality,
+                    criteria_len,
                 )
                 .await
                 {
@@ -1443,6 +1598,8 @@ pub async fn runtime_start(
                             current.stages[development_index].attempt,
                             &run_evidence_dir(&app_data, &current.id),
                             &on_event,
+                            false, // always the development stage — never reality
+                            criteria_len,
                         )
                         .await
                         .unwrap_or(false)
@@ -1598,8 +1755,19 @@ fn stage_prompt(
     } else {
         ""
     };
+    // Shadow-mode structured criteria report — see the "Reality gate —
+    // structured criteria" block above `output_gate_passed`. Additive and
+    // reality-stage-only: every other stage's prompt is byte-identical to
+    // before. Asked in addition to, never instead of, the existing narrative
+    // report and INTENTOS_GATE line — the sentinel below remains what this
+    // stage's PASS/FAIL is actually decided by.
+    let criteria_instruction = if s.kind == "reality" || s.id == "reality-check" {
+        "\nSTRUCTURED CRITERIA REPORT (additional telemetry — your narrative report and INTENTOS_GATE verdict below still govern this stage's outcome):\nBefore your final INTENTOS_GATE line, add a line reading exactly `INTENTOS_CRITERIA:` followed by a JSON array with one object per criterion listed under ACCEPTANCE CRITERIA above, in the same order, each shaped as {\"criterionIndex\": <0-based position in that ACCEPTANCE CRITERIA list>, \"criterion\": \"<verbatim criterion text>\", \"status\": \"pass\"|\"fail\"|\"unverified\", \"evidence\": \"<short pointer to what you actually checked>\", \"explanation\": \"<1-2 sentences>\"}. Use \"unverified\" honestly when you could not check a criterion. Omit this block entirely if there are no ACCEPTANCE CRITERIA above.\n"
+    } else {
+        ""
+    };
     let workspace = run.workspace_path.as_deref().unwrap_or(&run.project_path);
-    format!("You are the {} agent ({}) in the IntentOS '{}' autonomous pipeline.\n\nINTENTOS ORCHESTRATOR OVERRIDES (highest priority for this run):\n- The USER INTENT below is the authoritative product specification.\n- Catalog persona references to missing templates, memory-bank files, frameworks, scripts, or organizational conventions are optional guidance, not prerequisites.\n- If useful project documentation is missing, create the minimal appropriate documentation yourself from the USER INTENT and continue autonomously.\n- Choose reasonable technical defaults when the user explicitly delegates the choice. Do not fail merely because an auxiliary file, preferred framework, or prior setup is absent.\n- Do not ask the user to implement or configure anything unless human authorization is genuinely required.\n- Stay within the requested scope and do not invent product requirements.\n- This is an isolated working copy. Never access or modify the source project outside WORKSPACE.\n{}\nCATALOG PERSONA INSTRUCTIONS:\n{}\n\n{}USER INTENT:\n{}\nSOURCE PROJECT (read-only reference; do not access): {}\nWORKSPACE: {}\n\nWork only inside WORKSPACE. Inspect existing work and perform this stage for real. Run relevant checks. Do not claim success without evidence. End your final response with exactly INTENTOS_GATE:PASS only if this stage genuinely passes; otherwise end with INTENTOS_GATE:FAIL and explain a genuine blocker. Previous stages are present in the workspace.", s.label, s.agent_slug, run.runbook_id, implementation_scope, persona.map(String::as_str).unwrap_or("Catalog persona unavailable; disclose this limitation."), brief_section, run.intent, run.project_path, workspace)
+    format!("You are the {} agent ({}) in the IntentOS '{}' autonomous pipeline.\n\nINTENTOS ORCHESTRATOR OVERRIDES (highest priority for this run):\n- The USER INTENT below is the authoritative product specification.\n- Catalog persona references to missing templates, memory-bank files, frameworks, scripts, or organizational conventions are optional guidance, not prerequisites.\n- If useful project documentation is missing, create the minimal appropriate documentation yourself from the USER INTENT and continue autonomously.\n- Choose reasonable technical defaults when the user explicitly delegates the choice. Do not fail merely because an auxiliary file, preferred framework, or prior setup is absent.\n- Do not ask the user to implement or configure anything unless human authorization is genuinely required.\n- Stay within the requested scope and do not invent product requirements.\n- This is an isolated working copy. Never access or modify the source project outside WORKSPACE.\n{}\nCATALOG PERSONA INSTRUCTIONS:\n{}\n\n{}USER INTENT:\n{}\nSOURCE PROJECT (read-only reference; do not access): {}\nWORKSPACE: {}\n{}\nWork only inside WORKSPACE. Inspect existing work and perform this stage for real. Run relevant checks. Do not claim success without evidence. End your final response with exactly INTENTOS_GATE:PASS only if this stage genuinely passes; otherwise end with INTENTOS_GATE:FAIL and explain a genuine blocker. Previous stages are present in the workspace.", s.label, s.agent_slug, run.runbook_id, implementation_scope, persona.map(String::as_str).unwrap_or("Catalog persona unavailable; disclose this limitation."), brief_section, run.intent, run.project_path, workspace, criteria_instruction)
 }
 
 async fn run_codex_stage(
@@ -1610,6 +1778,8 @@ async fn run_codex_stage(
     attempt: u8,
     evidence_dir: &Path,
     channel: &Channel<RunEvent>,
+    is_reality: bool,
+    criteria_len: usize,
 ) -> Result<bool, AppError> {
     // Complex architecture and implementation stages routinely exceed thirty
     // minutes. The former 30-minute ceiling killed healthy Codex processes at
@@ -1739,7 +1909,21 @@ async fn run_codex_stage(
             captured_stderr.as_bytes(),
         )
         .await?;
-        Ok::<bool, AppError>(status.success() && output_gate_passed(&combined))
+        let sentinel_passed = output_gate_passed(&combined);
+        if is_reality {
+            record_reality_shadow_evidence(
+                evidence_dir,
+                &evidence_stage_id,
+                attempt,
+                run_id,
+                stage_id,
+                &combined,
+                criteria_len,
+                sentinel_passed,
+            )
+            .await;
+        }
+        Ok::<bool, AppError>(status.success() && sentinel_passed)
     };
     tokio::time::timeout(MAX_STAGE_RUNTIME, execution)
         .await
@@ -1781,6 +1965,8 @@ async fn run_claude_stage(
     attempt: u8,
     evidence_dir: &Path,
     channel: &Channel<RunEvent>,
+    is_reality: bool,
+    criteria_len: usize,
 ) -> Result<bool, AppError> {
     const MAX_STAGE_RUNTIME: Duration = Duration::from_secs(60 * 60 * 2);
     let execution = async {
@@ -1925,7 +2111,21 @@ async fn run_claude_stage(
             captured_stderr.as_bytes(),
         )
         .await?;
-        Ok::<bool, AppError>(status.success() && output_gate_passed(&combined))
+        let sentinel_passed = output_gate_passed(&combined);
+        if is_reality {
+            record_reality_shadow_evidence(
+                evidence_dir,
+                &evidence_stage_id,
+                attempt,
+                run_id,
+                stage_id,
+                &combined,
+                criteria_len,
+                sentinel_passed,
+            )
+            .await;
+        }
+        Ok::<bool, AppError>(status.success() && sentinel_passed)
     };
     tokio::time::timeout(MAX_STAGE_RUNTIME, execution)
         .await
@@ -1949,6 +2149,8 @@ async fn run_provider_stage(
     attempt: u8,
     evidence_dir: &Path,
     channel: &Channel<RunEvent>,
+    is_reality: bool,
+    criteria_len: usize,
 ) -> Result<bool, AppError> {
     if provider_id == CLAUDE_PROVIDER_ID {
         run_claude_stage(
@@ -1959,6 +2161,8 @@ async fn run_provider_stage(
             attempt,
             evidence_dir,
             channel,
+            is_reality,
+            criteria_len,
         )
         .await
     } else {
@@ -1970,6 +2174,8 @@ async fn run_provider_stage(
             attempt,
             evidence_dir,
             channel,
+            is_reality,
+            criteria_len,
         )
         .await
     }
@@ -2169,6 +2375,194 @@ mod tests {
             "quoted INTENTOS_GATE:PASS\nfinal INTENTOS_GATE:FAIL"
         ));
     }
+    // ---- Reality gate — structured criteria (shadow mode) ----
+
+    fn criteria_block(entries_json: &str) -> String {
+        format!(
+            "Narrative report...\n\nINTENTOS_CRITERIA:\n```json\n{entries_json}\n```\n\nINTENTOS_GATE:PASS"
+        )
+    }
+
+    #[test]
+    fn parse_criteria_result_extracts_pass_and_fail_by_index() {
+        let output = criteria_block(
+            r#"[
+                {"criterionIndex": 0, "criterion": "El login funciona", "status": "pass", "evidence": "login.spec.ts:12 verde", "explanation": "Cubierto por test automatizado."},
+                {"criterionIndex": 1, "criterion": "Envia email de bienvenida", "status": "fail", "evidence": "No se encontro integracion SMTP", "explanation": "No implementado."}
+            ]"#,
+        );
+        let result = parse_criteria_result(&output, 2).expect("well-formed block must parse");
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].criterion_index, 0);
+        assert_eq!(result[0].status, CriterionStatus::Pass);
+        assert_eq!(result[0].criterion, "El login funciona");
+        assert_eq!(result[1].criterion_index, 1);
+        assert_eq!(result[1].status, CriterionStatus::Fail);
+        assert!(result[1].explanation.contains("No implementado"));
+    }
+
+    #[test]
+    fn parse_criteria_result_defaults_missing_or_unrecognized_status_to_unverified() {
+        let output = criteria_block(
+            r#"[
+                {"criterionIndex": 0, "criterion": "Criterio A", "status": "who-knows", "evidence": "", "explanation": ""},
+                {"criterionIndex": 1, "criterion": "Criterio B", "evidence": "", "explanation": ""}
+            ]"#,
+        );
+        let result = parse_criteria_result(&output, 2).expect("must still parse");
+        assert_eq!(result[0].status, CriterionStatus::Unverified);
+        assert_eq!(result[1].status, CriterionStatus::Unverified);
+    }
+
+    #[test]
+    fn parse_criteria_result_returns_none_without_the_anchor() {
+        let output = "Narrative report...\n\nINTENTOS_GATE:PASS";
+        assert!(parse_criteria_result(output, 3).is_none());
+    }
+
+    #[test]
+    fn parse_criteria_result_returns_none_for_malformed_json() {
+        let output = "INTENTOS_CRITERIA:\n```json\n[ this is not valid json\n```\nINTENTOS_GATE:FAIL";
+        assert!(parse_criteria_result(output, 3).is_none());
+    }
+
+    #[test]
+    fn parse_criteria_result_returns_none_for_an_empty_array() {
+        let output = criteria_block("[]");
+        assert!(parse_criteria_result(&output, 3).is_none());
+    }
+
+    #[test]
+    fn parse_criteria_result_drops_out_of_range_entries_but_keeps_valid_ones() {
+        // Mission has exactly 1 acceptance criterion (criteria_len = 1). The
+        // model hallucinated a second entry at index 5 — it must be dropped
+        // silently, never trusted, and never take down the valid entry
+        // alongside it.
+        let output = criteria_block(
+            r#"[
+                {"criterionIndex": 0, "criterion": "Unico criterio real", "status": "pass", "evidence": "ok", "explanation": "ok"},
+                {"criterionIndex": 5, "criterion": "Criterio inventado", "status": "fail", "evidence": "x", "explanation": "x"}
+            ]"#,
+        );
+        let result = parse_criteria_result(&output, 1).expect("the valid entry must still parse");
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].criterion_index, 0);
+    }
+
+    #[test]
+    fn parse_criteria_result_returns_none_when_every_index_is_out_of_range() {
+        // No Mission attached to the run (criteria_len == 0) — every index is
+        // out of range by construction, so there is nothing to correlate
+        // against and the whole block must be discarded, not half-trusted.
+        let output = criteria_block(
+            r#"[{"criterionIndex": 0, "criterion": "x", "status": "pass", "evidence": "", "explanation": ""}]"#,
+        );
+        assert!(parse_criteria_result(&output, 0).is_none());
+    }
+
+    #[test]
+    fn parse_criteria_result_ignores_trailing_content_after_the_json_array() {
+        // The closing ``` fence and the INTENTOS_GATE line both follow the
+        // array on the same combined stdout — the parser must stop at the
+        // end of the JSON value, not choke on what comes after it.
+        let output = criteria_block(
+            r#"[{"criterionIndex": 0, "criterion": "x", "status": "pass", "evidence": "e", "explanation": "e"}]"#,
+        );
+        assert!(output.contains("```\n\nINTENTOS_GATE:PASS"));
+        assert!(parse_criteria_result(&output, 1).is_some());
+    }
+
+    #[test]
+    fn shadow_mode_never_touches_the_actual_gate() {
+        // A structured block that says everything failed, sitting alongside
+        // a sentinel that says PASS — output_gate_passed (the real
+        // authority) must still see only the sentinel. Parsing/using the
+        // structured result is an entirely separate, additive step.
+        let output = criteria_block(
+            r#"[{"criterionIndex": 0, "criterion": "x", "status": "fail", "evidence": "", "explanation": ""}]"#,
+        );
+        assert!(output_gate_passed(&output));
+        let criteria = parse_criteria_result(&output, 1).unwrap();
+        assert_eq!(criteria[0].status, CriterionStatus::Fail);
+        // Both facts are true at once — the mismatch is exactly what
+        // record_reality_shadow_evidence logs, without changing either.
+    }
+
+    #[tokio::test]
+    async fn record_reality_shadow_evidence_persists_the_structured_result_as_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let output = criteria_block(
+            r#"[{"criterionIndex": 0, "criterion": "x", "status": "pass", "evidence": "e", "explanation": "e"}]"#,
+        );
+        record_reality_shadow_evidence(
+            dir.path(),
+            "reality-check",
+            1,
+            "run-1",
+            "reality-check",
+            &output,
+            1,
+            true,
+        )
+        .await;
+        let written = fs::read_to_string(dir.path().join("reality-check-1.criteria.json"))
+            .expect("shadow evidence file must be written");
+        let parsed: Vec<CriterionResult> = serde_json::from_str(&written).unwrap();
+        assert_eq!(parsed[0].status, CriterionStatus::Pass);
+    }
+
+    #[tokio::test]
+    async fn record_reality_shadow_evidence_writes_nothing_when_the_block_is_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        record_reality_shadow_evidence(
+            dir.path(),
+            "reality-check",
+            1,
+            "run-1",
+            "reality-check",
+            "Narrative report...\nINTENTOS_GATE:PASS",
+            2,
+            true,
+        )
+        .await;
+        assert!(!dir.path().join("reality-check-1.criteria.json").exists());
+    }
+
+    #[test]
+    fn stage_prompt_adds_the_criteria_instruction_only_for_the_reality_stage() {
+        let now = Utc::now();
+        let run = RunSummary {
+            id: "run".into(),
+            intent: "Build a verified product".into(),
+            project_path: "/tmp/project".into(),
+            workspace_path: None,
+            runbook_id: "startup-mvp".into(),
+            capability_id: "digital-experience".into(),
+            capability_ids: vec!["digital-experience".into()],
+            mission_id: None,
+            provider_id: PROVIDER_ID.into(),
+            status: RunStatus::Running,
+            current_stage: None,
+            stages: initial_stages(&[], &[], &[], &[]),
+            created_at: now,
+            updated_at: now,
+            completed_at: None,
+            error: None,
+        };
+        // index 2 = "development" in the fallback roster — must be
+        // byte-unaffected, same guarantee the existing frozen-contract
+        // tests already cover for the mission-brief section.
+        let development_prompt = stage_prompt(&run, 2, None, None);
+        assert!(!development_prompt.contains("INTENTOS_CRITERIA"));
+        // index 4 = "reality-check" in the fallback roster.
+        let reality_prompt = stage_prompt(&run, 4, None, None);
+        assert!(reality_prompt.contains("INTENTOS_CRITERIA:"));
+        assert!(reality_prompt.contains("criterionIndex"));
+        // The gate sentinel instruction must still be present and unchanged
+        // — the structured report is additive, not a replacement.
+        assert!(reality_prompt.contains("End your final response with exactly INTENTOS_GATE:PASS"));
+    }
+
     #[test]
     fn isolated_workspace_preserves_source_and_excludes_git_metadata() {
         let source = tempfile::tempdir().unwrap();
