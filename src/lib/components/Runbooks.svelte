@@ -345,7 +345,7 @@
           {#if !provider}<p class="error">El runtime no está disponible; puedes revisar la propuesta, pero no iniciar producción.</p>{/if}
         </section>
       {:else}
-        <div class="empty"><div class="empty-icon"><PlayIcon size={28}/></div><span class="eyebrow">VISTA PREVIA</span><h2>Tu intención se convertirá en un plan visible</h2><p>IntentOS elegirá internamente capacidades, especialistas y gates. Tú revisarás la solución propuesta antes de que comience la construcción.</p><ol><li>Describe el resultado deseado</li><li>Revisa la propuesta</li><li>Aprueba la construcción</li></ol></div>
+        <div class="empty"><div class="empty-icon"><PlayIcon size={28}/></div><span class="eyebrow">VISTA PREVIA</span><h2>¿Qué quieres construir?</h2><p>IntentOS elegirá internamente capacidades, especialistas y gates. Tú revisarás la solución propuesta antes de que comience la construcción.</p><ol><li>Describe el resultado deseado</li><li>Revisa la propuesta</li><li>Aprueba la construcción</li></ol></div>
       {/if}
     </aside>
   </div>

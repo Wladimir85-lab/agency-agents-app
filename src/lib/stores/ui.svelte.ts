@@ -70,6 +70,7 @@ const DEFAULT_SECTION_VALUES = [
   "tools",
   "teams",
   "projects",
+  "runbooks",
   "activity",
 ] as const;
 
@@ -96,12 +97,15 @@ export function clampDetailPaneWidth(w: number, windowWidth?: number): number {
     constant prevents the guard from drifting away from the initializer — the
     exact bug where the home screen moved to `personas` but the guard still
     checked for `dashboard`, silently disabling the default-landing setting. */
-const INITIAL_SECTION: SidebarSection = "personas";
+const INITIAL_SECTION: SidebarSection = "runbooks";
 
 class UiStore {
-  /** First-launch landing. The Agents (personas) catalog is the home screen —
-      the agent catalog is the front door, not the Dashboard. Clicking the
-      sidebar brand returns here. */
+  /** First-launch landing. The intention screen ("¿Qué quieres construir?",
+      the `runbooks` section — see Runbooks.svelte) is the home screen: the
+      user states a desired result and IntentOS composes capabilities,
+      agents, tools and pipeline from there. The agent catalog, tools,
+      teams and activity remain one click away, unchanged — they're the
+      hood, not the front door. Clicking the sidebar brand returns here. */
   section: SidebarSection = $state(INITIAL_SECTION);
 
   drawerOpen: boolean = $state(false);
@@ -155,11 +159,12 @@ class UiStore {
   /** width of the package detail pane in px; persisted to localStorage */
   detailPaneWidth: number = $state(DETAIL_PANE_DEFAULT_WIDTH);
 
-  /** Which section the app opens on at launch. `dashboard` by default; the
-      user can change this from Settings → Appearance. Persists to localStorage
-      and is applied by `loadDefaultSectionFromStorage` (called from layout
-      onMount) — only when the user hasn't already navigated. */
-  defaultSection: SidebarSection = $state("personas");
+  /** Which section the app opens on at launch. The intention screen
+      (`runbooks`) by default; the user can change this from Settings →
+      Appearance. Persists to localStorage and is applied by
+      `loadDefaultSectionFromStorage` (called from layout onMount) — only
+      when the user hasn't already navigated. */
+  defaultSection: SidebarSection = $state("runbooks");
 
   /** Vibrancy material applied to the macOS window via NSVisualEffectView.
       Restart-required because Tauri 2 applies vibrancy in the setup hook.
