@@ -898,6 +898,159 @@ async fn record_reality_shadow_evidence(
     }
 }
 
+// ---------- Reality gate — strict mode (opt-in authority) ----------
+//
+// Everything above this point (shadow mode) is unconditional and
+// unchanged: `record_reality_shadow_evidence` always persists the
+// structured breakdown and always logs a disagreement, regardless of
+// anything below. What follows only decides whether that structured
+// breakdown gets to *decide* the reality-check stage's outcome instead of
+// `output_gate_passed`'s text sentinel — and it does so only when the
+// engineering escape hatch `INTENTOS_REALITY_GATE_STRICT` is explicitly
+// set (any non-empty value other than "0"). Unset — the default, and the
+// only behavior any run has ever exercised so far — `resolve_stage_outcome`
+// returns exactly `output_gate_passed`'s result, byte-for-byte the same
+// decision Runtime v0.1 always made. This mirrors the existing
+// `INTENTOS_LLAMA_SERVER_PATH`-style engineering env vars in
+// `local_model.rs`: an explicit opt-in, never a silent default change.
+
+const REALITY_GATE_STRICT_ENV: &str = "INTENTOS_REALITY_GATE_STRICT";
+
+/// Reads the opt-in switch. Unset, empty, or `"0"` → disabled (today's
+/// behavior, unconditionally).
+fn reality_gate_strict_enabled() -> bool {
+    std::env::var(REALITY_GATE_STRICT_ENV)
+        .map(|v| !v.is_empty() && v != "0")
+        .unwrap_or(false)
+}
+
+/// The strict, criterion-by-criterion authority for the reality-check
+/// stage. Total and pure: every branch returns an explicit, specific
+/// reason — never panics, never silently defaults to `Pass`.
+///
+/// - `criteria_len == 0`: no criteria were ever approved to verify
+///   structurally — not a missing-block failure, there was never anything
+///   to report on — so the sentinel decides, unchanged.
+/// - `criteria_len > 0` and `criteria` is `None`: a Mission with approved
+///   criteria requires a structured report; its absence is never treated
+///   as evidence of success.
+/// - Otherwise: every index in `0..criteria_len` must appear in `criteria`
+///   exactly once (an index reported zero times or more than once both
+///   fail, naming the specific index) and every one of them must carry
+///   `CriterionStatus::Pass` (`Fail` and `Unverified` both fail, carrying
+///   that criterion's own explanation forward). `sentinel_passed` is not
+///   consulted once real criteria are in play — the structured result is,
+///   deliberately, the actual authority in both directions: it can fail a
+///   run the sentinel called PASS, and it can pass one the sentinel called
+///   FAIL when every approved criterion genuinely checks out.
+fn reality_verdict(
+    criteria: Option<&[CriterionResult]>,
+    criteria_len: usize,
+    sentinel_passed: bool,
+) -> RealityVerdict {
+    if criteria_len == 0 {
+        return if sentinel_passed {
+            RealityVerdict::Pass
+        } else {
+            RealityVerdict::Fail(
+                "no acceptance criteria were approved for this mission; the INTENTOS_GATE sentinel reported FAIL".into(),
+            )
+        };
+    }
+    let Some(criteria) = criteria else {
+        return RealityVerdict::Fail(format!(
+            "no valid INTENTOS_CRITERIA block was found to verify the {criteria_len} approved acceptance criteria"
+        ));
+    };
+    let mut seen: Vec<Option<&CriterionResult>> = vec![None; criteria_len];
+    for entry in criteria {
+        if entry.criterion_index >= criteria_len {
+            // parse_criteria_result already excludes these — this is
+            // defense against ever trusting an out-of-range index twice,
+            // not a path any current caller can actually reach.
+            return RealityVerdict::Fail(format!(
+                "criterion index {} is out of range for {criteria_len} approved criteria",
+                entry.criterion_index
+            ));
+        }
+        if seen[entry.criterion_index].is_some() {
+            return RealityVerdict::Fail(format!(
+                "criterion {} was reported more than once in INTENTOS_CRITERIA",
+                entry.criterion_index
+            ));
+        }
+        seen[entry.criterion_index] = Some(entry);
+    }
+    for (index, slot) in seen.iter().enumerate() {
+        let Some(entry) = slot else {
+            return RealityVerdict::Fail(format!(
+                "criterion {index} was never addressed in INTENTOS_CRITERIA"
+            ));
+        };
+        let explain = || {
+            if entry.explanation.is_empty() {
+                "no explanation provided".to_string()
+            } else {
+                entry.explanation.clone()
+            }
+        };
+        match entry.status {
+            CriterionStatus::Fail => {
+                return RealityVerdict::Fail(format!("criterion {index} failed: {}", explain()));
+            }
+            CriterionStatus::Unverified => {
+                return RealityVerdict::Fail(format!(
+                    "criterion {index} could not be verified: {}",
+                    explain()
+                ));
+            }
+            CriterionStatus::Pass => {}
+        }
+    }
+    RealityVerdict::Pass
+}
+
+#[derive(Debug)]
+enum RealityVerdict {
+    Pass,
+    Fail(String),
+}
+
+impl RealityVerdict {
+    fn passed(&self) -> bool {
+        matches!(self, RealityVerdict::Pass)
+    }
+}
+
+/// The actual pass/fail decision for one stage attempt — pulled out of
+/// `run_codex_stage`/`run_claude_stage` so it is testable without spawning
+/// any process. Strict mode only ever applies to the reality-check stage;
+/// every other stage always gets the plain sentinel, exactly as before.
+/// The second element is `Some(reason)` only when a strict-mode structured
+/// verdict actually decided the outcome (pass or fail) — the specific,
+/// diagnosable text `reality_verdict` produced — so the caller can persist
+/// it as evidence, not just infer "something failed" from a boolean.
+fn resolve_stage_outcome(
+    is_reality: bool,
+    strict_enabled: bool,
+    combined: &str,
+    criteria_len: usize,
+) -> (bool, Option<String>) {
+    let sentinel_passed = output_gate_passed(combined);
+    if is_reality && strict_enabled {
+        let criteria = parse_criteria_result(combined, criteria_len);
+        match reality_verdict(criteria.as_deref(), criteria_len, sentinel_passed) {
+            RealityVerdict::Pass => (
+                true,
+                Some("all approved acceptance criteria passed".into()),
+            ),
+            RealityVerdict::Fail(reason) => (false, Some(reason)),
+        }
+    } else {
+        (sentinel_passed, None)
+    }
+}
+
 fn validate_start_request(request: &StartRunRequest) -> Result<(), AppError> {
     let stage_count = request.agent_slugs.len();
     let structured =
@@ -1993,7 +2146,29 @@ async fn run_codex_stage(
             )
             .await;
         }
-        Ok::<bool, AppError>(status.success() && sentinel_passed)
+        let strict_enabled = reality_gate_strict_enabled();
+        let (final_passed, strict_reason) =
+            resolve_stage_outcome(is_reality, strict_enabled, &combined, criteria_len);
+        if let Some(reason) = &strict_reason {
+            // Persisted alongside the existing stdout/stderr/manifest/
+            // criteria evidence — the specific, diagnosable reason behind
+            // the strict verdict must outlive the log line.
+            let _ = atomic_write(
+                &evidence_dir.join(format!("{evidence_stage_id}-{attempt}.reality-verdict.txt")),
+                reason.as_bytes(),
+            )
+            .await;
+            tracing::warn!(
+                run_id = %run_id,
+                stage_id = %stage_id,
+                attempt,
+                sentinel_passed,
+                final_passed,
+                reason = %reason,
+                "Reality gate strict mode: structured verdict is authoritative for this stage"
+            );
+        }
+        Ok::<bool, AppError>(status.success() && final_passed)
     };
     tokio::time::timeout(MAX_STAGE_RUNTIME, execution)
         .await
@@ -2195,7 +2370,29 @@ async fn run_claude_stage(
             )
             .await;
         }
-        Ok::<bool, AppError>(status.success() && sentinel_passed)
+        let strict_enabled = reality_gate_strict_enabled();
+        let (final_passed, strict_reason) =
+            resolve_stage_outcome(is_reality, strict_enabled, &combined, criteria_len);
+        if let Some(reason) = &strict_reason {
+            // Persisted alongside the existing stdout/stderr/manifest/
+            // criteria evidence — the specific, diagnosable reason behind
+            // the strict verdict must outlive the log line.
+            let _ = atomic_write(
+                &evidence_dir.join(format!("{evidence_stage_id}-{attempt}.reality-verdict.txt")),
+                reason.as_bytes(),
+            )
+            .await;
+            tracing::warn!(
+                run_id = %run_id,
+                stage_id = %stage_id,
+                attempt,
+                sentinel_passed,
+                final_passed,
+                reason = %reason,
+                "Reality gate strict mode: structured verdict is authoritative for this stage"
+            );
+        }
+        Ok::<bool, AppError>(status.success() && final_passed)
     };
     tokio::time::timeout(MAX_STAGE_RUNTIME, execution)
         .await
@@ -2596,6 +2793,179 @@ mod tests {
         )
         .await;
         assert!(!dir.path().join("reality-check-1.criteria.json").exists());
+    }
+
+    // ---- Reality gate — strict mode (opt-in authority) ----
+
+    fn cr(index: usize, status: CriterionStatus, explanation: &str) -> CriterionResult {
+        CriterionResult {
+            criterion_index: index,
+            criterion: format!("criterion {index}"),
+            status,
+            evidence: String::new(),
+            explanation: explanation.into(),
+        }
+    }
+
+    #[test]
+    fn reality_verdict_passes_with_full_coverage_and_all_pass() {
+        let criteria = vec![
+            cr(0, CriterionStatus::Pass, ""),
+            cr(1, CriterionStatus::Pass, ""),
+            cr(2, CriterionStatus::Pass, ""),
+        ];
+        assert!(reality_verdict(Some(&criteria), 3, false).passed());
+    }
+
+    #[test]
+    fn reality_verdict_fails_on_any_fail_status() {
+        let criteria = vec![
+            cr(0, CriterionStatus::Pass, ""),
+            cr(1, CriterionStatus::Fail, "roto"),
+        ];
+        match reality_verdict(Some(&criteria), 2, true) {
+            RealityVerdict::Fail(reason) => {
+                assert!(reason.contains("criterion 1"));
+                assert!(reason.contains("roto"));
+            }
+            RealityVerdict::Pass => panic!("expected Fail"),
+        }
+    }
+
+    #[test]
+    fn reality_verdict_fails_on_any_unverified_status() {
+        let criteria = vec![cr(0, CriterionStatus::Unverified, "no se pudo probar")];
+        match reality_verdict(Some(&criteria), 1, true) {
+            RealityVerdict::Fail(reason) => {
+                assert!(reason.contains("criterion 0"));
+                assert!(reason.contains("could not be verified"));
+            }
+            RealityVerdict::Pass => panic!("expected Fail"),
+        }
+    }
+
+    #[test]
+    fn reality_verdict_fails_on_missing_index() {
+        let criteria = vec![cr(0, CriterionStatus::Pass, "")];
+        match reality_verdict(Some(&criteria), 2, true) {
+            RealityVerdict::Fail(reason) => {
+                assert!(reason.contains("criterion 1"));
+                assert!(reason.contains("never addressed"));
+            }
+            RealityVerdict::Pass => panic!("expected Fail for missing coverage"),
+        }
+    }
+
+    #[test]
+    fn reality_verdict_fails_on_duplicate_index() {
+        let criteria = vec![
+            cr(0, CriterionStatus::Pass, ""),
+            cr(0, CriterionStatus::Pass, ""),
+        ];
+        match reality_verdict(Some(&criteria), 1, true) {
+            RealityVerdict::Fail(reason) => {
+                assert!(reason.contains("criterion 0"));
+                assert!(reason.contains("more than once"));
+            }
+            RealityVerdict::Pass => panic!("expected Fail for duplicate index"),
+        }
+    }
+
+    #[test]
+    fn reality_verdict_fails_on_out_of_range_index() {
+        // parse_criteria_result would already exclude this — defense in
+        // depth against ever trusting an out-of-range index.
+        let criteria = vec![cr(5, CriterionStatus::Pass, "")];
+        match reality_verdict(Some(&criteria), 2, true) {
+            RealityVerdict::Fail(reason) => assert!(reason.contains("out of range")),
+            RealityVerdict::Pass => panic!("expected Fail for out-of-range index"),
+        }
+    }
+
+    #[test]
+    fn reality_verdict_fails_when_block_is_absent_but_criteria_were_approved() {
+        match reality_verdict(None, 3, true) {
+            RealityVerdict::Fail(reason) => assert!(reason.contains('3')),
+            RealityVerdict::Pass => panic!("expected Fail when no structured block exists"),
+        }
+    }
+
+    #[test]
+    fn reality_verdict_falls_back_to_sentinel_when_mission_has_no_criteria() {
+        assert!(reality_verdict(None, 0, true).passed());
+        assert!(!reality_verdict(None, 0, false).passed());
+    }
+
+    #[test]
+    fn reality_verdict_structured_fail_overrides_a_passing_sentinel() {
+        let criteria = vec![cr(0, CriterionStatus::Fail, "no cumple")];
+        // sentinel_passed = true, but a real criterion failed — the
+        // structured result must win.
+        assert!(!reality_verdict(Some(&criteria), 1, true).passed());
+    }
+
+    #[test]
+    fn reality_verdict_structured_pass_overrides_a_failing_sentinel() {
+        let criteria = vec![cr(0, CriterionStatus::Pass, "")];
+        // sentinel_passed = false, but every approved criterion genuinely
+        // checks out — the structured result is authoritative in both
+        // directions, not just when it agrees with a FAIL.
+        assert!(reality_verdict(Some(&criteria), 1, false).passed());
+    }
+
+    #[test]
+    fn resolve_stage_outcome_ignores_structured_block_when_strict_is_off() {
+        // criteria_block() ends with INTENTOS_GATE:PASS; the structured
+        // block says the criterion failed. Strict is off (the default) —
+        // the sentinel must still win, and no reason is computed at all.
+        let output = criteria_block(
+            r#"[{"criterionIndex": 0, "criterion": "x", "status": "fail", "evidence": "", "explanation": "no importa"}]"#,
+        );
+        let (passed, reason) = resolve_stage_outcome(true, false, &output, 1);
+        assert!(passed);
+        assert!(reason.is_none());
+    }
+
+    #[test]
+    fn resolve_stage_outcome_lets_structured_fail_override_sentinel_pass_when_strict_is_on() {
+        let output = criteria_block(
+            r#"[{"criterionIndex": 0, "criterion": "x", "status": "fail", "evidence": "", "explanation": "motivo real"}]"#,
+        );
+        let (passed, reason) = resolve_stage_outcome(true, true, &output, 1);
+        assert!(!passed);
+        assert!(reason.expect("a reason must be persisted").contains("motivo real"));
+    }
+
+    #[test]
+    fn resolve_stage_outcome_only_applies_strict_mode_to_the_reality_stage() {
+        // is_reality = false: strict mode must never engage, even with the
+        // flag on and even with zero approved criteria — every other stage
+        // keeps exactly today's sentinel-only behavior.
+        let output = "Narrative report...\nINTENTOS_GATE:PASS";
+        let (passed, reason) = resolve_stage_outcome(false, true, output, 3);
+        assert!(passed);
+        assert!(reason.is_none());
+    }
+
+    #[test]
+    fn reality_gate_strict_flag_reads_the_environment_variable() {
+        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = ENV_LOCK.lock().unwrap();
+        unsafe {
+            std::env::remove_var(REALITY_GATE_STRICT_ENV);
+        }
+        assert!(!reality_gate_strict_enabled(), "unset must be disabled");
+        unsafe {
+            std::env::set_var(REALITY_GATE_STRICT_ENV, "1");
+        }
+        assert!(reality_gate_strict_enabled(), "any non-zero value enables it");
+        unsafe {
+            std::env::set_var(REALITY_GATE_STRICT_ENV, "0");
+        }
+        assert!(!reality_gate_strict_enabled(), "\"0\" must stay disabled");
+        unsafe {
+            std::env::remove_var(REALITY_GATE_STRICT_ENV);
+        }
     }
 
     #[test]
