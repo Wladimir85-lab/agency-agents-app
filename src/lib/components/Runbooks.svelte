@@ -18,7 +18,7 @@
   import { ui } from "$lib/stores/ui.svelte";
   import { CREATION_CATALOG, findCatalogProduct, INTENTOS_CAPABILITIES, planSolution } from "$lib/data/intentosCapabilities";
   import type { SolutionProposal } from "$lib/data/intentosCapabilities";
-  import type { Agent, AutomaticProject, DurableMissionSnapshot, Mission, RunEvent, TemporalMissionRef } from "$lib/types";
+  import type { Agent, AutomaticProject, Mission, RunEvent } from "$lib/types";
 
   const LEGACY_DRAFT_KEY = "intentos.productionBrief.v1";
   const DEFAULT_SIGNATURE = "Resolver el trabajo real descrito por la intención y recomendar la forma computacional más adecuada, sin asumir de antemano web, aplicación, documento o formato. El resultado debe ser operable, propio y verificable; nunca presentar mocks, datos simulados o funciones incompletas como terminadas. Aplicar claridad, accesibilidad, seguridad, rendimiento, trazabilidad y facilidad de uso cuando correspondan al producto. Cada entrega debe incluir evidencia suficiente para que Reality Check compare lo construido con la propuesta aprobada por el NCTO.";
@@ -212,35 +212,19 @@
         adjustmentBudget: null,
         changePolicyNote: "Cualquier cambio respecto de la propuesta aprobada requiere una nueva decisión NCTO.",
       } });
-      const durable = await invoke<TemporalMissionRef>("temporal_start_mission", {
+      // Prefers Temporal's durable record; falls back to a local decision
+      // (never blocking on Temporal being reachable) inside mission_approve
+      // itself. `mission.approvalChannel` reports which one actually ran.
+      const mission = await invoke<Mission>("mission_approve", {
         missionId: draft.id,
         proposalRevision,
       });
-      if (durable.status !== "awaitingApproval") {
-        throw new Error(`Temporal inició la misión en un estado inesperado: ${durable.status}`);
+      if (mission.approvalChannel === "localFallback") {
+        toast.warning(
+          "Producción aprobada sin Temporal",
+          "Temporal no está disponible ahora mismo; IntentOS registró tu aprobación localmente y sigue igual.",
+        );
       }
-      const decision = await invoke<DurableMissionSnapshot>("temporal_approve_mission", {
-        missionId: draft.id,
-      });
-      if (decision.status !== "approved" || decision.proposalRevision !== proposalRevision) {
-        throw new Error("Temporal no confirmó la aprobación de la propuesta vigente.");
-      }
-      const mission = await invoke<Mission>("mission_update", { request: {
-        id: draft.id,
-        objective: draft.objective,
-        scopeStatement: draft.scopeStatement,
-        exclusions: draft.exclusions,
-        acceptanceCriteria: draft.acceptanceCriteria,
-        clientLocale: draft.clientLocale,
-        targetMarkets: draft.targetMarkets,
-        deliveryLocales: draft.deliveryLocales,
-        agencyJurisdiction: draft.agencyJurisdiction,
-        engagementRegime: draft.engagementRegime,
-        adjustmentBudget: draft.adjustmentBudget,
-        changePolicyNote: draft.changePolicyNote,
-        status: "approved",
-        approvedByNcto: true,
-      } });
       await runs.start({ intent: productionBrief(approvedProposal), projectPath, runbookId: selected.slug, capabilityId: approvedCapabilities[0].id, capabilityIds: approvedCapabilities.map((item) => item.id), stageIds: approvedPipeline.map((stage) => stage.id), stageKinds: approvedPipeline.map((stage) => stage.kind), stageLabels: approvedPipeline.map((stage) => stage.label), agentSlugs: approvedPipeline.map((stage) => stage.agent), providerId: provider.id, missionId: mission.id });
     } catch (e) { toast.error("No se pudo iniciar la producción aprobada", readableError(e)); }
     finally { approving = false; }

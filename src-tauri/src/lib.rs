@@ -212,6 +212,7 @@ pub fn run() {
             mission::mission_get,
             mission::mission_list,
             mission::mission_update,
+            mission::mission_approve,
             mission::project_create_automatic,
             runtime::runtime_providers,
             runtime::runtime_start,

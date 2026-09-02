@@ -131,6 +131,21 @@ fn default_mission_status() -> MissionStatus {
     MissionStatus::Draft
 }
 
+/// How a mission's Draft → Approved transition was durably recorded.
+/// `Temporal` means the IntentOsMissionWorkflow round-trip
+/// (`temporal_start_mission` + `temporal_approve_mission`) completed
+/// normally. `LocalFallback` means Temporal was unreachable (or did not
+/// confirm the expected decision) at approval time, so `mission_approve`
+/// recorded the same human decision directly in the Mission itself instead
+/// of blocking on an external service. Temporal is never required for
+/// IntentOS to remain operable — see `approve_via_temporal` below.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum ApprovalChannel {
+    Temporal,
+    LocalFallback,
+}
+
 /// Mission/Engagement-level intent. Every field here is data — none of it
 /// is executable policy. `exclusions`, `acceptance_criteria`,
 /// `adjustment_budget` and `change_policy_note` intentionally hold plain
@@ -171,6 +186,10 @@ pub struct Mission {
     pub status: MissionStatus,
     #[serde(default)]
     pub approved_by_ncto: bool,
+    /// `None` for missions approved before this field existed, and for any
+    /// mission still in `Draft`. See `ApprovalChannel`.
+    #[serde(default)]
+    pub approval_channel: Option<ApprovalChannel>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -306,6 +325,7 @@ pub async fn mission_create(
         change_policy_note: request.change_policy_note,
         status: MissionStatus::Draft,
         approved_by_ncto: false,
+        approval_channel: None,
         created_at: now,
         updated_at: now,
     };
@@ -379,11 +399,109 @@ pub async fn mission_update(
         change_policy_note: request.change_policy_note,
         status: request.status,
         approved_by_ncto: request.approved_by_ncto,
+        // `mission_update` edits mission fields after the fact; it must
+        // never silently clear who/how the mission was approved. Use
+        // `mission_approve` to change this.
+        approval_channel: existing.approval_channel,
         created_at: existing.created_at,
         updated_at: Utc::now(),
     };
     persist(&state, &mission).await?;
     Ok(mission)
+}
+
+/// Approve a Draft mission, preferring the durable Temporal record but
+/// never blocking on it. Temporal is IntentOS's optional durable-workflow
+/// capability, not a dependency IntentOS needs to stay operable: if
+/// `approve_via_temporal` fails for any reason (unreachable server, no
+/// worker picking up the signal, an unexpected workflow state), the same
+/// human decision the caller is already reporting is recorded directly on
+/// the Mission instead — `ApprovalChannel` on the resulting Mission always
+/// says which path was actually used.
+///
+/// This is the only place a mission moves out of `Draft`: the leading
+/// status check makes a second call for the same mission a no-op error
+/// rather than a second approval, so retrying after a failure (or an
+/// accidental double click on top of the frontend's own busy-state guard)
+/// can never re-run anything downstream twice.
+#[tauri::command]
+pub async fn mission_approve(
+    state: State<'_, AppState>,
+    mission_id: String,
+    proposal_revision: u32,
+) -> Result<Mission, AppError> {
+    let existing = load_mission(&state, &mission_id).await?;
+    if existing.status != MissionStatus::Draft {
+        return Err(AppError::InvalidArgument {
+            message: "mission is not awaiting approval".into(),
+        });
+    }
+
+    let channel = match approve_via_temporal(&mission_id, proposal_revision).await {
+        Ok(()) => ApprovalChannel::Temporal,
+        Err(error) => {
+            tracing::warn!(
+                mission_id = %mission_id,
+                error = %error,
+                "Temporal unavailable for mission approval; recording the NCTO decision locally instead"
+            );
+            ApprovalChannel::LocalFallback
+        }
+    };
+
+    let mission = approved_mission(existing, channel);
+    persist(&state, &mission).await?;
+    Ok(mission)
+}
+
+/// Try to record the approval as a durable Temporal decision. Any failure
+/// is reported uniformly to the caller, which decides how to fall back —
+/// this function never itself decides to use local state.
+///
+/// A `temporal_start_mission` failure is not treated as fatal on its own:
+/// it may mean Temporal is unreachable (in which case the `approve` signal
+/// below fails identically and this still returns `Err`), or that a prior
+/// crashed attempt for this same mission already created the workflow (in
+/// which case signalling it directly still succeeds). Either way, the
+/// approve step is the one whose success or failure actually matters.
+async fn approve_via_temporal(mission_id: &str, proposal_revision: u32) -> Result<(), AppError> {
+    if let Ok(started) =
+        crate::temporal::temporal_start_mission(mission_id.to_string(), proposal_revision).await
+    {
+        if started.status != "awaitingApproval" {
+            return Err(AppError::Internal {
+                message: format!(
+                    "Temporal started the mission in an unexpected state: {}",
+                    started.status
+                ),
+            });
+        }
+    }
+    let decision = crate::temporal::temporal_approve_mission(mission_id.to_string()).await?;
+    if decision.status == "approved" && decision.proposal_revision == proposal_revision {
+        Ok(())
+    } else {
+        Err(AppError::Internal {
+            message: format!(
+                "Temporal did not confirm approval of revision {proposal_revision}: status={}",
+                decision.status
+            ),
+        })
+    }
+}
+
+/// Pure state transition — Draft (or any prior state; the caller already
+/// checked) to Approved, tagged with how it got there. Split out from
+/// `mission_approve` so the transition itself is testable without a
+/// running Tauri `State`.
+fn approved_mission(existing: Mission, channel: ApprovalChannel) -> Mission {
+    Mission {
+        status: MissionStatus::Approved,
+        approved_by_ncto: true,
+        approval_channel: Some(channel),
+        updated_at: Utc::now(),
+        ..existing
+    }
 }
 
 /// Deterministic serialization of a Mission into the shared operational
@@ -481,6 +599,7 @@ mod tests {
             ),
             status: MissionStatus::Approved,
             approved_by_ncto: true,
+            approval_channel: Some(ApprovalChannel::Temporal),
             created_at: now,
             updated_at: now,
         }
@@ -544,5 +663,59 @@ mod tests {
         assert_eq!(safe_project_slug("   "), "nuevo-proyecto");
         let slug = safe_project_slug("A\\B/C");
         assert!(!slug.contains(['/', '\\']));
+    }
+
+    // ---- Temporal-optional approval (fallback) ----
+
+    #[test]
+    fn approval_channel_wire_contract_is_camel_case() {
+        let value = serde_json::to_value(ApprovalChannel::LocalFallback).unwrap();
+        assert_eq!(value, "localFallback");
+        let value = serde_json::to_value(ApprovalChannel::Temporal).unwrap();
+        assert_eq!(value, "temporal");
+    }
+
+    #[test]
+    fn missions_predating_this_field_deserialize_with_no_approval_channel() {
+        let json = r#"{
+            "id": "11111111-1111-1111-1111-111111111111",
+            "projectPath": "/tmp/project",
+            "objective": "Build a booking website",
+            "status": "approved",
+            "approvedByNcto": true,
+            "createdAt": "2026-01-01T00:00:00Z",
+            "updatedAt": "2026-01-01T00:00:00Z"
+        }"#;
+        let mission: Mission =
+            serde_json::from_str(json).expect("missing approvalChannel must default to None");
+        assert_eq!(mission.approval_channel, None);
+    }
+
+    #[test]
+    fn approved_mission_transitions_to_approved_and_tags_the_channel() {
+        let draft = Mission {
+            status: MissionStatus::Draft,
+            approved_by_ncto: false,
+            approval_channel: None,
+            ..sample_mission()
+        };
+        let approved = approved_mission(draft.clone(), ApprovalChannel::LocalFallback);
+        assert_eq!(approved.status, MissionStatus::Approved);
+        assert!(approved.approved_by_ncto);
+        assert_eq!(approved.approval_channel, Some(ApprovalChannel::LocalFallback));
+        // Nothing else about the mission changes.
+        assert_eq!(approved.id, draft.id);
+        assert_eq!(approved.objective, draft.objective);
+        assert_eq!(approved.created_at, draft.created_at);
+    }
+
+    #[tokio::test]
+    async fn approve_via_temporal_fails_closed_when_no_temporal_server_is_reachable() {
+        // No Temporal server runs in the test environment (nor in this
+        // dev machine's default setup) — this is exactly the condition
+        // `mission_approve` must recover from by falling back locally,
+        // never by blocking or panicking.
+        let result = approve_via_temporal("11111111-1111-1111-1111-111111111111", 1).await;
+        assert!(result.is_err());
     }
 }

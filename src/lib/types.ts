@@ -485,6 +485,9 @@ export interface Mission {
   changePolicyNote: string | null;
   status: "draft" | "approved" | "inProduction" | "delivered" | "inSupport" | "closed";
   approvedByNcto: boolean;
+  /** How the Draft -> Approved decision was durably recorded. `null` for
+   *  missions still in Draft, or approved before this field existed. */
+  approvalChannel: "temporal" | "localFallback" | null;
   createdAt: string;
   updatedAt: string;
 }

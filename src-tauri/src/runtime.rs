@@ -2437,6 +2437,7 @@ mod tests {
             change_policy_note: None,
             status: crate::mission::MissionStatus::Approved,
             approved_by_ncto: true,
+            approval_channel: Some(crate::mission::ApprovalChannel::Temporal),
             created_at: now,
             updated_at: now,
         };
