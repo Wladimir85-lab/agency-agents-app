@@ -187,7 +187,7 @@
 
   async function approveAndStart() {
     validation = "";
-    if (!proposal || !provider) { validation = "La propuesta y el runtime deben estar disponibles."; return; }
+    if (!proposal) { validation = "La propuesta debe estar disponible."; return; }
     if (!teamReady) { validation = "El catálogo activo no contiene todos los especialistas internos requeridos."; return; }
     if (useExistingProject && !projectPath) { validation = "Selecciona el proyecto existente."; return; }
     approving = true;
@@ -234,7 +234,7 @@
           "Temporal no está disponible ahora mismo; IntentOS registró tu aprobación localmente y sigue igual.",
         );
       }
-      await runs.start({ intent: productionBrief(approvedProposal), projectPath, runbookId: selected?.slug ?? DEFAULT_RUNBOOK_ID, capabilityId: approvedCapabilities[0].id, capabilityIds: approvedCapabilities.map((item) => item.id), stageIds: approvedPipeline.map((stage) => stage.id), stageKinds: approvedPipeline.map((stage) => stage.kind), stageLabels: approvedPipeline.map((stage) => stage.label), agentSlugs: approvedPipeline.map((stage) => stage.agent), providerId: provider.id, missionId: mission.id });
+      await runs.start({ intent: productionBrief(approvedProposal), projectPath, runbookId: selected?.slug ?? DEFAULT_RUNBOOK_ID, capabilityId: approvedCapabilities[0].id, capabilityIds: approvedCapabilities.map((item) => item.id), stageIds: approvedPipeline.map((stage) => stage.id), stageKinds: approvedPipeline.map((stage) => stage.kind), stageLabels: approvedPipeline.map((stage) => stage.label), agentSlugs: approvedPipeline.map((stage) => stage.agent), providerId: provider?.id ?? null, missionId: mission.id });
     } catch (e) { toast.error("No se pudo iniciar la producción aprobada", readableError(e)); }
     finally { approving = false; }
   }
@@ -350,7 +350,7 @@
           {#if proposal.revisionNotes.length}<section class="revision"><strong>Revisión NCTO incorporada</strong><p>{proposal.revisionNotes.at(-1)}</p>{#if proposalChanges.length}<ul>{#each proposalChanges as change}<li>{change}</li>{/each}</ul>{/if}</section>{/if}
           <details><summary>Ver criterio y plan interno</summary><div class="proposal-internal"><p><strong>Usuario inferido</strong><br/>{proposal.user}</p><p><strong>Trabajo a resolver</strong><br/>{proposal.job}</p><p><strong>Proyecto</strong><br/>Documents / IntentOS Projects / {proposal.projectSlug}</p><p><strong>Capacidades</strong><br/>{proposal.capabilities.map((item) => item.shortLabel).join(" + ")}</p><div class="experience-map"><strong>Experiencia propuesta</strong>{#each proposal.experience as step, index}<div><span>{index + 1}</span><p>{step}</p></div>{/each}</div><ol class="dynamic-team">{#each proposal.pipeline as stage, index (stage.id)}<li class:missing={!bySlug.has(stage.agent)}><div><strong>{index + 1}. {stage.label}</strong><small>Responsable: {bySlug.get(stage.agent)?.name ?? stage.agent}</small></div></li>{/each}</ol></div></details>
           {#if rejecting}<label for="rejection">¿Qué debe cambiar?<textarea id="rejection" bind:value={rejectionReason} rows="4" placeholder="Explica por qué rechazas esta propuesta y qué dirección debe tomar IntentOS."></textarea></label>{/if}
-          <div class="decision-actions"><Button variant="primary" onclick={approveAndStart} loading={approving} disabled={!provider || !teamReady}>Aprobar y construir</Button>{#if rejecting}<Button variant="danger" onclick={rejectProposal}>Enviar rechazo razonado</Button>{:else}<Button variant="secondary" onclick={() => rejecting = true}>Rechazar / pedir cambios</Button>{/if}<Button variant="secondary" onclick={() => proposal = null}>Editar intención</Button></div>
+          <div class="decision-actions"><Button variant="primary" onclick={approveAndStart} loading={approving} disabled={!teamReady}>Aprobar y construir</Button>{#if rejecting}<Button variant="danger" onclick={rejectProposal}>Enviar rechazo razonado</Button>{:else}<Button variant="secondary" onclick={() => rejecting = true}>Rechazar / pedir cambios</Button>{/if}<Button variant="secondary" onclick={() => proposal = null}>Editar intención</Button></div>
           {#if !provider}<p class="error">El runtime no está disponible; puedes revisar la propuesta, pero no iniciar producción.</p>{/if}
         </section>
       {:else}

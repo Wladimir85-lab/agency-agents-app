@@ -800,3 +800,36 @@ not modified this pass — need a dedicated read-then-implement pass before touc
 running `cargo test` — this session had no device_bash/terminal access to this machine. See
 NEXT-SESSION.md for the exact commands. Runtime v0.1 (404f4b1)'s own contract, IDs, and
 five-stage pipeline were not modified; every change here is additive and optional.
+
+## 2026-09-02 — Groq backend added to local_agent's inference transport; live-verified, Direction passes cleanly
+
+Full detail in `activeContext.md` (top section) and `decisions.md` (ADR "Decouple
+local_agent's inference transport"). Summary: `local_model.rs::complete_raw` now dispatches
+to either the existing loopback/Qwen path or a new Groq path (`openai/gpt-oss-120b`),
+selected by `INTENTOS_INFERENCE_BACKEND=groq` + `INTENTOS_GROQ_API_KEY`. Groq is gated by
+paranoid mode (`network_allowed`) on every call, uses a fixed non-configurable HTTPS
+endpoint, and is never treated as "sovereign". `local_agent.rs`/`runtime.rs`/`state.rs`
+changed only to thread a settings handle through for that gate — Stage Contract,
+WorkingContext, causality parser and tool execution were not touched.
+
+Live-verified through the real UI via CDP (`providerId: null`, no Codex/Claude processes
+involved): with the Groq request's `reasoning_effort` tuned down to `"low"` (started at
+"high" per instruction, live-lowered twice after real evidence of failure at each step —
+see decisions.md for the full progression), a real intent's Direction stage reached
+`INTENTOS_GATE:PASS` in exactly 2 turns, cleanly, no hallucination, no repeated actions —
+the first live success of this loop's Direction stage. Architecture then hit a real Groq
+429 (free-tier 8000 tokens/minute cap for `openai/gpt-oss-120b`) partway through its own
+turns; confirmed to be an account-tier ceiling, not a code issue, by exhausting the
+cheapest available `reasoning_effort` setting first. Left unresolved without paying for a
+higher Groq tier, per explicit instruction not to spend money this session.
+
+Also surfaced, not fixed here: `run_local_agentic_stage`'s `<stage>-<attempt>.stdout.log`
+is only written on the loop's normal exit path — a hard mid-loop error (this 429, or the
+earlier local context-overflow 400) returns early and skips that write, leaving only the
+before/after manifests as evidence for a failed attempt. Pre-existing, not introduced by
+this change.
+
+Rust 422 passed / 0 failed / 13 ignored (up from the 416/0/13 baseline verified at session
+start). Svelte/TS 0 errors / 0 warnings, unchanged (no frontend files touched this session).
+Files touched: `local_model.rs`, `local_agent.rs`, `runtime.rs`, `state.rs`. `knowledge-base/`
+untouched throughout, per explicit instruction.

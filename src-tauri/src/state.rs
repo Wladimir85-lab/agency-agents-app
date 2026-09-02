@@ -114,14 +114,30 @@ impl AppState {
     ///   repair the file (or hit Reset to defaults in the UI).
     pub async fn require_network(&self, feature: &'static str) -> Result<(), AppError> {
         let guard = self.settings.read().await;
-        match &*guard {
-            SettingsLoadState::Loaded(s) if !s.paranoid_mode => Ok(()),
-            SettingsLoadState::FirstLaunch => Ok(()),
-            SettingsLoadState::Loaded(_) | SettingsLoadState::Corrupt { .. } => {
-                Err(AppError::ParanoidModeBlocked {
-                    feature: feature.to_string(),
-                })
-            }
+        network_allowed(&guard, feature)
+    }
+}
+
+/// Single source of truth for the paranoid-mode decision, shared by
+/// `AppState::require_network` (called with a lock already held on
+/// `AppState.settings`) and any other caller that only has a cloned
+/// `Arc<RwLock<SettingsLoadState>>` in scope — e.g. a spawned run task
+/// that cloned `state.settings` before moving into `tokio::spawn`, the
+/// same way it already clones `app_data`/`runtime_jobs`. Same three
+/// cases as `require_network`'s doc comment: `Loaded` with paranoid
+/// off, or `FirstLaunch`, allow; `Loaded` with paranoid on, or
+/// `Corrupt`, deny (fail closed).
+pub(crate) fn network_allowed(
+    settings: &SettingsLoadState,
+    feature: &'static str,
+) -> Result<(), AppError> {
+    match settings {
+        SettingsLoadState::Loaded(s) if !s.paranoid_mode => Ok(()),
+        SettingsLoadState::FirstLaunch => Ok(()),
+        SettingsLoadState::Loaded(_) | SettingsLoadState::Corrupt { .. } => {
+            Err(AppError::ParanoidModeBlocked {
+                feature: feature.to_string(),
+            })
         }
     }
 }

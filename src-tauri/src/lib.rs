@@ -11,6 +11,7 @@ mod error;
 mod fabric;
 mod github;
 mod install;
+mod local_agent;
 mod local_model;
 mod mission;
 mod registry;

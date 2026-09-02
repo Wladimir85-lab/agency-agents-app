@@ -445,7 +445,10 @@ export interface StartRunRequest {
   stageKinds: string[];
   stageLabels: string[];
   agentSlugs: string[];
-  providerId: string;
+  /** Null means no external agentic CLI is configured for this run — the
+   *  `direction` stage always runs on the local sovereign executor
+   *  regardless, and any other stage that needs one fails explicitly. */
+  providerId: string | null;
   missionId?: string | null;
 }
 
@@ -458,7 +461,7 @@ export interface RunSummary {
   runbookId: string;
   capabilityId: string;
   capabilityIds: string[];
-  providerId: string;
+  providerId: string | null;
   missionId?: string | null;
   status: RunStatus;
   currentStage: string | null;

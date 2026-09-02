@@ -1,20 +1,36 @@
-//! IntentOS-owned local inference boundary.
+//! IntentOS-owned inference boundary.
 //!
 //! The renderer never supplies executable paths or command-line arguments.
-//! Remote endpoints never satisfy `sovereign_ready`: the API must be bound to
-//! loopback and the authorised model must live inside IntentOS app data (or be
-//! supplied explicitly by an engineering environment variable).
+//! Remote endpoints never satisfy `sovereign_ready`: the loopback API must
+//! be bound to loopback and the authorised model must live inside IntentOS
+//! app data (or be supplied explicitly by an engineering environment
+//! variable). `sovereign_ready`/`LocalModelStatus` describe that loopback
+//! path exclusively and keep meaning exactly what they always meant.
+//!
+//! A second, explicitly-opt-in backend (Groq) can carry the same
+//! `local_agent` turn loop over the network instead — see
+//! [`InferenceBackend`], [`GroqBackendStatus`] and the `Groq` branch of
+//! [`complete_raw`]. It is never "sovereign" (it leaves the machine), is
+//! gated by [`crate::state::network_allowed`] on every call, and is
+//! disjoint from the loopback path: it does not read `ENDPOINT_ENV` and is
+//! never treated as reachable/ready without an actual completion call
+//! having succeeded.
 
-use crate::{error::AppError, state::AppState};
+use crate::{
+    commands::settings::SettingsLoadState,
+    error::AppError,
+    state::{network_allowed, AppState},
+};
 use serde::{Deserialize, Serialize};
 use std::{
     env,
     path::{Path, PathBuf},
     process::Stdio,
+    sync::Arc,
     time::{Duration, Instant},
 };
 use tauri::State;
-use tokio::process::Command;
+use tokio::{process::Command, sync::RwLock};
 
 const DEFAULT_ENDPOINT: &str = "http://127.0.0.1:8080";
 const SERVER_ENV: &str = "INTENTOS_LLAMA_SERVER_PATH";
@@ -24,6 +40,75 @@ const RUNNER_VERSION: &str = "b10516";
 const MODEL_FILE: &str = "qwen2.5-coder-1.5b-instruct-q4_k_m.gguf";
 const MAX_PROMPT_BYTES: usize = 32 * 1024;
 const PID_FILE: &str = "runner.pid";
+
+// ---------- Groq backend (opt-in, non-sovereign, network-gated) ----------
+
+/// Selects which backend `complete_raw` talks to. Read fresh on every call
+/// (not cached) so flipping the env var between runs — or between the
+/// health probe and the next turn — takes effect immediately, same
+/// freshness contract as `configured_port`/`status_at` already have for
+/// the loopback path.
+const BACKEND_ENV: &str = "INTENTOS_INFERENCE_BACKEND";
+const GROQ_API_KEY_ENV: &str = "INTENTOS_GROQ_API_KEY";
+const GROQ_MODEL_ENV: &str = "INTENTOS_GROQ_MODEL";
+const GROQ_DEFAULT_MODEL: &str = "openai/gpt-oss-120b";
+/// Fixed and not overridable via `ENDPOINT_ENV` or any other env var: the
+/// whole point is that no local-looking configuration can ever cause an
+/// outbound call to be treated as loopback-exempt from `network_allowed`.
+const GROQ_ENDPOINT: &str = "https://api.groq.com/openai/v1/chat/completions";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InferenceBackend {
+    Loopback,
+    Groq,
+}
+
+fn configured_backend() -> InferenceBackend {
+    match env::var(BACKEND_ENV) {
+        Ok(value) if value.eq_ignore_ascii_case("groq") => InferenceBackend::Groq,
+        _ => InferenceBackend::Loopback,
+    }
+}
+
+/// Static readiness only — never the result of a network probe. Unlike
+/// loopback (which has a cheap, local `/health` endpoint worth polling),
+/// Groq has no separate health check IntentOS should be spending a network
+/// call — and therefore a `network_allowed` gate consultation — on just to
+/// answer a status query. `reachable`/`model_available` stay `None`
+/// ("not verified") until an actual `complete_raw` call has been attempted;
+/// see `record_groq_probe_result`. `backend_ready` reflects only
+/// `configured` and must never be read as "verified working".
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GroqBackendStatus {
+    pub configured: bool,
+    pub reachable: Option<bool>,
+    pub model_available: Option<bool>,
+    pub backend_ready: bool,
+    pub blockers: Vec<String>,
+}
+
+fn groq_status() -> GroqBackendStatus {
+    let backend_selected = configured_backend() == InferenceBackend::Groq;
+    let has_key = env::var(GROQ_API_KEY_ENV)
+        .map(|k| !k.trim().is_empty())
+        .unwrap_or(false);
+    let configured = backend_selected && has_key;
+    let mut blockers = Vec::new();
+    if !backend_selected {
+        blockers.push(format!("{BACKEND_ENV} no está en \"groq\"."));
+    }
+    if !has_key {
+        blockers.push(format!("{GROQ_API_KEY_ENV} no está configurada."));
+    }
+    GroqBackendStatus {
+        configured,
+        reachable: None,
+        model_available: None,
+        backend_ready: configured,
+        blockers,
+    }
+}
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -54,7 +139,13 @@ pub struct LocalCompletion {
     pub content: String,
     pub model: String,
     pub latency_ms: u64,
+    /// `true` only for the loopback backend — meaning unchanged from
+    /// before Groq existed. A Groq completion is never "local".
     pub local: bool,
+    /// Explicit backend identification, additive: `"loopback"` or
+    /// `"groq"`. Existing callers that only read `local` keep working
+    /// unchanged.
+    pub backend: &'static str,
 }
 
 #[derive(Debug, Deserialize)]
@@ -300,7 +391,7 @@ async fn probe_health(endpoint: &str) -> (bool, bool) {
     }
 }
 
-async fn status_at(app_data_dir: &Path) -> LocalModelStatus {
+pub(crate) async fn status_at(app_data_dir: &Path) -> LocalModelStatus {
     let endpoint = env::var(ENDPOINT_ENV).unwrap_or_else(|_| DEFAULT_ENDPOINT.into());
     let loopback_endpoint = is_loopback_endpoint(&endpoint);
     let server = discover_server(app_data_dir);
@@ -431,18 +522,32 @@ pub async fn local_model_stop(state: State<'_, AppState>) -> Result<LocalModelSt
     Ok(status_at(&state.app_data_dir).await)
 }
 
-#[tauri::command]
-pub async fn local_model_complete(
-    state: State<'_, AppState>,
-    request: LocalCompletionRequest,
+/// Shared core of a single completion turn: checks readiness, builds the
+/// chat-completion request and returns the model's raw reply. Used both by
+/// the `local_model_complete` command (single-turn, human-facing) and by
+/// `local_agent`'s multi-turn loop (each iteration is one call here) — one
+/// chokepoint per backend, so callers can never drift on request shape,
+/// timeout or readiness handling. `settings` is only ever consulted on the
+/// Groq branch — the loopback branch is unchanged and ungated, exactly as
+/// before Groq existed, because it never leaves the machine.
+pub(crate) async fn complete_raw(
+    app_data_dir: &Path,
+    prompt: &str,
+    max_tokens: Option<u32>,
+    settings: &Arc<RwLock<SettingsLoadState>>,
 ) -> Result<LocalCompletion, AppError> {
-    let prompt = request.prompt.trim();
-    if prompt.is_empty() || prompt.len() > MAX_PROMPT_BYTES {
-        return Err(AppError::InvalidArgument {
-            message: format!("el prompt local debe contener entre 1 y {MAX_PROMPT_BYTES} bytes"),
-        });
+    match configured_backend() {
+        InferenceBackend::Loopback => complete_raw_loopback(app_data_dir, prompt, max_tokens).await,
+        InferenceBackend::Groq => complete_raw_groq(prompt, max_tokens, settings).await,
     }
-    let status = status_at(&state.app_data_dir).await;
+}
+
+async fn complete_raw_loopback(
+    app_data_dir: &Path,
+    prompt: &str,
+    max_tokens: Option<u32>,
+) -> Result<LocalCompletion, AppError> {
+    let status = status_at(app_data_dir).await;
     if !status.sovereign_ready {
         return Err(AppError::CapabilityProviderUnavailable {
             capability_id: "inference.local".into(),
@@ -461,7 +566,7 @@ pub async fn local_model_complete(
             {"role": "user", "content": prompt}
         ],
         "temperature": 0.1,
-        "max_tokens": request.max_tokens.unwrap_or(256).clamp(1, 1024),
+        "max_tokens": max_tokens.unwrap_or(256).clamp(1, 1024),
         "stream": false
     });
     let started = Instant::now();
@@ -474,10 +579,29 @@ pub async fn local_model_complete(
         ))
         .json(&body)
         .send()
-        .await?
-        .error_for_status()?
-        .json::<ChatResponse>()
         .await?;
+    // Observability only: a bare `.error_for_status()?` here converts any
+    // non-2xx into a generic reqwest error and discards llama-server's own
+    // response body — which is exactly where a context-overflow or
+    // malformed-request explanation lives. Read and preserve it instead.
+    // Does not change the success path at all: on 2xx this is a single
+    // extra `is_success()` check before the existing `.json()` call below.
+    let response_status = response.status();
+    if !response_status.is_success() {
+        let body_text = response
+            .text()
+            .await
+            .unwrap_or_else(|e| format!("<no se pudo leer el cuerpo de la respuesta: {e}>"));
+        return Err(AppError::Internal {
+            message: format!(
+                "HTTP {} del motor local en POST /v1/chat/completions (prompt ~{} bytes enviados): {}",
+                response_status.as_u16(),
+                prompt.len(),
+                body_text
+            ),
+        });
+    }
+    let response = response.json::<ChatResponse>().await?;
     let content = response
         .choices
         .into_iter()
@@ -491,7 +615,153 @@ pub async fn local_model_complete(
         model: response.model.unwrap_or_else(|| model_name.into()),
         latency_ms: started.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
         local: true,
+        backend: "loopback",
     })
+}
+
+/// Groq branch: `network_allowed` is consulted first and unconditionally,
+/// before any request is built — a run with paranoid mode ON gets
+/// `ParanoidModeBlocked`, never a real outbound call, no matter what
+/// `groq_status()` would have reported. The API key is read once, used
+/// only to set the `Authorization` header, and never appears in any
+/// `Serialize` struct or error message this function returns.
+async fn complete_raw_groq(
+    prompt: &str,
+    max_tokens: Option<u32>,
+    settings: &Arc<RwLock<SettingsLoadState>>,
+) -> Result<LocalCompletion, AppError> {
+    {
+        let guard = settings.read().await;
+        network_allowed(&guard, "local_model_groq")?;
+    }
+    let status = groq_status();
+    if !status.configured {
+        return Err(AppError::CapabilityProviderUnavailable {
+            capability_id: "inference.groq".into(),
+            message: status.blockers.join(" "),
+        });
+    }
+    // SAFETY of the unwrap: `status.configured` above already proved this
+    // env var is set to a non-empty value.
+    let api_key = env::var(GROQ_API_KEY_ENV).unwrap();
+    let model_name = env::var(GROQ_MODEL_ENV).unwrap_or_else(|_| GROQ_DEFAULT_MODEL.into());
+    groq_completion_request(GROQ_ENDPOINT, &api_key, &model_name, prompt, max_tokens).await
+}
+
+/// The actual HTTP request + response classification, parameterised over
+/// the endpoint so tests can point it at a fake server. Production code
+/// only ever reaches this through `complete_raw_groq` above, which always
+/// passes the fixed `GROQ_ENDPOINT` constant and has already run the
+/// `network_allowed` + `groq_status().configured` gates — this function
+/// itself does not re-check either, so it must never be reachable from
+/// outside this module in a non-test build.
+#[cfg_attr(not(test), allow(dead_code))]
+async fn groq_completion_request(
+    endpoint: &str,
+    api_key: &str,
+    model_name: &str,
+    prompt: &str,
+    max_tokens: Option<u32>,
+) -> Result<LocalCompletion, AppError> {
+    let body = serde_json::json!({
+        "model": model_name,
+        "messages": [
+            {"role": "system", "content": "Eres el motor de inferencia de IntentOS. Entrega resultados concisos, técnicos y verificables."},
+            {"role": "user", "content": prompt}
+        ],
+        "temperature": 0.1,
+        "max_tokens": max_tokens.unwrap_or(256).clamp(1, 1024),
+        "stream": false,
+        // Groq-specific, gpt-oss-family parameter (not part of the base
+        // OpenAI chat-completions schema, and not sent on the loopback
+        // llama-server path at all): asks the model to spend more of its
+        // own reasoning budget before answering. Started at "high" per
+        // an explicit request to reduce the kind of stuck,
+        // repeat-without-progress turn seen on the Qwen loopback path;
+        // lowered to "medium" after "high" measurably spent the entire
+        // MAX_TURN_TOKENS budget on internal reasoning with zero visible
+        // output in ~1 of 5 trivial-prompt calls (a turn with no
+        // INTENTOS_ACTION/INTENTOS_GATE marker at all — its own
+        // stuck-turn failure mode for the causality parser). Lowered
+        // again to "low": a live 3-stage vertical run against the free
+        // Groq tier hit its 8000-tokens/minute cap after 6 Direction
+        // turns at "medium" — every reasoning token spent counts
+        // against that same per-minute budget, so this is the
+        // cheapest, zero-cost lever to try before assuming the account
+        // tier itself is insufficient.
+        "reasoning_effort": "low"
+    });
+    let started = Instant::now();
+    let response = reqwest::Client::builder()
+        .timeout(Duration::from_secs(120))
+        .build()?
+        .post(endpoint)
+        .bearer_auth(api_key)
+        .json(&body)
+        .send()
+        .await?;
+    let response_status = response.status();
+    if !response_status.is_success() {
+        let retry_after = response
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
+        let body_text = response
+            .text()
+            .await
+            .unwrap_or_else(|e| format!("<no se pudo leer el cuerpo de la respuesta: {e}>"));
+        let message = match response_status.as_u16() {
+            401 | 403 => format!(
+                "Groq rechazó la credencial configurada (HTTP {}): {}",
+                response_status.as_u16(),
+                body_text
+            ),
+            429 => format!(
+                "Groq devolvió 429 (límite de tasa){}: {}",
+                retry_after
+                    .map(|value| format!(", retry-after {value}s"))
+                    .unwrap_or_default(),
+                body_text
+            ),
+            other => format!(
+                "HTTP {other} de Groq en POST /openai/v1/chat/completions (prompt ~{} bytes enviados): {}",
+                prompt.len(),
+                body_text
+            ),
+        };
+        return Err(AppError::Internal { message });
+    }
+    let response = response.json::<ChatResponse>().await?;
+    let content = response
+        .choices
+        .into_iter()
+        .next()
+        .map(|choice| choice.message.content)
+        .ok_or_else(|| AppError::Internal {
+            message: "Groq respondió sin una opción de resultado".into(),
+        })?;
+    Ok(LocalCompletion {
+        content,
+        model: response.model.unwrap_or_else(|| model_name.to_owned()),
+        latency_ms: started.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
+        local: false,
+        backend: "groq",
+    })
+}
+
+#[tauri::command]
+pub async fn local_model_complete(
+    state: State<'_, AppState>,
+    request: LocalCompletionRequest,
+) -> Result<LocalCompletion, AppError> {
+    let prompt = request.prompt.trim();
+    if prompt.is_empty() || prompt.len() > MAX_PROMPT_BYTES {
+        return Err(AppError::InvalidArgument {
+            message: format!("el prompt local debe contener entre 1 y {MAX_PROMPT_BYTES} bytes"),
+        });
+    }
+    complete_raw(&state.app_data_dir, prompt, request.max_tokens, &state.settings).await
 }
 
 #[cfg(test)]
@@ -521,5 +791,394 @@ mod tests {
             Some(binary)
         );
         assert_eq!(find_on_path("missing", joined.to_str()), None);
+    }
+
+    // Guards every env var these tests mutate process-wide
+    // (INTENTOS_LOCAL_MODEL_ENDPOINT/PATH, INTENTOS_LLAMA_SERVER_PATH,
+    // INTENTOS_INFERENCE_BACKEND, INTENTOS_GROQ_API_KEY/MODEL) — same
+    // precedent as the strict-mode env-var test in runtime.rs.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Test-only seam: exercises `groq_completion_request` (the request
+    /// build + response classification `complete_raw_groq` delegates to
+    /// after its gates pass) against a fake server, instead of the fixed
+    /// `GROQ_ENDPOINT` constant. Bypasses `network_allowed` and
+    /// `groq_status().configured` deliberately — those are proved
+    /// separately by `complete_raw_groq_is_blocked_by_paranoid_mode_*`
+    /// and `complete_raw_groq_fails_closed_when_not_configured`, which go
+    /// through the real `complete_raw` entry point.
+    async fn complete_raw_groq_over_fake_endpoint(
+        endpoint: &str,
+        prompt: &str,
+        api_key: &str,
+    ) -> Result<LocalCompletion, AppError> {
+        groq_completion_request(endpoint, api_key, GROQ_DEFAULT_MODEL, prompt, Some(10)).await
+    }
+
+    fn settings_arc(paranoid_mode: bool) -> Arc<RwLock<SettingsLoadState>> {
+        Arc::new(RwLock::new(SettingsLoadState::Loaded(
+            crate::commands::settings::Settings {
+                paranoid_mode,
+                ..Default::default()
+            },
+        )))
+    }
+
+    /// Hand-rolled HTTP/1.1 server (no mocking crate in the dependency
+    /// tree) that answers `/health` with 200 and anything else with a
+    /// caller-supplied status + JSON body — enough to drive `complete_raw`
+    /// through `status_at`'s readiness probe and then its real completion
+    /// request, without needing a real llama-server.
+    async fn spawn_fake_llama_server(
+        completion_status: &'static str,
+        completion_body: &'static str,
+    ) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    break;
+                };
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 8192];
+                    let n = socket.read(&mut buf).await.unwrap_or(0);
+                    let request = String::from_utf8_lossy(&buf[..n]);
+                    let (status_line, body): (&str, &str) = if request.starts_with("GET /health") {
+                        ("200 OK", "{\"status\":\"ok\"}")
+                    } else {
+                        (completion_status, completion_body)
+                    };
+                    let response = format!(
+                        "HTTP/1.1 {status_line}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = socket.write_all(response.as_bytes()).await;
+                    let _ = socket.shutdown().await;
+                });
+            }
+        });
+        (addr, handle)
+    }
+
+    #[tokio::test]
+    async fn complete_raw_preserves_http_status_and_body_on_a_non_success_response() {
+        let _guard = ENV_LOCK.lock().unwrap();
+
+        // A realistic llama.cpp-shaped context-overflow error body, so the
+        // test also documents what that failure actually looks like on the
+        // wire, not just an arbitrary 400.
+        let error_body = "{\"error\":{\"code\":400,\"message\":\"the request exceeds the available context size, try increasing it\",\"type\":\"exceed_context_size_error\"}}";
+        let (addr, server) = spawn_fake_llama_server("400 Bad Request", error_body).await;
+
+        let model_file = tempfile::NamedTempFile::new().unwrap();
+        let server_file = tempfile::NamedTempFile::new().unwrap();
+        // SAFETY: guarded by ENV_LOCK; no other test reads these vars.
+        unsafe {
+            env::set_var("INTENTOS_LOCAL_MODEL_ENDPOINT", format!("http://{addr}"));
+            env::set_var("INTENTOS_LOCAL_MODEL_PATH", model_file.path());
+            env::set_var("INTENTOS_LLAMA_SERVER_PATH", server_file.path());
+        }
+
+        let app_data = tempfile::tempdir().unwrap();
+        let long_prompt = "x".repeat(5000);
+        let result = complete_raw(app_data.path(), &long_prompt, Some(10), &settings_arc(false)).await;
+
+        // SAFETY: same guard.
+        unsafe {
+            env::remove_var("INTENTOS_LOCAL_MODEL_ENDPOINT");
+            env::remove_var("INTENTOS_LOCAL_MODEL_PATH");
+            env::remove_var("INTENTOS_LLAMA_SERVER_PATH");
+        }
+        server.abort();
+
+        let err = result.expect_err("a non-2xx response must surface as Err");
+        let message = err.to_string();
+        assert!(message.contains("400"), "status not preserved: {message}");
+        assert!(
+            message.contains("exceed_context_size_error"),
+            "response body not preserved: {message}"
+        );
+        assert!(
+            message.contains("the request exceeds the available context size"),
+            "response body not preserved: {message}"
+        );
+        // Approximate request-size diagnostic, per the design: bytes sent,
+        // not a token count, and no truncation/compaction introduced.
+        assert!(message.contains("5000 bytes"), "prompt size not reported: {message}");
+    }
+
+    #[tokio::test]
+    async fn complete_raw_normal_success_path_is_unaffected() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let (addr, server) = spawn_fake_llama_server(
+            "200 OK",
+            "{\"model\":\"m\",\"choices\":[{\"message\":{\"content\":\"hola\"}}]}",
+        )
+        .await;
+
+        let model_file = tempfile::NamedTempFile::new().unwrap();
+        let server_file = tempfile::NamedTempFile::new().unwrap();
+        // SAFETY: guarded by ENV_LOCK.
+        unsafe {
+            env::set_var("INTENTOS_LOCAL_MODEL_ENDPOINT", format!("http://{addr}"));
+            env::set_var("INTENTOS_LOCAL_MODEL_PATH", model_file.path());
+            env::set_var("INTENTOS_LLAMA_SERVER_PATH", server_file.path());
+        }
+
+        let app_data = tempfile::tempdir().unwrap();
+        let result = complete_raw(app_data.path(), "hola", Some(10), &settings_arc(false)).await;
+
+        // SAFETY: same guard.
+        unsafe {
+            env::remove_var("INTENTOS_LOCAL_MODEL_ENDPOINT");
+            env::remove_var("INTENTOS_LOCAL_MODEL_PATH");
+            env::remove_var("INTENTOS_LLAMA_SERVER_PATH");
+        }
+        server.abort();
+
+        let completion = result.expect("a 2xx response must still succeed exactly as before");
+        assert_eq!(completion.content, "hola");
+        assert_eq!(completion.backend, "loopback");
+        assert!(completion.local, "loopback completions must keep local == true");
+    }
+
+    // ---------- Groq backend ----------
+
+    fn clear_groq_env() {
+        // SAFETY: guarded by ENV_LOCK in every caller.
+        unsafe {
+            env::remove_var(BACKEND_ENV);
+            env::remove_var(GROQ_API_KEY_ENV);
+            env::remove_var(GROQ_MODEL_ENV);
+        }
+    }
+
+    #[test]
+    fn groq_status_is_not_configured_without_backend_selection_or_key() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_groq_env();
+        let status = groq_status();
+        assert!(!status.configured);
+        assert!(!status.backend_ready);
+        assert_eq!(status.reachable, None, "must never guess reachability");
+        assert_eq!(status.model_available, None, "must never guess model availability");
+        clear_groq_env();
+    }
+
+    #[test]
+    fn groq_status_requires_both_backend_selection_and_a_non_empty_key() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_groq_env();
+        // SAFETY: guarded by ENV_LOCK.
+        unsafe {
+            env::set_var(BACKEND_ENV, "groq");
+            env::set_var(GROQ_API_KEY_ENV, "   ");
+        }
+        assert!(
+            !groq_status().configured,
+            "a blank key must not count as configured"
+        );
+        // SAFETY: guarded by ENV_LOCK.
+        unsafe {
+            env::set_var(GROQ_API_KEY_ENV, "gsk_real_key");
+        }
+        assert!(groq_status().configured);
+        assert!(
+            groq_status().backend_ready,
+            "backend_ready mirrors configured, never a verified-live claim"
+        );
+        clear_groq_env();
+    }
+
+    #[tokio::test]
+    async fn complete_raw_groq_is_blocked_by_paranoid_mode_before_any_request_is_built() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_groq_env();
+        // SAFETY: guarded by ENV_LOCK.
+        unsafe {
+            env::set_var(BACKEND_ENV, "groq");
+            env::set_var(GROQ_API_KEY_ENV, "gsk_real_key");
+        }
+
+        let result = complete_raw(
+            Path::new("unused"),
+            "hola",
+            Some(10),
+            &settings_arc(true),
+        )
+        .await;
+
+        clear_groq_env();
+
+        match result {
+            Err(AppError::ParanoidModeBlocked { feature }) => {
+                assert_eq!(feature, "local_model_groq");
+            }
+            other => panic!("expected ParanoidModeBlocked, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn complete_raw_groq_fails_closed_when_not_configured() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_groq_env();
+        // SAFETY: guarded by ENV_LOCK.
+        unsafe {
+            env::set_var(BACKEND_ENV, "groq");
+        }
+
+        let result = complete_raw(Path::new("unused"), "hola", Some(10), &settings_arc(false)).await;
+
+        clear_groq_env();
+
+        match result {
+            Err(AppError::CapabilityProviderUnavailable { capability_id, .. }) => {
+                assert_eq!(capability_id, "inference.groq");
+            }
+            other => panic!("expected CapabilityProviderUnavailable, got {other:?}"),
+        }
+    }
+
+    /// Same fake-server technique as `spawn_fake_llama_server`, but this
+    /// one also records the full raw request it received (headers + JSON
+    /// body) so tests can prove both the bearer token and the request
+    /// body shape (e.g. `reasoning_effort`) were actually sent — and,
+    /// since `complete_raw_groq` posts to the fixed `GROQ_ENDPOINT`
+    /// constant rather than a configurable one, these tests exercise it
+    /// indirectly, through `groq_completion_request` pointed at this fake
+    /// server via `complete_raw_groq_over_fake_endpoint`.
+    async fn spawn_fake_groq_server(
+        completion_status: &'static str,
+        completion_body: &'static str,
+        retry_after: Option<&'static str>,
+    ) -> (
+        std::net::SocketAddr,
+        tokio::task::JoinHandle<()>,
+        Arc<tokio::sync::Mutex<Option<String>>>,
+    ) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let seen_request = Arc::new(tokio::sync::Mutex::new(None));
+        let seen_request_writer = seen_request.clone();
+        let handle = tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    break;
+                };
+                let seen_request = seen_request_writer.clone();
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 8192];
+                    let n = socket.read(&mut buf).await.unwrap_or(0);
+                    let request = String::from_utf8_lossy(&buf[..n]).into_owned();
+                    *seen_request.lock().await = Some(request);
+                    let retry_after_header = retry_after
+                        .map(|value| format!("Retry-After: {value}\r\n"))
+                        .unwrap_or_default();
+                    let response = format!(
+                        "HTTP/1.1 {completion_status}\r\nContent-Type: application/json\r\n{retry_after_header}Content-Length: {}\r\nConnection: close\r\n\r\n{completion_body}",
+                        completion_body.len()
+                    );
+                    let _ = socket.write_all(response.as_bytes()).await;
+                    let _ = socket.shutdown().await;
+                });
+            }
+        });
+        (addr, handle, seen_request)
+    }
+
+    /// `GROQ_ENDPOINT` is a fixed constant (deliberately not overridable
+    /// via env var — see its doc comment), so these tests cannot redirect
+    /// `complete_raw_groq` to the fake server above the way the loopback
+    /// tests redirect via `INTENTOS_LOCAL_MODEL_ENDPOINT`. What they CAN
+    /// and do verify without a real Groq account: the paranoid-mode gate
+    /// fires before any request exists (previous test), and the
+    /// not-configured fail-closed path (previous test). The request/error
+    /// shaping this fake server exists to prove (bearer header sent,
+    /// 401/403/429 + Retry-After surfaced distinctly) is instead verified
+    /// by calling the request-building/error-classification logic
+    /// directly against this fake server through a temporary endpoint
+    /// override — see `complete_raw_groq_over_fake_endpoint` below, used
+    /// only by these tests via `cfg(test)`.
+    #[tokio::test]
+    async fn complete_raw_groq_success_sends_bearer_auth_and_marks_backend() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_groq_env();
+        let (addr, server, seen_request) = spawn_fake_groq_server(
+            "200 OK",
+            "{\"model\":\"openai/gpt-oss-120b\",\"choices\":[{\"message\":{\"content\":\"hola\"}}]}",
+            None,
+        )
+        .await;
+
+        let result =
+            complete_raw_groq_over_fake_endpoint(&format!("http://{addr}"), "hola", "gsk_real_key")
+                .await;
+        server.abort();
+
+        let completion = result.expect("2xx must succeed");
+        assert_eq!(completion.content, "hola");
+        assert_eq!(completion.backend, "groq");
+        assert!(!completion.local, "a Groq completion must never claim local == true");
+
+        let request = seen_request.lock().await.clone().expect("a request must have arrived");
+        // HTTP header names are case-insensitive on the wire — reqwest
+        // happens to send a lowercase "authorization:", so compare
+        // case-insensitively rather than assuming a specific casing.
+        assert!(
+            request.to_ascii_lowercase().contains("authorization: bearer gsk_real_key"),
+            "bearer token not sent: {request}"
+        );
+        assert!(
+            request.contains(r#""reasoning_effort":"low""#),
+            "reasoning_effort not sent in the Groq request body: {request}"
+        );
+        assert!(
+            request.contains(r#""temperature":0.1"#),
+            "temperature not sent in the Groq request body: {request}"
+        );
+    }
+
+    #[tokio::test]
+    async fn complete_raw_groq_distinguishes_401_403_429_with_retry_after() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_groq_env();
+
+        let (addr, server, _) = spawn_fake_groq_server(
+            "401 Unauthorized",
+            "{\"error\":{\"message\":\"invalid api key\"}}",
+            None,
+        )
+        .await;
+        let err = complete_raw_groq_over_fake_endpoint(&format!("http://{addr}"), "hola", "bad_key")
+            .await
+            .expect_err("401 must surface as Err");
+        server.abort();
+        let message = err.to_string();
+        assert!(message.contains("401"), "status not classified: {message}");
+        assert!(
+            !message.contains("bad_key"),
+            "the API key must never appear in an error message: {message}"
+        );
+
+        let (addr, server, _) =
+            spawn_fake_groq_server("429 Too Many Requests", "{\"error\":{\"message\":\"rate limited\"}}", Some("7"))
+                .await;
+        let err = complete_raw_groq_over_fake_endpoint(&format!("http://{addr}"), "hola", "gsk_real_key")
+            .await
+            .expect_err("429 must surface as Err");
+        server.abort();
+        let message = err.to_string();
+        assert!(message.contains("429"), "status not classified: {message}");
+        assert!(
+            message.contains("retry-after 7s"),
+            "Retry-After header not surfaced: {message}"
+        );
     }
 }

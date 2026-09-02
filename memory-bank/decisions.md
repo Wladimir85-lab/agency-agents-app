@@ -286,3 +286,55 @@ mission_id - verified by a new explicit backward-compatibility unit test. Fronte
 lib/types.ts, lib/api.ts) was not touched this pass and needs its own read-then-implement pass.
 Git branch creation and `cargo test` were not run in this session (no device_bash/terminal access
 to this machine) and remain the immediate next step - see NEXT-SESSION.md.
+
+### 2026-09-02: Decouple local_agent's inference transport - add Groq as a second, non-sovereign backend
+
+**Status**: Implemented, live-verified against a real Groq account, uncommitted on
+`feature/mission-v1`.
+
+**Context**: `local_agent.rs`'s sovereign loop (Stage Contract, WorkingContext, causality
+parser - see activeContext.md 2026-09-02) was built and validated against
+Qwen2.5-Coder-1.5B over llama-server/loopback. That model has a known, unresolved failure
+mode on the Direction stage (repeats an identical write_file up to MAX_ITERATIONS times,
+never reaches PASS). Rather than keep tuning prompts against a 1.5B model, the proposal
+was to keep the entire loop (tools, contract, causality, evidence) untouched and swap only
+the inference transport, so a larger cloud model (candidate: `openai/gpt-oss-120b` via
+Groq's free tier) could be tried without building a second pipeline or a third
+`provider_id`.
+
+**Decision**: `local_model.rs::complete_raw` gained an `InferenceBackend` dispatch
+(`Loopback` | `Groq`), selected by `INTENTOS_INFERENCE_BACKEND`. Groq is explicitly never
+"sovereign" - it is not what `sovereign_ready`/`LocalModelStatus` describe, gets its own
+separate `GroqBackendStatus` (with `configured` as a static-only check; `reachable`/
+`model_available` never assumed true without a real completed call), a **fixed** HTTPS
+endpoint (not configurable via any env var, so no local-looking configuration can ever
+redirect outbound traffic), and is gated by `crate::state::network_allowed` (paranoid
+mode) on every call - extracted as a shared helper so `AppState::require_network` and this
+new call site share one source of truth instead of duplicating the paranoid-mode match.
+The API key is read once per call into the `Authorization` header only, never logged or
+placed in any `Serialize` struct or error message. 401/403/429 are classified distinctly;
+429 surfaces `Retry-After`. `local_agent.rs::run_local_agentic_stage` threads a
+`settings: &Arc<RwLock<SettingsLoadState>>` handle down to each turn's `complete_raw` call
+so the paranoid-mode check is re-consulted fresh every turn, not cached at run start;
+`runtime.rs` clones `state.settings` into the spawned run task alongside the existing
+`app_data`/`jobs` clones to supply it.
+
+**Alternatives rejected**: making `GROQ_ENDPOINT` configurable via an env var like the
+loopback path's `INTENTOS_LOCAL_MODEL_ENDPOINT` (would reopen exactly the "local-looking
+config secretly goes to the internet" risk paranoid mode exists to close). Treating a
+present API key as proof the backend is ready (`GroqBackendStatus.backend_ready` mirrors
+only `configured`, never a verified-live claim - Groq has no cheap loopback-style health
+check worth spending a network call on just to answer a status query). Automatic retry on
+429 (would touch the loop's frozen turn/iteration budget - out of scope for this delta;
+the error is surfaced distinctly with `Retry-After` instead, for a human or a future change
+to decide on).
+
+**Consequences**: Live-verified against a real Groq account (not simulated) - Direction
+passed cleanly in 2 turns with `reasoning_effort: "low"` (see activeContext.md for the
+"high" -> "medium" -> "low" tuning history, each step backed by live evidence, not
+guessed). Architecture hit a real 429 from Groq's free-tier 8000-tokens/minute cap
+partway through - confirmed to be an account-tier limit, not a code/prompt issue, since
+the cheapest available reasoning_effort lever was already exhausted before concluding
+this. Left unresolved without paying for Groq's Dev Tier, per explicit instruction not to
+spend money. Rust 422/0/13, Svelte/TS 0/0/0 after this delta - see git log on
+`feature/mission-v1` for the exact commit.

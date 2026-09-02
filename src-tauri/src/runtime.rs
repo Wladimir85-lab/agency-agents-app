@@ -21,6 +21,7 @@ use uuid::Uuid;
 
 use crate::corpus;
 use crate::error::AppError;
+use crate::local_agent;
 use crate::mission::{self, Mission};
 use crate::state::AppState;
 use crate::util::fs::{atomic_write, read_capped};
@@ -64,7 +65,13 @@ pub struct StartRunRequest {
     stage_kinds: Vec<String>,
     stage_labels: Vec<String>,
     agent_slugs: Vec<String>,
-    provider_id: String,
+    /// Absent/`None` means no external agentic CLI is configured for this
+    /// run — not a third provider, just "no external executor available
+    /// yet". `direction` stages never consult this (they always run on the
+    /// local sovereign executor); every other stage kind requires it to be
+    /// `Some` and fails the run explicitly, not silently, when it is not.
+    #[serde(default)]
+    provider_id: Option<String>,
     /// Optional Mission to attach to this run. Purely additive — omitting
     /// it (or passing None) preserves Runtime v0.1's frozen behavior
     /// byte-for-byte: the raw `intent` field is used exactly as before.
@@ -109,7 +116,15 @@ pub struct RunSummary {
     capability_id: String,
     #[serde(default)]
     capability_ids: Vec<String>,
-    provider_id: String,
+    /// Was `String` (always some external CLI) before external providers
+    /// became optional. `#[serde(default)]` makes every run persisted
+    /// before this field could be `null` deserialize the same way whether
+    /// the JSON has a string, `null`, or the key missing entirely — see
+    /// `provider_id_deserializes_from_a_historical_plain_string_run` and
+    /// its sibling tests. `None` here means the same thing it means on
+    /// `StartRunRequest`: no external executor, not a third provider.
+    #[serde(default)]
+    provider_id: Option<String>,
     /// Mirrors StartRunRequest.mission_id — absent on every run persisted
     /// before this field existed; `#[serde(default)]` deserializes those
     /// old files exactly like the existing `capability_id` precedent.
@@ -234,12 +249,12 @@ fn run_workspace_dir(app_data: &Path, id: &str) -> PathBuf {
         .join("project")
 }
 
-fn run_evidence_dir(app_data: &Path, id: &str) -> PathBuf {
+pub(crate) fn run_evidence_dir(app_data: &Path, id: &str) -> PathBuf {
     app_data.join("state").join("run-evidence").join(id)
 }
 
 /// Convert internal stage identifiers into portable filename components.
-fn evidence_file_component(value: &str) -> String {
+pub(crate) fn evidence_file_component(value: &str) -> String {
     let mut out = String::with_capacity(value.len().min(120));
     let mut separator = false;
     for ch in value.chars() {
@@ -435,7 +450,7 @@ fn workspace_manifest(root: &Path) -> Result<Vec<ManifestEntry>, AppError> {
         .collect()
 }
 
-async fn persist_manifest(
+pub(crate) async fn persist_manifest(
     app_data: &Path,
     run_id: &str,
     name: &str,
@@ -683,7 +698,7 @@ fn clean_text(s: &str) -> String {
     out
 }
 
-fn output_gate_passed(output: &str) -> bool {
+pub(crate) fn output_gate_passed(output: &str) -> bool {
     let passed = output.rfind("INTENTOS_GATE:PASS");
     let failed = output.rfind("INTENTOS_GATE:FAIL");
     match (passed, failed) {
@@ -691,6 +706,23 @@ fn output_gate_passed(output: &str) -> bool {
         (Some(pass), Some(fail)) => pass > fail,
         (None, _) => false,
     }
+}
+
+/// Whether a stage runs on the sovereign local executor (`local_agent`)
+/// instead of the run's external `provider_id`. Deliberately narrow — only
+/// the kinds `local_agent::local_stage_task` actually defines a task for
+/// (`direction`, `architecture`, `development` today) — and deliberately
+/// not a third `provider_id` value: this is a per-stage routing decision
+/// the runtime makes on its own, not something a run is configured with.
+/// Mirrors the existing `is_qa`/`is_reality` dual `kind`-or-`id` check used
+/// at the call site. Adding a stage kind here without a matching
+/// `local_stage_task` entry fails closed at dispatch time
+/// (`AppError::Internal`), not silently — see `run_local_agentic_stage`.
+fn stage_uses_local_executor(stage: &RunStage) -> bool {
+    matches!(stage.kind.as_str(), "direction" | "architecture" | "development")
+        || stage.id == "direction"
+        || stage.id == "architecture"
+        || stage.id == "development"
 }
 
 // ---------- Reality gate — domain-conditional verification guidance ----------
@@ -1535,40 +1567,50 @@ pub async fn runtime_start(
             message: "intent must contain 1 to 20000 characters".into(),
         });
     }
-    if request.provider_id != PROVIDER_ID && request.provider_id != CLAUDE_PROVIDER_ID {
-        return Err(AppError::InvalidArgument {
-            message: "unsupported runtime provider".into(),
-        });
+    if let Some(pid) = request.provider_id.as_deref() {
+        if pid != PROVIDER_ID && pid != CLAUDE_PROVIDER_ID {
+            return Err(AppError::InvalidArgument {
+                message: "unsupported runtime provider".into(),
+            });
+        }
     }
     validate_start_request(&request)?;
     // Codex CLI and Claude Code are both outbound providers even though they
     // are launched as local child processes. The same fail-closed network
     // policy that protects GitHub, catalog sync, and updates must therefore
     // gate the runtime before the project is inspected or any provider
-    // process is started.
-    let is_claude = request.provider_id == CLAUDE_PROVIDER_ID;
-    state
-        .require_network(if is_claude {
-            "runtime_claude"
+    // process is started. This entire gate is skipped when no external
+    // provider was requested at all (`provider_id: None`) — a run with no
+    // external executor never touches the network on IntentOS's behalf, so
+    // there is nothing here for Paranoid Mode to block, and probing a CLI
+    // that was never going to be used would only reject a run that the
+    // `direction` stage (sovereign, loopback-only) could otherwise complete
+    // on its own.
+    if let Some(pid) = request.provider_id.as_deref() {
+        let is_claude = pid == CLAUDE_PROVIDER_ID;
+        state
+            .require_network(if is_claude {
+                "runtime_claude"
+            } else {
+                "runtime_codex"
+            })
+            .await?;
+        let provider = if is_claude {
+            probe_claude().await
         } else {
-            "runtime_codex"
-        })
-        .await?;
-    let project = validate_project(&request.project_path, &state.app_data_dir)?;
-    let provider = if is_claude {
-        probe_claude().await
-    } else {
-        probe_codex().await
-    };
-    if !provider.available {
-        return Err(AppError::InvalidArgument {
-            message: format!(
-                "{} is not executable: {}",
-                provider.label,
-                provider.unavailable_reason.unwrap_or_default()
-            ),
-        });
+            probe_codex().await
+        };
+        if !provider.available {
+            return Err(AppError::InvalidArgument {
+                message: format!(
+                    "{} is not executable: {}",
+                    provider.label,
+                    provider.unavailable_reason.unwrap_or_default()
+                ),
+            });
+        }
     }
+    let project = validate_project(&request.project_path, &state.app_data_dir)?;
 
     let catalog = corpus::ensure_corpus(&app, &state).await?;
     let profiles: HashMap<String, String> = request
@@ -1670,6 +1712,7 @@ pub async fn runtime_start(
     let run_id = run.id.clone();
     let app_data = state.app_data_dir.clone();
     let jobs = state.runtime_jobs.clone();
+    let settings = state.settings.clone();
     let task_run_id = run_id.clone();
     let handle = tokio::spawn(async move {
         let mut current = run.clone();
@@ -1704,6 +1747,7 @@ pub async fn runtime_start(
             let mut passed = false;
             let is_qa = current.stages[index].kind == "qa" || stage_id == "qa";
             let is_reality = current.stages[index].kind == "reality" || stage_id == "reality-check";
+            let uses_local_executor = stage_uses_local_executor(&current.stages[index]);
             let max_attempts = if is_qa { 3 } else { 1 };
             while current.stages[index].attempt <= max_attempts {
                 let attempt = current.stages[index].attempt;
@@ -1741,20 +1785,84 @@ pub async fn runtime_start(
                     profiles.get(&current.stages[index].agent_slug),
                     mission.as_ref(),
                 );
-                match run_provider_stage(
-                    &current.provider_id,
-                    &workspace,
-                    &prompt,
-                    &current.id,
-                    &stage_id,
-                    attempt,
-                    &run_evidence_dir(&app_data, &current.id),
-                    &on_event,
-                    is_reality,
-                    criteria_len,
-                )
-                .await
-                {
+                // Stages `local_agent::local_stage_task` covers (currently
+                // `direction`, `architecture`) always run on the sovereign
+                // local executor, regardless of `provider_id` — it is never
+                // consulted for them, and Qwen/local_agent is not added as
+                // a third value `provider_id` could hold. Every other stage
+                // kind keeps today's behavior exactly, except that a
+                // missing `provider_id` now fails that stage explicitly
+                // instead of never having been reachable (see
+                // `runtime_start`, which no longer requires an external
+                // provider up front).
+                let stage_result: Result<bool, AppError> = if uses_local_executor {
+                    local_agent::run_local_agentic_stage(
+                        &app_data,
+                        &workspace,
+                        &current.intent,
+                        &current.id,
+                        &stage_id,
+                        &current.stages[index].kind,
+                        attempt,
+                        mission.as_ref(),
+                        &on_event,
+                        &settings,
+                    )
+                    .await
+                    .map(|result| result.passed)
+                } else {
+                    match current.provider_id.as_deref() {
+                        Some(provider_id) => {
+                            run_provider_stage(
+                                provider_id,
+                                &workspace,
+                                &prompt,
+                                &current.id,
+                                &stage_id,
+                                attempt,
+                                &run_evidence_dir(&app_data, &current.id),
+                                &on_event,
+                                is_reality,
+                                criteria_len,
+                            )
+                            .await
+                        }
+                        None => {
+                            // Named dynamically, not hardcoded to "Dirección
+                            // de proyecto": as more stage kinds gain a
+                            // sovereign local executor (see
+                            // `stage_uses_local_executor`), this message
+                            // must keep crediting whichever of them actually
+                            // passed, not just the first one that ever did.
+                            let completed_locally: Vec<&str> = current.stages[..index]
+                                .iter()
+                                .filter(|s| s.status == "passed" && stage_uses_local_executor(s))
+                                .map(|s| s.label.as_str())
+                                .collect();
+                            let completed_note = if completed_locally.is_empty() {
+                                String::new()
+                            } else {
+                                let verb = if completed_locally.len() > 1 {
+                                    "se completaron"
+                                } else {
+                                    "se completó"
+                                };
+                                format!(
+                                    "{} {verb} con el motor local soberano. ",
+                                    completed_locally.join(" y ")
+                                )
+                            };
+                            Err(AppError::CapabilityProviderUnavailable {
+                                capability_id: format!("stage.{}", current.stages[index].kind),
+                                message: format!(
+                                    "{completed_note}La etapa '{}' requiere un ejecutor externo (Codex o Claude) que no fue configurado para esta corrida; deteniendo de forma controlada.",
+                                    current.stages[index].label
+                                ),
+                            })
+                        }
+                    }
+                };
+                match stage_result {
                     Ok(true) => {
                         if let Err(e) = persist_manifest(
                             &app_data,
@@ -1803,21 +1911,35 @@ pub async fn runtime_start(
                             "The QA gate failed on attempt {attempt}. This is a remediation pass. Inspect the QA evidence and implement every in-scope requirement that is still missing; do not limit the repair to your catalog specialty. Fix the root causes and run the relevant checks.\n\n{}",
                             stage_prompt(&current, development_index, profiles.get(&current.stages[development_index].agent_slug), mission.as_ref())
                         );
-                        if !run_provider_stage(
-                            &current.provider_id,
-                            &workspace,
-                            &fix_prompt,
-                            &current.id,
-                            "development",
-                            current.stages[development_index].attempt,
-                            &run_evidence_dir(&app_data, &current.id),
-                            &on_event,
-                            false, // always the development stage — never reality
-                            criteria_len,
-                        )
-                        .await
-                        .unwrap_or(false)
-                        {
+                        // Practically unreachable with `provider_id: None`
+                        // today: reaching a QA remediation pass means the QA
+                        // stage itself already ran on a `Some` provider (a
+                        // `None` provider fails a non-direction stage before
+                        // it can ever gate), but the type is `Option` now,
+                        // so this still has to handle it defensively rather
+                        // than assume the invariant holds forever.
+                        let remediation_result = match current.provider_id.as_deref() {
+                            Some(provider_id) => {
+                                run_provider_stage(
+                                    provider_id,
+                                    &workspace,
+                                    &fix_prompt,
+                                    &current.id,
+                                    "development",
+                                    current.stages[development_index].attempt,
+                                    &run_evidence_dir(&app_data, &current.id),
+                                    &on_event,
+                                    false, // always the development stage — never reality
+                                    criteria_len,
+                                )
+                                .await
+                            }
+                            None => Err(AppError::CapabilityProviderUnavailable {
+                                capability_id: "stage.development".into(),
+                                message: "No hay proveedor externo configurado para la remediación de Development.".into(),
+                            }),
+                        };
+                        if !remediation_result.unwrap_or(false) {
                             current.error = Some(
                                 "development remediation did not provide INTENTOS_GATE:PASS".into(),
                             );
@@ -2509,7 +2631,7 @@ mod tests {
             stage_kinds: Vec::new(),
             stage_labels: (1..=5).map(|index| format!("Stage {index}")).collect(),
             agent_slugs: (1..=5).map(|index| format!("agent-{index}")).collect(),
-            provider_id: PROVIDER_ID.into(),
+            provider_id: Some(PROVIDER_ID.into()),
             mission_id: None,
         }
     }
@@ -2607,7 +2729,7 @@ mod tests {
             capability_id: "digital-experience".into(),
             capability_ids: vec!["digital-experience".into(), "systems-data".into()],
             mission_id: None,
-            provider_id: PROVIDER_ID.into(),
+            provider_id: Some(PROVIDER_ID.into()),
             status: RunStatus::Running,
             current_stage: None,
             stages,
@@ -2980,7 +3102,7 @@ mod tests {
             capability_id: "digital-experience".into(),
             capability_ids: vec!["digital-experience".into()],
             mission_id: None,
-            provider_id: PROVIDER_ID.into(),
+            provider_id: Some(PROVIDER_ID.into()),
             status: RunStatus::Running,
             current_stage: None,
             stages: initial_stages(&[], &[], &[], &[]),
@@ -3014,7 +3136,7 @@ mod tests {
             capability_id: capability_id.into(),
             capability_ids,
             mission_id: None,
-            provider_id: PROVIDER_ID.into(),
+            provider_id: Some(PROVIDER_ID.into()),
             status: RunStatus::Running,
             current_stage: None,
             stages: initial_stages(&[], &[], &[], &[]),
@@ -3197,7 +3319,7 @@ mod tests {
             capability_id: "iot".into(),
             capability_ids: vec!["iot".into()],
             mission_id: None,
-            provider_id: PROVIDER_ID.into(),
+            provider_id: Some(PROVIDER_ID.into()),
             status: RunStatus::Running,
             current_stage: Some("development".into()),
             stages: initial_stages(&[], &[], &[], &[]),
@@ -3226,7 +3348,7 @@ mod tests {
             capability_id: "iot".into(),
             capability_ids: vec!["iot".into()],
             mission_id: None,
-            provider_id: PROVIDER_ID.into(),
+            provider_id: Some(PROVIDER_ID.into()),
             status: RunStatus::Failed,
             current_stage: Some("development".into()),
             stages: initial_stages(&[], &[], &[], &[]),
@@ -3265,7 +3387,7 @@ mod tests {
             runbook_id: "startup-mvp".into(),
             capability_id: "digital-experience".into(),
             capability_ids: vec!["digital-experience".into()],
-            provider_id: PROVIDER_ID.into(),
+            provider_id: Some(PROVIDER_ID.into()),
             mission_id: None,
             status: RunStatus::Succeeded,
             current_stage: None,
@@ -3292,7 +3414,7 @@ mod tests {
             capability_id: "iot".into(),
             capability_ids: vec!["iot".into()],
             mission_id: None,
-            provider_id: PROVIDER_ID.into(),
+            provider_id: Some(PROVIDER_ID.into()),
             status: RunStatus::Running,
             current_stage: Some("development".into()),
             stages: initial_stages(&[], &[], &[], &[]),
@@ -3322,7 +3444,7 @@ mod tests {
             capability_id: "digital-experience".into(),
             capability_ids: vec!["digital-experience".into()],
             mission_id: None,
-            provider_id: PROVIDER_ID.into(),
+            provider_id: Some(PROVIDER_ID.into()),
             status: RunStatus::Running,
             current_stage: Some("development".into()),
             stages: initial_stages(&[], &[], &[], &[]),
@@ -3368,7 +3490,7 @@ mod tests {
             capability_id: "digital-experience".into(),
             capability_ids: vec!["digital-experience".into()],
             mission_id: Some(mission.id.clone()),
-            provider_id: PROVIDER_ID.into(),
+            provider_id: Some(PROVIDER_ID.into()),
             status: RunStatus::Running,
             current_stage: Some("development".into()),
             stages: initial_stages(&[], &[], &[], &[]),
@@ -3383,5 +3505,134 @@ mod tests {
         let brief_pos = prompt.find("MISSION BRIEF").unwrap();
         let intent_pos = prompt.find("USER INTENT:").unwrap();
         assert!(brief_pos < intent_pos);
+    }
+
+    // ---------- stage_uses_local_executor ----------
+
+    #[test]
+    fn stage_uses_local_executor_is_true_for_direction_kind() {
+        let s = stage("direction", "Dirección de proyecto", "project-manager-senior", "direction");
+        assert!(stage_uses_local_executor(&s));
+    }
+
+    #[test]
+    fn stage_uses_local_executor_is_true_for_the_rust_fallback_direction_stage() {
+        // initial_stages()'s fallback path (used when the frontend doesn't
+        // supply matching-length arrays) ids this stage "project-management"
+        // with kind "direction" — the dual kind-or-id check must still
+        // catch it, same convention as is_qa/is_reality.
+        let s = stage("project-management", "Project Manager", "project-manager-senior", "direction");
+        assert!(stage_uses_local_executor(&s));
+    }
+
+    #[test]
+    fn stage_uses_local_executor_is_true_for_architecture_kind() {
+        let s = stage(
+            "systems-data:architecture",
+            "Arquitectura de sistema",
+            "engineering-software-architect",
+            "architecture",
+        );
+        assert!(stage_uses_local_executor(&s));
+    }
+
+    #[test]
+    fn stage_uses_local_executor_is_true_for_development_kind() {
+        let s = stage(
+            "systems-data:development",
+            "Backend y datos",
+            "engineering-backend-architect",
+            "development",
+        );
+        assert!(stage_uses_local_executor(&s));
+    }
+
+    #[test]
+    fn stage_uses_local_executor_is_false_for_every_other_kind() {
+        for kind in ["qa", "reality"] {
+            let s = stage(kind, kind, "some-agent", kind);
+            assert!(
+                !stage_uses_local_executor(&s),
+                "kind {kind} must not route to the local executor"
+            );
+        }
+    }
+
+    // ---------- provider_id: String -> Option<String> serde compatibility ----------
+    //
+    // Explicit regression coverage per the approved delta: do not assume
+    // Option<String> is a drop-in backward-compatible replacement for
+    // String without a test. Covers every shape a persisted run-state JSON
+    // file could have: the historical plain string, an explicit null (the
+    // new "no external provider" case going forward), and the key missing
+    // entirely (defensive — #[serde(default)] covers it even though no
+    // known historical run predates this field).
+
+    fn minimal_run_json(provider_id_field: &str) -> String {
+        format!(
+            r#"{{
+                "id": "run-1",
+                "intent": "test intent",
+                "projectPath": "/tmp/project",
+                "runbookId": "intent-build",
+                "capabilityId": "digital-experience",
+                {provider_id_field}
+                "status": "succeeded",
+                "currentStage": null,
+                "stages": [],
+                "createdAt": "2026-01-01T00:00:00Z",
+                "updatedAt": "2026-01-01T00:00:00Z",
+                "completedAt": null,
+                "error": null
+            }}"#
+        )
+    }
+
+    #[test]
+    fn provider_id_deserializes_from_a_historical_plain_string_run() {
+        let json = minimal_run_json(r#""providerId": "codexCli","#);
+        let run: RunSummary = serde_json::from_str(&json).expect("historical run JSON must still parse");
+        assert_eq!(run.provider_id, Some("codexCli".to_string()));
+    }
+
+    #[test]
+    fn provider_id_deserializes_from_explicit_null() {
+        let json = minimal_run_json(r#""providerId": null,"#);
+        let run: RunSummary = serde_json::from_str(&json).expect("null providerId must parse");
+        assert_eq!(run.provider_id, None);
+    }
+
+    #[test]
+    fn provider_id_deserializes_when_the_field_is_entirely_absent() {
+        let json = minimal_run_json("");
+        let run: RunSummary = serde_json::from_str(&json).expect("missing providerId must default, not error");
+        assert_eq!(run.provider_id, None);
+    }
+
+    #[test]
+    fn provider_id_round_trips_through_serialize_then_deserialize() {
+        let now = Utc::now();
+        let run = RunSummary {
+            id: "run-2".into(),
+            intent: "test".into(),
+            project_path: "/tmp/project".into(),
+            workspace_path: None,
+            runbook_id: "intent-build".into(),
+            capability_id: "digital-experience".into(),
+            capability_ids: vec![],
+            provider_id: None,
+            mission_id: None,
+            status: RunStatus::Running,
+            current_stage: Some("direction".into()),
+            stages: vec![],
+            created_at: now,
+            updated_at: now,
+            completed_at: None,
+            error: None,
+        };
+        let json = serde_json::to_string(&run).unwrap();
+        assert!(json.contains("\"providerId\":null"));
+        let round_tripped: RunSummary = serde_json::from_str(&json).unwrap();
+        assert_eq!(round_tripped.provider_id, None);
     }
 }

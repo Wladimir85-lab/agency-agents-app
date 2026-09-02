@@ -1,5 +1,85 @@
 # Active Context — Agency Agents
 
+## Sovereign local executor + Groq backend — WORKING, UNCOMMITTED — 2026-09-02
+
+**Honesty note first**: this memory bank was last updated 2026-08-23. Everything below —
+the entire sovereign local executor — was built across multiple sessions on branch
+`feature/mission-v1` since then and was never logged here until now. Read `git log
+feature/mission-v1` and the code itself, not just this file, for the full history; this
+entry only covers what is needed to resume correctly.
+
+**What exists now**: `src-tauri/src/local_agent.rs` (new, untracked) is a sovereign
+model↔tool↔observation loop that runs `direction`/`architecture`/`development` stages
+entirely inside IntentOS, with no external CLI (Codex/Claude) involved — see
+`stage_uses_local_executor()` in `runtime.rs` for the dispatch. It is governed by a
+deterministic **Stage Contract** (`validate_stage_contract`, `StageContract`) and a
+causality-safe protocol parser (`resolve_turn_directive`) that resolves
+`INTENTOS_ACTION:`/`INTENTOS_GATE:PASS|FAIL` sentinels by whichever marker appears
+*first* in the raw completion text — not by which one happens to parse, and not by
+trusting the model's own claims about what it did. Tools are `read_file`/`write_file`
+only, path-contained to the run workspace. Per-turn prompts are rebuilt fresh every turn
+via `WorkingContext`/`render_working_context` (bounded observed-reads budget:
+`MAX_OBSERVED_READS_BUDGET_CHARS`), not accumulated, to avoid unbounded context growth.
+Frozen budgets: `MAX_ITERATIONS = 6`, `MAX_STAGE_SECONDS = 240`, `MAX_TURN_TOKENS = 420`
+— do not raise these without a live-evidence-backed reason.
+
+**2026-09-02 delta — inference transport decoupled (Groq added as a second, non-sovereign
+backend)**: `local_model.rs`'s `complete_raw` now dispatches on `InferenceBackend`
+(`Loopback` — llama-server/Qwen, unchanged, still what `sovereign_ready` describes — or
+`Groq`, selected by `INTENTOS_INFERENCE_BACKEND=groq`). Groq is deliberately never
+"sovereign": fixed HTTPS endpoint (`https://api.groq.com/openai/v1/chat/completions`, not
+configurable, so no local-looking env var can redirect traffic to the internet), gated on
+every call by `crate::state::network_allowed` (paranoid mode blocks it exactly like every
+other outbound feature), API key (`INTENTOS_GROQ_API_KEY`) read only into the
+`Authorization` header, never logged/serialized. `GroqBackendStatus.configured` is a
+static check only — `reachable`/`model_available` stay `None` until an actual call
+succeeds, never assumed. `LocalCompletion.backend` added (`"loopback"`/`"groq"`); `local`
+keeps its original meaning (`false` for Groq). 401/403/429 are classified distinctly,
+429 surfaces `Retry-After`. Model: `openai/gpt-oss-120b` (`GROQ_DEFAULT_MODEL`).
+
+**Live-verified via the real UI (CDP, `providerId: null`), not simulated**: with
+`reasoning_effort: "low"` in the Groq request body (see below for why), a real intent's
+**Direction stage passed cleanly in 2 turns** — one `write_file`, one real
+`INTENTOS_GATE:PASS`, no hallucination, no repeated actions. This is the first live
+completion of this loop's Direction stage that did not get stuck. Architecture started
+but hit a real Groq 429 (free-tier `on_demand` rate limit: **8000 tokens/minute** for
+`openai/gpt-oss-120b`) partway through its own turns.
+
+**`reasoning_effort` history** (Groq/gpt-oss-family-specific request field, not part of
+base OpenAI chat-completions, not sent on the loopback path): started at `"high"` on
+request, measurably discarded — 1 of 5 trivial-prompt calls spent the entire
+`MAX_TURN_TOKENS` budget on internal reasoning with zero visible output (a markerless
+turn — its own stuck-turn failure mode). Lowered to `"medium"` (5/5 reliable, faster), then
+to `"low"` after a live vertical run at `"medium"` hit the same 8000 TPM cap after only 6
+Direction turns — every reasoning token spent counts against that per-minute budget.
+Currently `"low"`.
+
+**Known limitation, not a code bug**: the free Groq tier's 8000 TPM ceiling is too tight
+for a full 3-stage vertical (Direction+Architecture+Development) in one run, even at the
+cheapest `reasoning_effort` setting — confirmed by exhausting the cheapest lever available
+before concluding this. Fixing it requires paying for Groq's Dev Tier; nothing left to
+tune in the prompt/parameters. Left unpaid/unresolved deliberately per explicit instruction
+("la idea es no gastar dinero").
+
+**Also still open, not part of today's delta**: the loopback/Qwen path has a known,
+unresolved failure mode (Direction repeating an identical `write_file` up to
+`MAX_ITERATIONS` times without ever reaching PASS) that a redundant-write-detection guard
+was designed for but never implemented — see `agentLog.md` 2026-09-02 for the design
+sketch, still pending approval.
+
+**Evidence gap worth knowing about**: `run_local_agentic_stage`'s turn-by-turn transcript
+(`<stage>-<attempt>.stdout.log`) is only written via `atomic_write` on the loop's normal
+exit path. A hard error mid-loop (e.g. this 429, or the earlier local context-overflow 400)
+returns early and that file is never written — only the manifests exist. This predates
+today's Groq work and would affect loopback the same way; not fixed here.
+
+**Files touched today**: `src-tauri/src/local_model.rs` (Groq backend + tests),
+`src-tauri/src/local_agent.rs` (threaded a `settings` handle through to `complete_raw` for
+the paranoid-mode gate), `src-tauri/src/runtime.rs` (clones `state.settings` into the
+spawned run task), `src-tauri/src/state.rs` (extracted `network_allowed` as a shared,
+non-`AppState`-bound helper). Baselines after this delta: Rust 422 passed / 0 failed / 13
+ignored, Svelte/TS 0 errors / 0 warnings.
+
 ## IntentOS Runtime v0.1 — CLOSED — 2026-08-23
 
 Branch `intentos/runtime-v0.1` holds the experimental runtime extension; it remains
