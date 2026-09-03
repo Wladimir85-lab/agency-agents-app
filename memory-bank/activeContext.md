@@ -1,6 +1,36 @@
 # Active Context — Agency Agents
 
-## Sovereign local executor + Groq backend — WORKING, UNCOMMITTED — 2026-09-02
+## Ollama backend + evidence-driven guards — Direction reliable, Architecture blocked — 2026-09-03
+
+**Read this before the Groq section below** — it's the same session, continued, and
+supersedes that section's "what's left" framing in one important way: **Direction now
+passes reliably with a free, fully local model** (`qwen2.5-coder:3b` via Ollama), 5/5 live
+runs. This was not true when the Groq section below was written.
+
+**What changed**: two deterministic guards added to `local_agent.rs`'s turn loop —
+(1) exact-duplicate-write detection (`is_redundant_write`), and (2) a broader
+contract-satisfied circuit breaker: once `validate_stage_contract` reports nothing missing
+for two consecutive turns (write or redundant read alike), IntentOS concludes the stage on
+its **own** contract verification instead of waiting for the model to say
+`INTENTOS_GATE:PASS` — see `CONTRACT_SATISFIED_AUTO_CONCLUDE_THRESHOLD`. Always logged
+visibly in the transcript, never silent, never a relaxation of what the contract requires.
+Also added `InferenceBackend::Ollama` in `local_model.rs` (`INTENTOS_INFERENCE_BACKEND=ollama`,
+no network gate — same trust category as loopback).
+
+**What's still broken, honestly**: Architecture (the next stage — read a prior artifact,
+then write a new one) does **not** complete. Live evidence: the model repeats the identical
+`read_file` action 6/6 times even when the observation explicitly names every missing
+contract item verbatim. This is not a wording problem — the message is already maximally
+specific. The model gets anchored on its first action in a multi-step stage and doesn't
+pivot. Untried remaining options: a bigger local model, or redesigning Architecture's
+step sequence. Stopped here deliberately, not stalled — see `agentLog.md` 2026-09-03 and
+`decisions.md`'s new ADR for full detail, including a real infra finding (this machine runs
+low on free RAM — 1.2 GiB free of 7.8 GiB — which caused two transient Ollama connection
+failures at the Direction→Architecture transition; `OLLAMA_KEEP_ALIVE=30m` fixed it).
+
+Rust 431/0/13, Svelte/TS 0/0/0. Committed this session per explicit instruction.
+
+## Sovereign local executor + Groq backend — 2026-09-02
 
 **Honesty note first**: this memory bank was last updated 2026-08-23. Everything below —
 the entire sovereign local executor — was built across multiple sessions on branch

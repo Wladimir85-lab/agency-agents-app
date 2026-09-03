@@ -338,3 +338,60 @@ the cheapest available reasoning_effort lever was already exhausted before concl
 this. Left unresolved without paying for Groq's Dev Tier, per explicit instruction not to
 spend money. Rust 422/0/13, Svelte/TS 0/0/0 after this delta - see git log on
 `feature/mission-v1` for the exact commit.
+
+### 2026-09-03: Deterministic guards over prompt tuning, for the loopback/Qwen "never PASSes" bug
+
+**Status**: Implemented, live-verified. Direction fixed; Architecture not fixed (documented
+honestly as unresolved, not glossed over).
+
+**Context**: `local_agent.rs`'s original loopback path (Qwen2.5-Coder-1.5B) had a
+never-fixed bug from an earlier session: Direction would repeat an identical `write_file`
+up to `MAX_ITERATIONS` times and never emit `INTENTOS_GATE:PASS`, even though the Stage
+Contract was satisfiable after the very first write. A redundant-write-guard design existed
+from that earlier session but was never implemented. Separately, an external suggestion
+(not this session's own judgment - flagged and corrected at the time) proposed trusting an
+unverified claim that a bigger model (Qwen 3B) would "understand" when to stop, without
+evidence. Both threads converged into this delta: build the deterministic fix first,
+verify with real evidence whether a bigger model changes anything, and let evidence (not
+promises) decide what to do next.
+
+**Decision**: Implemented two guards, escalating in scope, each validated against real live
+runs before moving to the next:
+1. `is_redundant_write` - exact byte-for-byte duplicate write to the same path is detected
+   from `last_write_by_path: HashMap<String, String>` and never re-executed.
+2. A broader guard keyed on `validate_stage_contract`'s own `missing` list (already computed
+   fresh every turn, already the sole authority for accepting a model-claimed PASS): once
+   `missing` is empty for `CONTRACT_SATISFIED_AUTO_CONCLUDE_THRESHOLD` (2) consecutive turns
+   - via a write attempt *or* a redundant read attempt - IntentOS concludes the stage on its
+   own verification, logged visibly in the transcript. This is not "auto-approving without
+   checking": the contract check is unchanged and still runs in full; only the requirement
+   that the *model* be the one to say PASS is relaxed, once IntentOS's own independent
+   verification already agrees twice in a row.
+   Also added `InferenceBackend::Ollama` (`local_model.rs`) to test the same guards against
+   a bigger local model (`qwen2.5-coder:3b`), no network gate (fully local, same trust
+   category as loopback), kept as its own backend rather than folded into the loopback
+   path's endpoint override (loopback's readiness logic assumes an IntentOS-managed `.gguf`
+   file; Ollama manages its own models).
+
+**Alternatives rejected**: trusting the unverified "bigger model fixes it" claim without
+testing - tested instead, and evidence showed the *guard* mattered far more than model size
+(1.5B and 3B both needed the same fix; neither self-corrected without it). Extending the
+auto-conclude circuit breaker to *every* stuck pattern generically (e.g. any repeated
+action) - deliberately scoped to only fire when the Stage Contract is genuinely satisfied,
+never as a general "give up and pass anyway" fallback, since that would be a real
+relaxation of the contract instead of a narrow trust extension. Rewording the
+redundant-read observation to be maximally explicit (tried, live-verified) as a fix for
+Architecture's stuck-on-read pattern - it changed nothing; the model still repeated the
+identical read 6/6 times even against an itemized, unambiguous instruction, which is
+evidence the anchoring is not a wording problem and further prompt tuning was not pursued
+past this point.
+
+**Consequences**: Direction is now reliably solved with a free, fully local, no-rate-limit
+model - 5 consecutive live runs, zero failures, first time in this engagement. Architecture
+remains genuinely unsolved; stopping there was a deliberate, evidence-backed decision
+("paremos aquí por hoy"), not a stall - the two untried options (a bigger model past 3B, or
+redesigning Architecture's read-then-write step sequence) are named, not hidden. A real
+infrastructure finding surfaced along the way: this machine's low free RAM (1.2 GiB of
+7.8 GiB) caused two transient Ollama connection failures at the Direction→Architecture
+transition, fixed for this session via `OLLAMA_KEEP_ALIVE=30m` (relaunching `ollama serve`
+directly). Rust 431/0/13, Svelte/TS 0/0/0.

@@ -833,3 +833,63 @@ Rust 422 passed / 0 failed / 13 ignored (up from the 416/0/13 baseline verified 
 start). Svelte/TS 0 errors / 0 warnings, unchanged (no frontend files touched this session).
 Files touched: `local_model.rs`, `local_agent.rs`, `runtime.rs`, `state.rs`. `knowledge-base/`
 untouched throughout, per explicit instruction.
+
+## 2026-09-03 — Ollama backend + two evidence-driven guards; Direction now passes reliably with a free local model; Architecture hits a real wall
+
+Continuation of the same session (see the entry above). Full detail in `activeContext.md`
+(top section, rewritten) and `decisions.md` (new ADR). Summary of what changed and why, all
+of it live-verified through the real UI via CDP, `providerId: null`:
+
+**Third inference backend: Ollama.** `local_model.rs` gained `InferenceBackend::Ollama`
+(`INTENTOS_INFERENCE_BACKEND=ollama`), talking to a local `qwen2.5-coder:3b` pulled via
+Ollama on `http://localhost:11434/v1/chat/completions`. No `network_allowed` gate (same
+trust category as loopback — never leaves the machine), no separate readiness probe (the
+completion call itself is the proof, same reasoning as Groq's status design). Kept as its
+own backend rather than an `INTENTOS_LOCAL_MODEL_ENDPOINT` override because the loopback
+path's readiness logic assumes IntentOS itself downloaded and manages the `.gguf` file —
+Ollama manages its own models independently.
+
+**Two new deterministic guards in `local_agent.rs`, both designed after the loopback/Qwen
+1.5B path's original "repeats write_file six times, never PASSes" bug** (documented, never
+fixed, in an earlier session):
+1. `is_redundant_write`/`render_redundant_write_observation` — byte-exact duplicate write
+   to the same path is detected and never re-executed; the model gets a real observation
+   instead. Live-verified against 1.5B: correctly caught 5 consecutive identical repeats,
+   but the model still never said PASS even so — the guard worked, the model didn't.
+2. A broader guard: once `validate_stage_contract`'s `missing` is empty for the *current*
+   turn, **any** further write (identical or reworded) is blocked and, after 2 consecutive
+   such turns (`CONTRACT_SATISFIED_AUTO_CONCLUDE_THRESHOLD`), IntentOS concludes the stage
+   itself, on its own contract verification, without waiting for the model to say PASS —
+   visibly logged in the transcript, never silent, never a relaxation of the contract
+   itself (only of the requirement that the model be the one to confirm it). Same
+   mechanism extended to redundant *reads* (`executed_reads.contains(path)`) after a live
+   run showed Architecture re-reading `direction-plan.md` six times instead of ever
+   writing `architecture-plan.md`.
+
+**Result: Direction now passes reliably** — 5 consecutive live runs, `INTENTOS_GATE:PASS`
+or the auto-conclude circuit breaker, every single time, with a completely free, fully
+local, no-rate-limit model. This is the first time in this entire engagement Direction has
+been reliably solved without Codex/Claude/Groq.
+
+**Architecture still does not complete.** Even after the redundant-read guard and a version
+of the observation that names the exact missing contract items verbatim (not a generic
+"continue"), the model repeated the identical `read_file` action 6/6 times across a live
+run, ignoring fully explicit, itemized instructions every turn. This is not a message-clarity
+problem — the wording was as concrete as it can get. Conclusion, not a guess: this specific
+model gets anchored on its first action in a multi-step stage and does not pivot regardless
+of feedback. A bigger model or a redesigned stage sequence are the remaining untried levers;
+neither was attempted this session, and stopping here was an explicit, deliberate decision,
+not a stall.
+
+**Infrastructure finding, not a code bug**: two live runs hit a "network error fetching
+http://localhost:11434/v1/chat/completions" at the Direction→Architecture transition,
+traced to this machine running very low on free RAM (1.2 GiB free of 7.8 GiB total per
+Ollama's own log) while a 2.2 GB model needs to stay resident. Setting
+`OLLAMA_KEEP_ALIVE=30m` (relaunching `ollama serve` directly instead of via the tray app)
+resolved it for subsequent runs, but the underlying memory pressure is real and worth
+knowing about for future sessions on this machine.
+
+Rust 431 passed / 0 failed / 13 ignored (up from 422/0/13 earlier this same session).
+Svelte/TS 0 errors / 0 warnings, unchanged. Files touched: `local_model.rs`, `local_agent.rs`
+only this pass. Stopped here deliberately per explicit instruction ("paremos aquí por hoy")
+rather than continuing to a bigger model or a stage redesign.

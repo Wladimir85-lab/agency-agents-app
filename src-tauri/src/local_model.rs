@@ -61,14 +61,35 @@ const GROQ_ENDPOINT: &str = "https://api.groq.com/openai/v1/chat/completions";
 enum InferenceBackend {
     Loopback,
     Groq,
+    Ollama,
 }
 
 fn configured_backend() -> InferenceBackend {
     match env::var(BACKEND_ENV) {
         Ok(value) if value.eq_ignore_ascii_case("groq") => InferenceBackend::Groq,
+        Ok(value) if value.eq_ignore_ascii_case("ollama") => InferenceBackend::Ollama,
         _ => InferenceBackend::Loopback,
     }
 }
+
+// ---------- Ollama backend (opt-in, local, no network gate) ----------
+//
+// Unlike Groq, Ollama never leaves the machine — same trust category as
+// the loopback llama-server path, so no `network_allowed` consultation
+// here. It is kept as its own backend (not folded into the loopback
+// path's `INTENTOS_LOCAL_MODEL_ENDPOINT` override) because the loopback
+// path's readiness/model-resolution logic assumes IntentOS itself
+// downloaded and manages a specific `.gguf` file (`discover_model`,
+// `managed_model`, `status_at`'s `model_path`) — none of that applies to
+// Ollama, which manages its own models independently. Verified live
+// against a real `qwen2.5-coder:3b` pull: correctly recovers from a
+// redundant-write observation with INTENTOS_GATE:PASS (4/4 trials) where
+// the loopback path's Qwen2.5-Coder-1.5B never did, even with the
+// redundant-write guard in place — see agentLog.md 2026-09-02.
+const OLLAMA_MODEL_ENV: &str = "INTENTOS_OLLAMA_MODEL";
+const OLLAMA_ENDPOINT_ENV: &str = "INTENTOS_OLLAMA_ENDPOINT";
+const OLLAMA_DEFAULT_MODEL: &str = "qwen2.5-coder:3b";
+const OLLAMA_DEFAULT_ENDPOINT: &str = "http://localhost:11434/v1/chat/completions";
 
 /// Static readiness only — never the result of a network probe. Unlike
 /// loopback (which has a cheap, local `/health` endpoint worth polling),
@@ -539,7 +560,68 @@ pub(crate) async fn complete_raw(
     match configured_backend() {
         InferenceBackend::Loopback => complete_raw_loopback(app_data_dir, prompt, max_tokens).await,
         InferenceBackend::Groq => complete_raw_groq(prompt, max_tokens, settings).await,
+        InferenceBackend::Ollama => complete_raw_ollama(prompt, max_tokens).await,
     }
+}
+
+/// No `network_allowed` gate: Ollama is local, same trust category as
+/// `complete_raw_loopback`. No readiness probe either — same reasoning as
+/// Groq's `GroqBackendStatus`: the completion call itself is the only
+/// honest proof of reachability, so a failed connection surfaces as a
+/// plain `reqwest` error via `?` rather than a separately-maintained
+/// status that could drift from reality.
+async fn complete_raw_ollama(prompt: &str, max_tokens: Option<u32>) -> Result<LocalCompletion, AppError> {
+    let endpoint = env::var(OLLAMA_ENDPOINT_ENV).unwrap_or_else(|_| OLLAMA_DEFAULT_ENDPOINT.into());
+    let model_name = env::var(OLLAMA_MODEL_ENV).unwrap_or_else(|_| OLLAMA_DEFAULT_MODEL.into());
+    let body = serde_json::json!({
+        "model": model_name,
+        "messages": [
+            {"role": "system", "content": "Eres el motor de inferencia de IntentOS. Entrega resultados concisos, técnicos y verificables."},
+            {"role": "user", "content": prompt}
+        ],
+        "temperature": 0.1,
+        "max_tokens": max_tokens.unwrap_or(256).clamp(1, 1024),
+        "stream": false
+    });
+    let started = Instant::now();
+    let response = reqwest::Client::builder()
+        .timeout(Duration::from_secs(120))
+        .build()?
+        .post(&endpoint)
+        .json(&body)
+        .send()
+        .await?;
+    let response_status = response.status();
+    if !response_status.is_success() {
+        let body_text = response
+            .text()
+            .await
+            .unwrap_or_else(|e| format!("<no se pudo leer el cuerpo de la respuesta: {e}>"));
+        return Err(AppError::Internal {
+            message: format!(
+                "HTTP {} de Ollama en POST {endpoint} (prompt ~{} bytes enviados): {}",
+                response_status.as_u16(),
+                prompt.len(),
+                body_text
+            ),
+        });
+    }
+    let response = response.json::<ChatResponse>().await?;
+    let content = response
+        .choices
+        .into_iter()
+        .next()
+        .map(|choice| choice.message.content)
+        .ok_or_else(|| AppError::Internal {
+            message: "Ollama respondió sin una opción de resultado".into(),
+        })?;
+    Ok(LocalCompletion {
+        content,
+        model: response.model.unwrap_or(model_name),
+        latency_ms: started.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
+        local: true,
+        backend: "ollama",
+    })
 }
 
 async fn complete_raw_loopback(
@@ -944,6 +1026,102 @@ mod tests {
         assert_eq!(completion.content, "hola");
         assert_eq!(completion.backend, "loopback");
         assert!(completion.local, "loopback completions must keep local == true");
+    }
+
+    // ---------- Ollama backend ----------
+
+    fn clear_ollama_env() {
+        // SAFETY: guarded by ENV_LOCK in every caller.
+        unsafe {
+            env::remove_var(BACKEND_ENV);
+            env::remove_var(OLLAMA_ENDPOINT_ENV);
+            env::remove_var(OLLAMA_MODEL_ENV);
+        }
+    }
+
+    #[tokio::test]
+    async fn complete_raw_ollama_success_marks_backend_and_stays_local() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_ollama_env();
+        let (addr, server) = spawn_fake_llama_server(
+            "200 OK",
+            "{\"model\":\"qwen2.5-coder:3b\",\"choices\":[{\"message\":{\"content\":\"INTENTOS_GATE:PASS\"}}]}",
+        )
+        .await;
+        // SAFETY: guarded by ENV_LOCK.
+        unsafe {
+            env::set_var(BACKEND_ENV, "ollama");
+            env::set_var(OLLAMA_ENDPOINT_ENV, format!("http://{addr}"));
+        }
+
+        let result = complete_raw(Path::new("unused"), "hola", Some(10), &settings_arc(false)).await;
+
+        clear_ollama_env();
+        server.abort();
+
+        let completion = result.expect("a 2xx response must succeed");
+        assert_eq!(completion.content, "INTENTOS_GATE:PASS");
+        assert_eq!(completion.backend, "ollama");
+        assert!(completion.local, "Ollama runs locally — local must stay true, unlike Groq");
+    }
+
+    #[tokio::test]
+    async fn complete_raw_ollama_never_consults_network_allowed() {
+        // No `settings_arc` gate check here on purpose: paranoid mode ON
+        // must NOT block Ollama, since it's local — proven by succeeding
+        // with a paranoid-mode-ON settings handle, unlike the Groq
+        // equivalent test which expects a block.
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_ollama_env();
+        let (addr, server) = spawn_fake_llama_server(
+            "200 OK",
+            "{\"model\":\"qwen2.5-coder:3b\",\"choices\":[{\"message\":{\"content\":\"hola\"}}]}",
+        )
+        .await;
+        // SAFETY: guarded by ENV_LOCK.
+        unsafe {
+            env::set_var(BACKEND_ENV, "ollama");
+            env::set_var(OLLAMA_ENDPOINT_ENV, format!("http://{addr}"));
+        }
+
+        let result = complete_raw(Path::new("unused"), "hola", Some(10), &settings_arc(true)).await;
+
+        clear_ollama_env();
+        server.abort();
+
+        assert!(
+            result.is_ok(),
+            "paranoid mode must never block the local Ollama backend: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn complete_raw_ollama_preserves_http_status_and_body_on_a_non_success_response() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_ollama_env();
+        let (addr, server) = spawn_fake_llama_server(
+            "500 Internal Server Error",
+            "{\"error\":\"model not found: qwen2.5-coder:3b\"}",
+        )
+        .await;
+        // SAFETY: guarded by ENV_LOCK.
+        unsafe {
+            env::set_var(BACKEND_ENV, "ollama");
+            env::set_var(OLLAMA_ENDPOINT_ENV, format!("http://{addr}"));
+        }
+
+        let result = complete_raw(Path::new("unused"), "hola", Some(10), &settings_arc(false)).await;
+
+        clear_ollama_env();
+        server.abort();
+
+        let err = result.expect_err("a non-2xx response must surface as Err");
+        let message = err.to_string();
+        assert!(message.contains("500"), "status not preserved: {message}");
+        assert!(
+            message.contains("model not found"),
+            "response body not preserved: {message}"
+        );
     }
 
     // ---------- Groq backend ----------

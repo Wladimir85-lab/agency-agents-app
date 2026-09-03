@@ -28,7 +28,7 @@
 //! three executors alike).
 
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     path::{Component, Path, PathBuf},
     sync::Arc,
     time::{Duration, Instant},
@@ -59,6 +59,20 @@ const MAX_STAGE_SECONDS: u64 = 240;
 /// CPU on this class of machine (measured); keeping turns short keeps the
 /// whole loop's wall-clock cost predictable.
 const MAX_TURN_TOKENS: u32 = 420;
+/// How many consecutive turns the Stage Contract can verify as already
+/// satisfied (via `render_contract_satisfied_write_observation`'s guard)
+/// before IntentOS concludes the stage on its own verification, without
+/// waiting for the model to say `INTENTOS_GATE:PASS`. The contract check
+/// (`validate_stage_contract`) is already the sole authority for whether
+/// a model-claimed PASS is *accepted* — this only extends that same
+/// authority to also *conclude* the stage when the model never claims it
+/// at all. Set to 2, not 1, so the model gets a second real chance to
+/// self-correct before IntentOS steps in. Evidence for why this exists:
+/// two separate live vertical runs (Qwen2.5-Coder-1.5B loopback and
+/// qwen2.5-coder:3b via Ollama) both reached a contract-satisfied state
+/// and then exhausted every remaining turn up to MAX_ITERATIONS without
+/// once emitting a standalone PASS — see agentLog.md 2026-09-02/03.
+const CONTRACT_SATISFIED_AUTO_CONCLUDE_THRESHOLD: usize = 2;
 /// Cap on a `read_file` result, mirroring the read caps used elsewhere in
 /// the codebase (e.g. `MAX_RUN_FILE_BYTES` in runtime.rs) sized down for a
 /// small-context local model rather than a 2MB run-state file.
@@ -534,6 +548,47 @@ fn record_observed_read(reads: &mut Vec<(String, String)>, path: String, content
     }
 }
 
+/// True when `content` is byte-identical to the last content this loop
+/// actually wrote to `path` — the redundant-write guard's sole decision
+/// point. Keyed per path (not "the single last write overall"), so
+/// writing A, then B, then A again with the same content as before is
+/// still caught, while A then a *different* B is never a false positive.
+/// Deliberately a plain string comparison, not a hash/signature: turn
+/// content is already bounded by MAX_TURN_TOKENS, so there is no real
+/// cost to keeping the literal text, and a direct comparison is strictly
+/// easier to reason about and test than an added hashing layer.
+fn is_redundant_write(last_write_by_path: &HashMap<String, String>, path: &str, content: &str) -> bool {
+    last_write_by_path.get(path).map(String::as_str) == Some(content)
+}
+
+/// Deterministic, code-generated observation for a caught redundant
+/// write — never a re-execution of the write, never an auto-PASS. It
+/// only states the fact (nothing changed) and leaves the *next* action
+/// to be governed by the real Stage Contract status, which
+/// `render_working_context`'s protocol-control section already renders
+/// fresh every turn from the actual workspace/executed-reads state, not
+/// from this observation.
+fn render_redundant_write_observation(path: &str) -> String {
+    format!(
+        "OBSERVACIÓN: '{path}' ya tiene exactamente este contenido — esta escritura no cambió nada en el workspace. Repetir la misma escritura no hace avanzar la etapa; revisa el estado del contrato más abajo."
+    )
+}
+
+/// Deterministic observation for a write attempted while the Stage
+/// Contract is *already* satisfied — broader than
+/// `render_redundant_write_observation`: it does not matter whether this
+/// particular write's content differs from the last one, because the
+/// contract's own verdict (computed the same way `INTENTOS_GATE:PASS` is
+/// checked) already does not depend on it. Same non-negotiables as the
+/// redundant-write guard: never a re-execution, never an auto-PASS —
+/// this only states the fact and points at the contract status already
+/// rendered below.
+fn render_contract_satisfied_write_observation(path: &str) -> String {
+    format!(
+        "OBSERVACIÓN: el contrato de esta etapa ya está cumplido — escribir de nuevo en '{path}' (con el mismo contenido o con una redacción distinta) no es necesario y no cambia el resultado. Revisa el estado del contrato más abajo."
+    )
+}
+
 /// Renders the `observed_reads` section within `budget` characters —
 /// budget is the *reducible* part of the working context (see
 /// `render_working_context`): instructions, contract status, and the last
@@ -713,6 +768,19 @@ pub async fn run_local_agentic_stage(
     // re-parsing the model's (possibly hallucinated) raw completion.
     // Replaced, never appended, preserving causality without accumulation.
     let mut last_observation: Option<String> = None;
+    // Real content of the last successful write to each path — the
+    // redundant-write guard's own record, keyed the same way
+    // observed_reads/executed_reads are: only ever updated from a real,
+    // successful apply_write_file, never from the model's own claims.
+    let mut last_write_by_path: HashMap<String, String> = HashMap::new();
+    // Counts consecutive turns where the contract was already satisfied
+    // and the model attempted a write or a redundant read anyway instead
+    // of PASS — see CONTRACT_SATISFIED_AUTO_CONCLUDE_THRESHOLD. Monotonic
+    // within a run: once the contract is satisfied it cannot become
+    // unsatisfied again (every write while satisfied is blocked before
+    // touching disk by the very guard that increments this), so no reset
+    // case exists.
+    let mut consecutive_satisfied_actions_without_pass: usize = 0;
     let mut iterations = 0usize;
     let passed: bool;
 
@@ -828,10 +896,60 @@ pub async fn run_local_agentic_stage(
                 emit(channel, run_id, stage_id, "system", note.clone());
                 last_observation = Some(note);
             }
+            TurnDirective::Action(LocalAction::WriteFile { path, .. }) if missing.is_empty() => {
+                // Broader than is_redundant_write: `missing` (computed
+                // fresh above, for this same turn) is the Stage Contract's
+                // own verdict, not a text comparison. Once it is already
+                // satisfied, no further write — identical or merely
+                // reworded — can change that verdict, so there is nothing
+                // left for a write to accomplish. This is what actually
+                // catches the oscillating-near-duplicate pattern observed
+                // live (turn 2/3/5 rewording the same sentence back and
+                // forth), which byte-for-byte `is_redundant_write` alone
+                // does not, since each variant's exact text differs from
+                // the one immediately before it.
+                let obs = render_contract_satisfied_write_observation(&path);
+                transcript.push_str(&format!("\n{obs}\n"));
+                emit(channel, run_id, stage_id, "system", obs.clone());
+                last_observation = Some(obs);
+                consecutive_satisfied_actions_without_pass += 1;
+                if consecutive_satisfied_actions_without_pass
+                    >= CONTRACT_SATISFIED_AUTO_CONCLUDE_THRESHOLD
+                {
+                    // IntentOS's own verification, not the model's claim,
+                    // concludes the stage here — visible in the evidence,
+                    // never silent. `missing` (computed fresh this same
+                    // iteration, above) is genuinely empty; this is not a
+                    // relaxation of the contract, only of the requirement
+                    // that the model be the one to say so.
+                    let note = format!(
+                        "[local-agent] el contrato lleva {consecutive_satisfied_actions_without_pass} turnos consecutivos verificado como cumplido sin que el modelo respondiera INTENTOS_GATE:PASS. IntentOS concluye la etapa por su propia verificación del contrato."
+                    );
+                    transcript.push_str(&format!("\n{note}\n"));
+                    emit(channel, run_id, stage_id, "system", note);
+                    passed = true;
+                    break;
+                }
+            }
+            TurnDirective::Action(LocalAction::WriteFile { path, content })
+                if is_redundant_write(&last_write_by_path, &path, &content) =>
+            {
+                // Caught before touching the filesystem: no re-execution,
+                // no auto-PASS (missing/passed are untouched here — the
+                // Gate branch is the only place that ever sets `passed`).
+                // Just a real, deterministic observation, same shape as
+                // every other branch, so the model's next turn is driven
+                // by the actual (still-fresh-rendered) contract status.
+                let obs = render_redundant_write_observation(&path);
+                transcript.push_str(&format!("\n{obs}\n"));
+                emit(channel, run_id, stage_id, "system", obs.clone());
+                last_observation = Some(obs);
+            }
             TurnDirective::Action(LocalAction::WriteFile { path, content }) => {
                 match apply_write_file(workspace, &path, &content).await {
                     Ok(bytes) => {
                         wrote_file = true;
+                        last_write_by_path.insert(path.clone(), content);
                         let obs = format!("OBSERVACIÓN: se escribió '{path}' ({bytes} bytes).");
                         transcript.push_str(&format!("\n{obs}\n"));
                         emit(channel, run_id, stage_id, "system", obs.clone());
@@ -842,6 +960,62 @@ pub async fn run_local_agentic_stage(
                         transcript.push_str(&format!("\n{obs}\n"));
                         emit(channel, run_id, stage_id, "system", obs.clone());
                         last_observation = Some(obs);
+                    }
+                }
+            }
+            TurnDirective::Action(LocalAction::ReadFile { path })
+                if executed_reads.contains(&path) =>
+            {
+                // Same guard philosophy as the write side, mirrored for
+                // reads: nothing in this stage's tool set can change a
+                // path's content except write_file, and this loop only
+                // ever writes to the stage's own artifact — never to a
+                // prior-stage artifact it reads (direction-plan.md,
+                // architecture-plan.md). So a path already in
+                // `executed_reads` is guaranteed to yield identical
+                // content on a re-read; skip the redundant I/O and tell
+                // the model plainly that it already has this, instead of
+                // silently re-executing and burning a turn with no new
+                // information — exactly the live-observed pattern where
+                // Architecture re-read direction-plan.md six times in a
+                // row and never reached its own write_file at all.
+                // The generic "continúa con el paso pendiente" version of
+                // this message (no longer used) was live-verified to not
+                // be concrete enough: the model kept re-reading anyway
+                // instead of pivoting to the next real action. `missing`
+                // (computed fresh this same turn, above) already names
+                // exactly what remains — reusing it here, inline in the
+                // observation itself, instead of only in the "ESTADO DEL
+                // CONTRATO" section further down the same prompt.
+                let obs = if missing.is_empty() {
+                    format!(
+                        "OBSERVACIÓN: ya leíste '{path}' — su contenido sigue disponible abajo en ARCHIVOS YA LEÍDOS, releerlo no aporta nada nuevo. El contrato ya está cumplido; responde INTENTOS_GATE:PASS."
+                    )
+                } else {
+                    format!(
+                        "OBSERVACIÓN: ya leíste '{path}' — su contenido sigue disponible abajo en ARCHIVOS YA LEÍDOS, releerlo no aporta nada nuevo. Lo que falta de verdad es:\n- {}\nHaz eso ahora, no releas.",
+                        missing.join("\n- ")
+                    )
+                };
+                transcript.push_str(&format!("\n{obs}\n"));
+                emit(channel, run_id, stage_id, "system", obs.clone());
+                last_observation = Some(obs);
+                if missing.is_empty() {
+                    // Same auto-conclude circuit breaker as the write
+                    // side, reached via a different action this time —
+                    // the contract being satisfied is what matters, not
+                    // which tool the model happened to retry.
+                    consecutive_satisfied_actions_without_pass += 1;
+                    if consecutive_satisfied_actions_without_pass
+                        >= CONTRACT_SATISFIED_AUTO_CONCLUDE_THRESHOLD
+                    {
+                        let note = format!(
+                            "[local-agent] el contrato lleva {consecutive_satisfied_actions_without_pass} turnos consecutivos verificado como cumplido sin que el modelo respondiera INTENTOS_GATE:PASS. IntentOS concluye la etapa por su propia verificación del contrato."
+                        );
+                        transcript.push_str(&format!("\n{note}\n"));
+                        emit(channel, run_id, stage_id, "system", note);
+                        passed = true;
+                        break;
                     }
                 }
             }
@@ -1183,6 +1357,57 @@ mod tests {
         record_observed_read(&mut reads, "a.md".into(), "segundo (releído)".into());
         assert_eq!(reads.len(), 2, "{reads:?}");
         assert_eq!(reads[0], ("a.md".to_string(), "segundo (releído)".to_string()));
+    }
+
+    // ---------- is_redundant_write / render_redundant_write_observation ----------
+
+    #[test]
+    fn is_redundant_write_is_false_against_an_empty_record() {
+        let last_write_by_path: HashMap<String, String> = HashMap::new();
+        assert!(!is_redundant_write(&last_write_by_path, "direction-plan.md", "hola"));
+    }
+
+    #[test]
+    fn is_redundant_write_is_true_for_the_exact_same_path_and_content() {
+        let mut last_write_by_path = HashMap::new();
+        last_write_by_path.insert("direction-plan.md".to_string(), "hola".to_string());
+        assert!(is_redundant_write(&last_write_by_path, "direction-plan.md", "hola"));
+    }
+
+    #[test]
+    fn is_redundant_write_is_false_when_only_the_content_changed() {
+        let mut last_write_by_path = HashMap::new();
+        last_write_by_path.insert("direction-plan.md".to_string(), "hola".to_string());
+        assert!(!is_redundant_write(&last_write_by_path, "direction-plan.md", "hola v2"));
+    }
+
+    #[test]
+    fn is_redundant_write_is_false_for_a_different_path_with_the_same_content() {
+        // Per-path keying, not "the single last write overall": writing
+        // the same content to a *different* file must never be flagged.
+        let mut last_write_by_path = HashMap::new();
+        last_write_by_path.insert("direction-plan.md".to_string(), "hola".to_string());
+        assert!(!is_redundant_write(&last_write_by_path, "architecture-plan.md", "hola"));
+    }
+
+    #[test]
+    fn render_redundant_write_observation_names_the_path_and_never_claims_pass() {
+        let obs = render_redundant_write_observation("direction-plan.md");
+        assert!(obs.contains("direction-plan.md"));
+        assert!(
+            !obs.contains("INTENTOS_GATE"),
+            "the guard observation must never itself claim or suggest PASS: {obs}"
+        );
+    }
+
+    #[test]
+    fn render_contract_satisfied_write_observation_names_the_path_and_never_claims_pass() {
+        let obs = render_contract_satisfied_write_observation("direction-plan.md");
+        assert!(obs.contains("direction-plan.md"));
+        assert!(
+            !obs.contains("INTENTOS_GATE"),
+            "the guard observation must never itself claim or suggest PASS: {obs}"
+        );
     }
 
     #[test]
