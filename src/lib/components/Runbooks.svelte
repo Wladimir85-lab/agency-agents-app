@@ -14,9 +14,11 @@
   import { runbooks } from "$lib/stores/runbooks.svelte";
   import { projects } from "$lib/stores/projects.svelte";
   import { runs } from "$lib/stores/runs.svelte";
+  import { preview } from "$lib/stores/preview.svelte";
   import { toast } from "$lib/stores/toast.svelte";
   import { ui } from "$lib/stores/ui.svelte";
   import { CREATION_CATALOG, findCatalogProduct, INTENTOS_CAPABILITIES, planSolution } from "$lib/data/intentosCapabilities";
+  import { turnsForProject } from "$lib/stores/thread.svelte";
   import type { SolutionProposal } from "$lib/data/intentosCapabilities";
   import type { Agent, AutomaticProject, Mission, RunEvent } from "$lib/types";
 
@@ -72,6 +74,14 @@
   const provider = $derived(availableProviders[0] ?? null);
   const canPropose = $derived(Boolean(intent.trim() && !runs.starting && runs.current?.status !== "running" && runs.current?.status !== "queued"));
   const output = $derived(runs.events.filter((item) => item.event.kind === "output"));
+  // A "follow-up" turn continues an already-chosen project: the human already
+  // committed to it once (picking it from `useExistingProject`), so every
+  // further instruction on it builds straight onto the isolated workspace
+  // without asking for approval again. The gate that matters — writing to
+  // the real project — still happens once, explicitly, at applyWorkspace().
+  const followUp = $derived(useExistingProject && Boolean(projectPath));
+  const previousTurns = $derived(followUp ? turnsForProject(projectPath).filter((run) => run.id !== runs.current?.id) : []);
+  const sending = $derived(approving || runs.starting);
 
   $effect(() => { if (!selectedSlug && runbooks.list.length) selectedSlug = runbooks.list[0].slug; });
   $effect(() => {
@@ -91,6 +101,13 @@
     projectPath = runs.current.projectPath;
     useExistingProject = true;
     if (runbooks.list.some((rb) => rb.slug === runs.current?.runbookId)) selectedSlug = runs.current.runbookId;
+  });
+  // Showroom: the moment a run's isolated workspace exists, show it living —
+  // never the original project. Re-fires per new workspace so a follow-up
+  // turn's fresh copy replaces the previous turn's preview automatically.
+  $effect(() => {
+    const workspacePath = runs.current?.workspacePath;
+    if (workspacePath && workspacePath !== preview.workspacePath) void preview.start(workspacePath);
   });
 
   function productionBrief(sourceProposal: SolutionProposal | null = proposal): string {
@@ -137,6 +154,7 @@
     catalogDraftActive = false;
     ui.clearCatalogProduct();
     runs.clearCurrent();
+    void preview.stop();
     toast.success("Nueva intención preparada");
   }
 
@@ -239,6 +257,17 @@
     finally { approving = false; }
   }
 
+  /** Follow-up turn on a project already in conversation: compute the
+   *  proposal and immediately build, no manual "Aprobar y construir" click.
+   *  Reuses prepareProposal()/approveAndStart() untouched — this only
+   *  chains them and clears the composer once the turn actually started. */
+  async function sendFollowUpTurn() {
+    prepareProposal();
+    if (validation || !proposal) return;
+    await approveAndStart();
+    if (!validation && !runs.error) intent = "";
+  }
+
   function readableError(error: unknown): string {
     if (error instanceof Error && error.message.trim()) return error.message;
     if (typeof error === "string") return error;
@@ -267,6 +296,7 @@
     if (!confirm(`Se aplicarán ${runs.review.changes.length} cambios al proyecto original. IntentOS creará un backup recuperable antes de continuar. ¿Aplicar ahora?`)) return;
     try {
       await runs.applyCurrent();
+      await preview.stop();
       toast.success("Cambios aplicados con backup de seguridad");
     } catch (e) { toast.error("No se pudieron aplicar los cambios", String(e)); }
   }
@@ -278,6 +308,7 @@
     if (!confirm("Se eliminará únicamente la copia aislada. El proyecto original y los registros de evidencia se conservarán. ¿Descartar copia?")) return;
     try {
       await runs.discardCurrentWorkspace();
+      await preview.stop();
       toast.success("Copia de trabajo descartada");
     } catch (e) { toast.error("No se pudo descartar la copia", String(e)); }
   }
@@ -320,14 +351,43 @@
           </div>
         </details>
         {#if validation}<p id="validation" class="error" role="alert">{validation}</p>{/if}
-        <Button variant="primary" onclick={prepareProposal} disabled={!canPropose} ariaLabel="Interpretar intención"><PlayIcon size={15}/> Ver propuesta</Button>
+        {#if followUp}
+          <Button variant="primary" onclick={sendFollowUpTurn} loading={sending} disabled={!canPropose} ariaLabel="Enviar instrucción">Enviar</Button>
+          <p class="hint">Este proyecto ya está en conversación: cada instrucción se construye directo sobre la copia de trabajo. Solo se te pedirá aprobar cuando quieras aplicar el resultado al proyecto original.</p>
+        {:else}
+          <Button variant="primary" onclick={prepareProposal} disabled={!canPropose} ariaLabel="Interpretar intención"><PlayIcon size={15}/> Ver propuesta</Button>
+        {/if}
       </div>
       {/if}
     </div>
 
     <aside class="console" aria-live="polite">
-      {#if runs.current}
+      {#if followUp && previousTurns.length}
+        <ol class="thread-history">
+          {#each previousTurns as turn (turn.id)}
+            <li>
+              <span class={`dot ${turn.status}`}></span>
+              <div><strong>{turn.intent.split("\n")[0].slice(0, 90)}</strong><small>{new Date(turn.createdAt).toLocaleTimeString()} · {turn.status}</small></div>
+            </li>
+          {/each}
+        </ol>
+      {/if}
+      {#if followUp && sending && !runs.current}
+        <div class="empty"><div class="empty-icon"><PlayIcon size={28}/></div><span class="eyebrow">CONSTRUYENDO</span><h2>Aplicando tu instrucción…</h2></div>
+      {:else if runs.current}
         <div class="run-head"><div><span class="eyebrow">EJECUCIÓN · {INTENTOS_CAPABILITIES.find((item) => item.id === runs.current?.capabilityId)?.shortLabel ?? runs.current.capabilityId}</span><h2>{runs.current.status}</h2><p title={runs.current.projectPath}>Origen protegido: {runs.current.projectPath}</p>{#if runs.current.workspacePath}<p title={runs.current.workspacePath}>Copia de trabajo: {runs.current.workspacePath}</p>{/if}</div>{#if runs.current.status === "running" || runs.current.status === "queued"}<Button variant="danger" onclick={() => runs.cancel()} loading={runs.cancelling}><SquareIcon size={13}/> Cancelar</Button>{/if}</div>
+        {#if runs.current.workspacePath}
+          <section class="showroom">
+            <div class="showroom-head"><span class="eyebrow">SHOWROOM · VISTA PREVIA EN VIVO</span>{#if preview.url}<a href={preview.url} target="_blank" rel="noreferrer">{preview.url}</a>{/if}</div>
+            {#if preview.url}
+              <iframe class="showroom-frame" src={preview.url} title="Vista previa en vivo del proyecto"></iframe>
+            {:else if preview.error}
+              <p class="error">No se pudo levantar la vista previa: {preview.error}</p>
+            {:else}
+              <p class="hint">{preview.starting ? "Preparando vista previa…" : "Este proyecto no define un script \"dev\"; sin vista previa automática."}</p>
+            {/if}
+          </section>
+        {/if}
         <ol class="stages">{#each runs.current.stages as stage (stage.id)}<li class:active={stage.status === "running"} aria-current={stage.status === "running" ? "step" : undefined}><span class={`dot ${stage.status}`}></span><div><strong>{stage.label}</strong><small>{stage.agentSlug} · intento {stage.attempt || 1}</small></div><b>{stage.status}</b></li>{/each}</ol>
         {#if runs.current.workspacePath && runs.current.status !== "running" && runs.current.status !== "queued"}
           <section class="workspace-review">
@@ -343,7 +403,7 @@
         {/if}
         <div class="log" role="log" aria-live="polite" aria-relevant="additions">{#if runs.events.length === 0}<p>Esperando actividad del runtime…</p>{:else}{#each runs.events as item (item.id)}<div><time>{new Date(item.at).toLocaleTimeString()}</time><pre>{eventText(item.event)}</pre></div>{/each}{/if}</div>
         {#if runs.current.error}<p class="error run-error">{runs.current.error}</p>{/if}
-      {:else if proposal}
+      {:else if proposal && !followUp}
         <section class="proposal" aria-labelledby="proposal-title">
           <div class="proposal-head"><div><span class="eyebrow">PROPUESTA NCTO · v{proposalRevision}</span><h2 id="proposal-title">{proposal.title}</h2></div><span class="proposal-kind">{proposal.solutionForm}</span></div>
           <div class="proposal-summary"><article><small>LO QUE ENTENDIÓ INTENTOS</small><p>{proposal.problem}</p></article><article><small>RESULTADO COMPROBABLE</small><p>{proposal.outcome}</p></article></div>
@@ -364,6 +424,8 @@
   .workspace{height:100%;display:flex;flex-direction:column;min-height:0;overflow:hidden}.head{flex:0 0 auto;padding:var(--space-3) var(--space-4);border-bottom:1px solid var(--color-border);display:flex;justify-content:space-between;gap:16px;align-items:center}.head h1{font-size:var(--text-h2)}.head p,.hint{color:var(--color-text-secondary);font-size:var(--text-body-sm)}.grid{flex:1;min-height:0;overflow:hidden;padding:var(--space-3);display:grid;grid-template-columns:minmax(340px,460px) minmax(380px,1fr);gap:var(--space-3)}.composer,.console{min-height:0;overflow:auto;scrollbar-gutter:stable}.composer{display:flex;flex-direction:column;gap:var(--space-3)}.card,.console{background:var(--color-surface-raised);border:1px solid var(--color-border);border-radius:var(--radius-lg)}.card{padding:var(--space-4);display:flex;flex-direction:column;gap:10px}label{font-size:var(--text-body-sm);font-weight:var(--fw-semibold);display:flex;flex-direction:column;gap:5px}textarea,select{width:100%;border:1px solid var(--color-border);border-radius:var(--radius-md);background:var(--color-surface);color:var(--color-text-primary);padding:9px;font:inherit}textarea{resize:vertical}.attachments{display:grid;grid-template-columns:1fr auto;gap:8px;align-items:center;padding:9px;border:1px dashed var(--color-border);border-radius:var(--radius-md)}.attachments>div{display:flex;flex-direction:column}.attachments small{font-size:11px;color:var(--color-text-muted)}.attachments ul{grid-column:1/-1;display:flex;flex-direction:column;gap:4px;list-style:none}.attachments li{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:5px 7px;border-radius:var(--radius-sm);background:var(--color-surface-raised);font-size:11px}.attachments li span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.attachments li button{display:flex;color:var(--color-text-muted)}.fields{display:grid;grid-template-columns:1fr auto;align-items:end;gap:8px}.error{font-size:var(--text-body-sm);color:var(--color-danger)}h2{font-size:var(--text-h3)}.console{padding:var(--space-4);display:flex;flex-direction:column;gap:var(--space-3)}.run-head{display:flex;justify-content:space-between;gap:10px}.run-head p{font-size:11px;color:var(--color-text-muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:440px}.eyebrow{font-size:10px;color:var(--color-brand);letter-spacing:.08em}.stages{list-style:none;display:flex;flex-direction:column;gap:6px}.stages li{display:grid;grid-template-columns:12px 1fr auto;align-items:center;gap:9px;padding:8px;border-radius:var(--radius-md);background:var(--color-surface)}.stages li.active{outline:1px solid var(--color-brand)}.stages small{display:block;color:var(--color-text-muted);font-size:11px}.stages b{font-size:10px;text-transform:uppercase}.dot{width:9px;height:9px;border-radius:50%;background:var(--color-border)}.dot.running{background:var(--color-brand)}.dot.passed{background:var(--color-success)}.dot.failed{background:var(--color-danger)}.log{flex:1;min-height:180px;overflow:auto;background:var(--color-surface-sunken);border-radius:var(--radius-md);padding:10px}.log div{display:grid;grid-template-columns:76px 1fr;gap:8px;border-bottom:1px solid var(--color-border);padding:5px 0}.log time{font:10px var(--font-mono);color:var(--color-text-muted)}.log pre{white-space:pre-wrap;word-break:break-word;font:11px/1.45 var(--font-mono);color:var(--color-text-secondary)}.empty{margin:auto;width:min(100%,440px);min-height:300px;padding:32px;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;color:var(--color-text-secondary)}.empty-icon{width:54px;height:54px;display:grid;place-items:center;margin-bottom:14px;border-radius:16px;background:color-mix(in srgb,var(--color-brand) 14%,transparent);color:var(--color-brand)}.empty h2{max-width:360px;color:var(--color-text-primary);margin:8px 0}.empty p{max-width:390px;font-size:var(--text-body-sm);line-height:1.5}.empty ol{display:flex;gap:6px;margin-top:18px;padding:0;list-style:none;counter-reset:steps}.empty li{padding:6px 9px;border:1px solid var(--color-border);border-radius:99px;font-size:10px;color:var(--color-text-muted)}.run-error{padding:8px;background:color-mix(in srgb,var(--color-danger) 10%,transparent);border-radius:var(--radius-md)}button{cursor:pointer}@media(max-width:820px){.workspace{overflow:auto}.grid{overflow:visible;grid-template-columns:1fr}.composer,.console{overflow:visible}.console{min-height:420px}.head{align-items:flex-start;flex-direction:column}.fields{grid-template-columns:1fr}.empty ol{flex-direction:column}.recipe-actions{justify-content:flex-start;flex-wrap:wrap}}@media(prefers-reduced-motion:reduce){*{scroll-behavior:auto!important}}
   .dynamic-team{display:grid;grid-template-columns:1fr 1fr;gap:5px;list-style:none}.dynamic-team li{padding:7px;border-radius:var(--radius-sm);background:var(--color-surface-raised)}.dynamic-team li div{min-width:0;display:flex;flex-direction:column}.dynamic-team strong,.dynamic-team small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.dynamic-team strong{font-size:10px;color:var(--color-text-primary)}.dynamic-team small{font-size:9px;color:var(--color-text-muted)}.dynamic-team li.missing{outline:1px solid var(--color-danger)}@media(max-width:520px){.dynamic-team{grid-template-columns:1fr}}
   .head-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+  .showroom{display:flex;flex-direction:column;gap:7px;padding:10px;border:1px solid var(--color-border);border-radius:var(--radius-md);background:var(--color-surface)}.showroom-head{display:flex;justify-content:space-between;align-items:center;gap:10px}.showroom-head a{font-size:10px;color:var(--color-brand);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.showroom-frame{width:100%;height:280px;border:1px solid var(--color-border);border-radius:var(--radius-sm);background:var(--color-surface-sunken)}
+  .thread-history{list-style:none;display:flex;flex-direction:column;gap:6px;padding-bottom:var(--space-3);margin-bottom:var(--space-3);border-bottom:1px solid var(--color-border)}.thread-history li{display:grid;grid-template-columns:12px 1fr;align-items:center;gap:9px;padding:7px 8px;border-radius:var(--radius-md);background:var(--color-surface)}.thread-history strong{display:block;font-size:11px;color:var(--color-text-primary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.thread-history small{font-size:10px;color:var(--color-text-muted)}.dot.succeeded{background:var(--color-success)}.dot.cancelled{background:var(--color-text-muted)}
   .options{border:1px solid var(--color-border);border-radius:var(--radius-md);background:var(--color-surface)}.options>summary{display:flex;justify-content:space-between;gap:8px;padding:9px;cursor:pointer;font-size:11px;font-weight:var(--fw-semibold)}.options>summary small{color:var(--color-text-muted);font-weight:400}.options-body{display:flex;flex-direction:column;gap:10px;padding:0 9px 9px}.existing-toggle{display:flex;flex-direction:row;align-items:center;gap:8px}.existing-toggle input{width:auto}.proposal{display:flex;flex-direction:column;gap:12px;min-height:0;overflow:auto}.proposal-head{display:flex;justify-content:space-between;gap:12px;align-items:flex-start}.proposal-kind{max-width:220px;padding:5px 8px;border-radius:99px;background:color-mix(in srgb,var(--color-brand) 14%,transparent);color:var(--color-brand);font-size:10px;text-align:center}.proposal-summary{display:grid;grid-template-columns:1fr 1fr;gap:8px}.proposal-summary article{padding:10px;border-radius:var(--radius-md);background:var(--color-surface)}.proposal-summary small{font-size:9px;letter-spacing:.08em;color:var(--color-brand)}.proposal-summary p,.proposal-internal p,.experience-map p{font-size:11px;color:var(--color-text-secondary);white-space:pre-wrap}.proposal-internal{display:flex;flex-direction:column;gap:9px;padding-top:9px}.proposal-internal>p{padding:8px;border-radius:var(--radius-sm);background:var(--color-surface)}.experience-map{display:flex;flex-direction:column;gap:6px}.experience-map div{display:grid;grid-template-columns:24px 1fr;gap:8px;align-items:center;padding:8px;background:var(--color-surface);border-radius:var(--radius-md)}.experience-map span{display:grid;place-items:center;width:22px;height:22px;border-radius:50%;background:color-mix(in srgb,var(--color-brand) 16%,transparent);color:var(--color-brand);font-size:10px;font-weight:700}.proposal details{padding:9px;border:1px solid var(--color-border);border-radius:var(--radius-md)}.proposal summary{cursor:pointer;font-size:11px;color:var(--color-text-secondary)}.decision-actions{display:flex;gap:8px;flex-wrap:wrap}
   .revision{padding:11px;border:1px solid color-mix(in srgb,var(--color-brand) 45%,var(--color-border));border-radius:var(--radius-md);background:color-mix(in srgb,var(--color-brand) 7%,var(--color-surface))}.revision p,.revision li{font-size:11px;color:var(--color-text-secondary)}.revision ul{margin:7px 0 0 18px;display:flex;flex-direction:column;gap:3px}
   .workspace-review{display:flex;flex-direction:column;gap:8px;padding:9px;border:1px solid var(--color-border);border-radius:var(--radius-md);background:var(--color-surface)}.review-actions{display:flex;gap:7px;flex-wrap:wrap}.workspace-review p{font-size:11px;color:var(--color-success)}.workspace-review p.conflict{color:var(--color-danger)}.delivery-receipt{display:flex;flex-direction:column;gap:2px;padding:9px;border-radius:var(--radius-md);background:color-mix(in srgb,var(--color-success) 10%,var(--color-surface));color:var(--color-success)}.delivery-receipt span,.delivery-receipt small{font-size:10px;color:var(--color-text-secondary)}.change-list{max-height:160px;overflow:auto;list-style:none;display:flex;flex-direction:column;gap:3px}.change-list li{display:grid;grid-template-columns:58px 1fr;gap:7px;font:10px var(--font-mono)}.change-list span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.change-list b{text-transform:uppercase}.change-list b.added{color:var(--color-success)}.change-list b.modified{color:var(--color-brand)}.change-list b.removed{color:var(--color-danger)}

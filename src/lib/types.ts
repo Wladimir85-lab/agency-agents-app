@@ -584,6 +584,20 @@ export type RunEvent =
   | { kind: "gatePassed"; runId: string; stageId: string }
   | { kind: "gateFailed"; runId: string; stageId: string; reason: string; attempt: number };
 
+/** Showroom — live preview of the workspace a run is building. */
+export type PreviewEvent =
+  | { kind: "starting" }
+  | { kind: "ready"; url: string }
+  | { kind: "log"; text: string }
+  | { kind: "stopped" }
+  | { kind: "failed"; reason: string };
+
+export interface PreviewStatus {
+  running: boolean;
+  workspacePath: string | null;
+  url: string | null;
+}
+
 export interface CatalogUpdateCheck {
   isGit: boolean;
   behind: number;

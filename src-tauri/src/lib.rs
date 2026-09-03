@@ -14,6 +14,7 @@ mod install;
 mod local_agent;
 mod local_model;
 mod mission;
+mod preview;
 mod registry;
 mod render;
 mod runtime;
@@ -224,6 +225,9 @@ pub fn run() {
             runtime::runtime_delivery_receipt,
             runtime::runtime_apply,
             runtime::runtime_discard_workspace,
+            preview::preview_start,
+            preview::preview_stop,
+            preview::preview_status,
             temporal::temporal_status,
             temporal::temporal_start_mission,
             temporal::temporal_mission_status,

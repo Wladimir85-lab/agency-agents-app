@@ -65,7 +65,7 @@
     },
     { icon: Braces, name: "Editor y archivos", detail: "Crea, modifica, compara y versiona los artefactos del proyecto.", state: "Activo" },
     { icon: Terminal, name: "Terminal y procesos", detail: "Ejecuta compiladores, servidores y tareas con límites y trazabilidad.", state: "Activo" },
-    { icon: Globe2, name: "Navegador y Showroom", detail: "Abre el resultado, comprueba salud y prepara una muestra interactiva compartible.", state: "En construcción" },
+    { icon: Globe2, name: "Navegador y Showroom", detail: "Abre el resultado, comprueba salud y prepara una muestra interactiva compartible.", state: "Activo" },
     { icon: FlaskConical, name: "Pruebas y Reality Loop", detail: "Observa fallos, repara y vuelve a ejecutar hasta obtener evidencia.", state: "Activo" },
     { icon: Database, name: "Datos", detail: "Inspecciona, valida y deduplica datos mediante capacidades gobernadas.", state: "Activo" },
     { icon: Image, name: "Medios y experiencia", detail: "Produce y verifica recursos visuales, documentos y experiencias interactivas.", state: "Preparado" },

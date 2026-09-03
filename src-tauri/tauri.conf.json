@@ -23,7 +23,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; connect-src 'self' https://api.github.com https://github.com https://codeload.github.com https://objects.githubusercontent.com https://raw.githubusercontent.com https://agencyagents.app; img-src 'self' data: https://raw.githubusercontent.com https://avatars.githubusercontent.com; style-src 'self' 'unsafe-inline'; font-src 'self' data:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'"
+      "csp": "default-src 'self'; connect-src 'self' https://api.github.com https://github.com https://codeload.github.com https://objects.githubusercontent.com https://raw.githubusercontent.com https://agencyagents.app; img-src 'self' data: https://raw.githubusercontent.com https://avatars.githubusercontent.com; style-src 'self' 'unsafe-inline'; font-src 'self' data:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; frame-src http://localhost:* http://127.0.0.1:*"
     }
   },
   "plugins": {

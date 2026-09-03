@@ -59,6 +59,11 @@ pub struct AppState {
     /// backend state gives the renderer start/stop semantics without ever
     /// receiving an executable path or arbitrary command line.
     pub local_model_process: Arc<Mutex<Option<tokio::process::Child>>>,
+
+    /// Showroom — the single live-preview dev-server process, if any. One
+    /// slot, same convention as `local_model_process`: a project is either
+    /// previewed or it isn't, IntentOS doesn't juggle several at once.
+    pub preview_process: Arc<Mutex<Option<crate::preview::RunningPreview>>>,
 }
 
 impl AppState {
@@ -96,6 +101,7 @@ impl AppState {
             updater_state: crate::commands::updater::empty_state(),
             runtime_jobs: Arc::new(Mutex::new(HashMap::new())),
             local_model_process: Arc::new(Mutex::new(None)),
+            preview_process: Arc::new(Mutex::new(None)),
         })
     }
 
