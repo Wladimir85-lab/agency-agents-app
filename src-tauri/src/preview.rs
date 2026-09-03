@@ -35,7 +35,9 @@ use crate::state::AppState;
 pub struct RunningPreview {
     child: Child,
     workspace_path: String,
-    url: Option<String>,
+    // Read cross-module by deploy.rs's public_preview_start, which only
+    // ever tunnels whatever the Showroom is already serving locally.
+    pub(crate) url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -212,6 +214,21 @@ pub async fn preview_start(
 
 #[tauri::command]
 pub async fn preview_stop(state: State<'_, AppState>) -> Result<PreviewStatus, AppError> {
+    kill_preview(&state).await;
+    Ok(PreviewStatus {
+        running: false,
+        workspace_path: None,
+        url: None,
+    })
+}
+
+/// Shared by the `preview_stop` command and the app's window-close handler
+/// (see lib.rs). Closing the window is an exit path that never goes
+/// through the `preview_stop` command, so without this the Showroom's
+/// process tree would only ever get `kill_on_drop`'s single-child kill —
+/// exactly the orphaned-`node.exe` bug this function's tree-kill already
+/// exists to fix for the explicit-stop case.
+pub(crate) async fn kill_preview(state: &AppState) {
     let mut guard = state.preview_process.lock().await;
     if let Some(mut running) = guard.take() {
         // `child.kill()` alone only signals the direct child — here that's
@@ -238,11 +255,6 @@ pub async fn preview_stop(state: State<'_, AppState>) -> Result<PreviewStatus, A
             let _ = running.child.kill().await;
         }
     }
-    Ok(PreviewStatus {
-        running: false,
-        workspace_path: None,
-        url: None,
-    })
 }
 
 #[tauri::command]

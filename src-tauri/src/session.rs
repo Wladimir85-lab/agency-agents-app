@@ -238,6 +238,7 @@ mod tests {
             runtime_jobs: Arc::new(Mutex::new(HashMap::new())),
             local_model_process: Arc::new(Mutex::new(None)),
             preview_process: Arc::new(Mutex::new(None)),
+            public_preview_process: Arc::new(Mutex::new(None)),
         }
     }
 

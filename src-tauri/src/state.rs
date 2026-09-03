@@ -64,6 +64,11 @@ pub struct AppState {
     /// slot, same convention as `local_model_process`: a project is either
     /// previewed or it isn't, IntentOS doesn't juggle several at once.
     pub preview_process: Arc<Mutex<Option<crate::preview::RunningPreview>>>,
+
+    /// Public preview — the single `cloudflared` quick-tunnel process, if
+    /// any, publishing the Showroom above to a `*.trycloudflare.com` URL.
+    /// Same one-slot convention; see deploy.rs.
+    pub public_preview_process: Arc<Mutex<Option<crate::deploy::RunningPublicPreview>>>,
 }
 
 impl AppState {
@@ -102,6 +107,7 @@ impl AppState {
             runtime_jobs: Arc::new(Mutex::new(HashMap::new())),
             local_model_process: Arc::new(Mutex::new(None)),
             preview_process: Arc::new(Mutex::new(None)),
+            public_preview_process: Arc::new(Mutex::new(None)),
         })
     }
 

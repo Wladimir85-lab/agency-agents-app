@@ -7,6 +7,7 @@
 mod capability_resolution;
 mod commands;
 mod corpus;
+mod deploy;
 mod error;
 mod fabric;
 mod github;
@@ -115,6 +116,24 @@ pub fn run() {
                 tauri::WindowEvent::Resized(_) | tauri::WindowEvent::Moved(_)
             ) {
                 let _ = window.app_handle().save_window_state(StateFlags::all());
+            }
+            // Showroom (and, through it, a public preview tunnel) spawns a
+            // process tree — on Windows, `cmd.exe` -> `npm.cmd` -> the real
+            // `node.exe` dev server. `kill_on_drop` on AppState's tracked
+            // `Child` only ever reaches the direct child, not that tree
+            // (see `preview::kill_preview`'s doc comment — this was a real,
+            // hand-verified orphaned-process bug for the explicit "detener
+            // vista previa" button before that fix). Closing the window is
+            // the one exit path that never goes through that button, so it
+            // needs the same tree-kill here, run synchronously before the
+            // window actually closes.
+            if matches!(event, tauri::WindowEvent::CloseRequested { .. }) {
+                let app_handle = window.app_handle().clone();
+                tauri::async_runtime::block_on(async move {
+                    let state = app_handle.state::<state::AppState>();
+                    preview::kill_preview(&state).await;
+                    deploy::kill_public_preview(&state).await;
+                });
             }
         })
         .setup(|app| {
@@ -229,6 +248,9 @@ pub fn run() {
             preview::preview_start,
             preview::preview_stop,
             preview::preview_status,
+            deploy::public_preview_start,
+            deploy::public_preview_stop,
+            deploy::public_preview_status,
             session::session_get_or_create,
             session::session_append_message,
             temporal::temporal_status,

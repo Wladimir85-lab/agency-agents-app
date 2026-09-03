@@ -104,17 +104,20 @@ pub fn status() -> FabricStatus {
                 "localPreviewV1",
                 "replaceable",
             ),
-            // Reserved, not yet bound: publishing the approved workspace to
-            // a temporary internet-reachable URL (open it from a phone,
-            // share it with a client) without exposing the developer's own
-            // localhost. `localPreviewV1` above only ever serves loopback.
-            // No provider is wired here — doing so without the user
-            // choosing one (and, for most providers, supplying an account
-            // or token) would mean either fabricating a capability that
-            // isn't real or silently trusting a third-party relay with the
-            // user's local dev server on their behalf. `active_binding:
-            // "none"` is the honest state until that decision is made.
-            binding("publicPreview", "PublicPreviewPublisher", "none", "replaceable"),
+            // Publishes the approved workspace to a temporary
+            // internet-reachable URL (open it from a phone, share it with
+            // a client) without exposing the developer's own localhost —
+            // `localPreviewV1` above only ever serves loopback. Bound to a
+            // Cloudflare "quick tunnel" (see deploy.rs) after the user
+            // explicitly chose that provider and was told its trust model
+            // (anonymous, no account, Cloudflare's edge is a real
+            // intermediary) — never wired silently.
+            binding(
+                "publicPreview",
+                "PublicPreviewPublisher",
+                "cloudflaredQuickTunnel",
+                "replaceable",
+            ),
             binding(
                 "delivery",
                 "DeliveryPublisher",
@@ -185,13 +188,10 @@ mod tests {
             binding.contract == "ConversationMemory"
                 && binding.active_binding == "projectSessionsV1"
         }));
-        // Honest placeholder, not a fabricated capability: no provider is
-        // wired for a public-reachable preview URL until the user picks one.
-        assert!(fabric
-            .bindings
-            .iter()
-            .any(|binding| binding.contract == "PublicPreviewPublisher"
-                && binding.active_binding == "none"));
+        assert!(fabric.bindings.iter().any(|binding| {
+            binding.contract == "PublicPreviewPublisher"
+                && binding.active_binding == "cloudflaredQuickTunnel"
+        }));
     }
 
     #[test]

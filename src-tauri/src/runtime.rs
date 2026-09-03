@@ -3336,6 +3336,7 @@ mod tests {
             runtime_jobs: std::sync::Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             local_model_process: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
             preview_process: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+            public_preview_process: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
         }
     }
 

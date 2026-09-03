@@ -631,6 +631,23 @@ export interface PreviewStatus {
   url: string | null;
 }
 
+/** Preview público — publishes the Showroom's already-running local URL
+ *  through a Cloudflare quick tunnel (no account, ephemeral, anonymous).
+ *  See deploy.rs. */
+export type PublicPreviewEvent =
+  | { kind: "preparing" }
+  | { kind: "starting" }
+  | { kind: "ready"; url: string }
+  | { kind: "log"; text: string }
+  | { kind: "stopped" }
+  | { kind: "failed"; reason: string };
+
+export interface PublicPreviewStatus {
+  running: boolean;
+  localUrl: string | null;
+  url: string | null;
+}
+
 export interface CatalogUpdateCheck {
   isGit: boolean;
   behind: number;

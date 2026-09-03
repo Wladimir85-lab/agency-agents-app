@@ -15,6 +15,7 @@
   import { projects } from "$lib/stores/projects.svelte";
   import { runs } from "$lib/stores/runs.svelte";
   import { preview } from "$lib/stores/preview.svelte";
+  import { publicPreview } from "$lib/stores/publicPreview.svelte";
   import { toast } from "$lib/stores/toast.svelte";
   import { ui } from "$lib/stores/ui.svelte";
   import { CREATION_CATALOG, findCatalogProduct, INTENTOS_CAPABILITIES, planSolution } from "$lib/data/intentosCapabilities";
@@ -192,6 +193,7 @@
     runs.clearCurrent();
     session.clear();
     void preview.stop();
+    void publicPreview.stop();
     toast.success("Nueva intención preparada");
   }
 
@@ -393,6 +395,7 @@
     try {
       await runs.discardCurrentWorkspace();
       await preview.stop();
+      await publicPreview.stop();
       if (projectPath) {
         await session.appendMessage(projectPath, "system", "Copia de trabajo descartada. La próxima instrucción parte de una copia nueva del proyecto original.");
         await session.loadOrCreate(projectPath); // resync: backend cleared the session's workspace pointer too
@@ -481,6 +484,20 @@
             {:else}
               <p class="hint">{preview.starting ? "Preparando vista previa…" : "Este proyecto no define un script \"dev\"; sin vista previa automática."}</p>
             {/if}
+            {#if preview.url}
+              <div class="public-preview">
+                {#if publicPreview.url}
+                  <p class="hint">Pública (anónima, sin cuenta): <a href={publicPreview.url} target="_blank" rel="noreferrer">{publicPreview.url}</a></p>
+                  <Button variant="secondary" onclick={() => publicPreview.stop()} loading={publicPreview.stopping}>Detener publicación pública</Button>
+                {:else}
+                  <Button variant="secondary" onclick={() => publicPreview.start()} loading={publicPreview.starting} ariaLabel="Publicar vista previa pública">
+                    {publicPreview.preparing ? "Preparando cloudflared…" : "Publicar vista previa pública"}
+                  </Button>
+                  <p class="hint">Genera una URL temporal accesible desde internet (tu celular, otro dispositivo, compartirla) apuntando a esta misma vista previa. Es anónima: cualquiera con el enlace puede verla mientras esté activa.</p>
+                {/if}
+                {#if publicPreview.error}<p class="error">No se pudo publicar: {publicPreview.error}</p>{/if}
+              </div>
+            {/if}
           </section>
         {/if}
         <ol class="stages">{#each runs.current.stages as stage (stage.id)}<li class:active={stage.status === "running"} aria-current={stage.status === "running" ? "step" : undefined}><span class={`dot ${stage.status}`}></span><div><strong>{stage.label}</strong><small>{stage.agentSlug} · intento {stage.attempt || 1}</small></div><b>{stage.status}</b></li>{/each}</ol>
@@ -520,6 +537,7 @@
   .dynamic-team{display:grid;grid-template-columns:1fr 1fr;gap:5px;list-style:none}.dynamic-team li{padding:7px;border-radius:var(--radius-sm);background:var(--color-surface-raised)}.dynamic-team li div{min-width:0;display:flex;flex-direction:column}.dynamic-team strong,.dynamic-team small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.dynamic-team strong{font-size:10px;color:var(--color-text-primary)}.dynamic-team small{font-size:9px;color:var(--color-text-muted)}.dynamic-team li.missing{outline:1px solid var(--color-danger)}@media(max-width:520px){.dynamic-team{grid-template-columns:1fr}}
   .head-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
   .showroom{display:flex;flex-direction:column;gap:7px;padding:10px;border:1px solid var(--color-border);border-radius:var(--radius-md);background:var(--color-surface)}.showroom-head{display:flex;justify-content:space-between;align-items:center;gap:10px}.showroom-head a{font-size:10px;color:var(--color-brand);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.showroom-frame{width:100%;height:280px;border:1px solid var(--color-border);border-radius:var(--radius-sm);background:var(--color-surface-sunken)}
+  .public-preview{display:flex;flex-direction:column;gap:6px;padding-top:7px;border-top:1px dashed var(--color-border)}.public-preview a{color:var(--color-brand);word-break:break-all}
   .dot.succeeded{background:var(--color-success)}.dot.cancelled{background:var(--color-text-muted)}
   .chat{display:flex;flex-direction:column;gap:8px;padding-bottom:var(--space-3);margin-bottom:var(--space-3);border-bottom:1px solid var(--color-border)}.chat-head{display:flex;align-items:center;gap:9px}.esmeralda-avatar{flex:none;width:26px;height:26px;display:grid;place-items:center;border-radius:50%;background:var(--color-brand);color:var(--color-surface);font-size:12px;font-weight:700}.chat-head strong{font-size:12px;color:var(--color-text-primary)}.chat-head small{font-size:10px;color:var(--color-text-muted)}.chat-log{list-style:none;display:flex;flex-direction:column;gap:8px;max-height:320px;overflow-y:auto;padding-right:2px}.bubble{max-width:88%;padding:8px 10px;border-radius:var(--radius-md);background:var(--color-surface)}.bubble.user{align-self:flex-end;background:color-mix(in srgb,var(--color-brand) 14%,var(--color-surface))}.bubble.esmeralda{align-self:flex-start}.bubble.system{align-self:center;max-width:96%;background:transparent;border:1px dashed var(--color-border)}.bubble.queued{opacity:.6}.bubble.pending{font-style:italic;color:var(--color-text-muted)}.bubble-role{display:block;font-size:9px;letter-spacing:.06em;text-transform:uppercase;color:var(--color-brand);margin-bottom:2px}.bubble.system .bubble-role{color:var(--color-text-muted)}.bubble p{font-size:12px;line-height:1.5;color:var(--color-text-primary);white-space:pre-wrap}.bubble time{display:block;margin-top:3px;font-size:9px;color:var(--color-text-muted)}.bubble-empty{font-size:11px;color:var(--color-text-muted);text-align:center;padding:10px}
   .options{border:1px solid var(--color-border);border-radius:var(--radius-md);background:var(--color-surface)}.options>summary{display:flex;justify-content:space-between;gap:8px;padding:9px;cursor:pointer;font-size:11px;font-weight:var(--fw-semibold)}.options>summary small{color:var(--color-text-muted);font-weight:400}.options-body{display:flex;flex-direction:column;gap:10px;padding:0 9px 9px}.existing-toggle{display:flex;flex-direction:row;align-items:center;gap:8px}.existing-toggle input{width:auto}.proposal{display:flex;flex-direction:column;gap:12px;min-height:0;overflow:auto}.proposal-head{display:flex;justify-content:space-between;gap:12px;align-items:flex-start}.proposal-kind{max-width:220px;padding:5px 8px;border-radius:99px;background:color-mix(in srgb,var(--color-brand) 14%,transparent);color:var(--color-brand);font-size:10px;text-align:center}.proposal-summary{display:grid;grid-template-columns:1fr 1fr;gap:8px}.proposal-summary article{padding:10px;border-radius:var(--radius-md);background:var(--color-surface)}.proposal-summary small{font-size:9px;letter-spacing:.08em;color:var(--color-brand)}.proposal-summary p,.proposal-internal p,.experience-map p{font-size:11px;color:var(--color-text-secondary);white-space:pre-wrap}.proposal-internal{display:flex;flex-direction:column;gap:9px;padding-top:9px}.proposal-internal>p{padding:8px;border-radius:var(--radius-sm);background:var(--color-surface)}.experience-map{display:flex;flex-direction:column;gap:6px}.experience-map div{display:grid;grid-template-columns:24px 1fr;gap:8px;align-items:center;padding:8px;background:var(--color-surface);border-radius:var(--radius-md)}.experience-map span{display:grid;place-items:center;width:22px;height:22px;border-radius:50%;background:color-mix(in srgb,var(--color-brand) 16%,transparent);color:var(--color-brand);font-size:10px;font-weight:700}.proposal details{padding:9px;border:1px solid var(--color-border);border-radius:var(--radius-md)}.proposal summary{cursor:pointer;font-size:11px;color:var(--color-text-secondary)}.decision-actions{display:flex;gap:8px;flex-wrap:wrap}
