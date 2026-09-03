@@ -450,6 +450,13 @@ export interface StartRunRequest {
    *  regardless, and any other stage that needs one fails explicitly. */
   providerId: string | null;
   missionId?: string | null;
+  /** Marks this run as a turn in a project's conversation with Esmeralda:
+   *  the backend reuses that session's one evolving workspace instead of
+   *  recopying the original project (see `resolve_session_workspace` in
+   *  runtime.rs). The actual id is re-derived from `projectPath` on the
+   *  backend, so any non-null value opts in — pass the session's own id
+   *  for clarity/debugging, never a value from a different project. */
+  sessionId?: string | null;
 }
 
 export interface RunSummary {
@@ -463,6 +470,7 @@ export interface RunSummary {
   capabilityIds: string[];
   providerId: string | null;
   missionId?: string | null;
+  sessionId?: string | null;
   status: RunStatus;
   currentStage: string | null;
   stages: RunStage[];
@@ -470,6 +478,31 @@ export interface RunSummary {
   updatedAt: string;
   completedAt: string | null;
   error: string | null;
+}
+
+/** Esmeralda's persistent memory for one project — see session.rs. Replaces
+ *  the pre-conversation "thread" that was only ever a filtered/sorted view
+ *  over RunSummary (see thread.svelte.ts's history for why that fell short:
+ *  no persisted messages, no context passed to the next turn, and every
+ *  follow-up recopied the original project instead of building on the
+ *  previous turn's work). */
+export type MessageRole = "user" | "esmeralda" | "system";
+
+export interface ConversationMessage {
+  id: string;
+  role: MessageRole;
+  content: string;
+  at: string;
+  runId?: string | null;
+}
+
+export interface ProjectSession {
+  id: string;
+  projectPath: string;
+  workspacePath: string | null;
+  messages: ConversationMessage[];
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface Mission {

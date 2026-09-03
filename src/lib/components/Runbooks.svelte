@@ -18,7 +18,7 @@
   import { toast } from "$lib/stores/toast.svelte";
   import { ui } from "$lib/stores/ui.svelte";
   import { CREATION_CATALOG, findCatalogProduct, INTENTOS_CAPABILITIES, planSolution } from "$lib/data/intentosCapabilities";
-  import { turnsForProject } from "$lib/stores/thread.svelte";
+  import { session, buildConversationalIntent, summarizeRunForEsmeralda } from "$lib/stores/session.svelte";
   import type { SolutionProposal } from "$lib/data/intentosCapabilities";
   import type { Agent, AutomaticProject, Mission, RunEvent } from "$lib/types";
 
@@ -80,8 +80,10 @@
   // without asking for approval again. The gate that matters — writing to
   // the real project — still happens once, explicitly, at applyWorkspace().
   const followUp = $derived(useExistingProject && Boolean(projectPath));
-  const previousTurns = $derived(followUp ? turnsForProject(projectPath).filter((run) => run.id !== runs.current?.id) : []);
   const sending = $derived(approving || runs.starting);
+  const busy = $derived(runs.current?.status === "running" || runs.current?.status === "queued");
+  let draining = $state(false);
+  let summarizedRunId = $state<string | null>(null);
 
   $effect(() => { if (!selectedSlug && runbooks.list.length) selectedSlug = runbooks.list[0].slug; });
   $effect(() => {
@@ -108,6 +110,40 @@
   $effect(() => {
     const workspacePath = runs.current?.workspacePath;
     if (workspacePath && workspacePath !== preview.workspacePath) void preview.start(workspacePath);
+  });
+  // Esmeralda's memory follows the project, not the window: the moment a
+  // project is in conversation, load (or start) its persisted session so
+  // the message history — and the workspace it's already evolved — comes
+  // back exactly as it was, whether that's from a minute ago or from
+  // before IntentOS was last closed.
+  $effect(() => {
+    const path = followUp ? projectPath : "";
+    if (path) {
+      if (session.current?.projectPath !== path) void session.loadOrCreate(path);
+    } else if (session.current) {
+      session.clear();
+    }
+  });
+  // Esmeralda reports back once a turn actually finishes — persisted into
+  // the conversation (not just shown in the run log) so it becomes context
+  // for the *next* turn via buildConversationalIntent, and survives a
+  // restart like every other message.
+  $effect(() => {
+    const run = runs.current;
+    if (!run?.sessionId) return;
+    if (run.status !== "succeeded" && run.status !== "failed" && run.status !== "cancelled") return;
+    if (summarizedRunId === run.id) return;
+    summarizedRunId = run.id;
+    void session.appendMessage(run.projectPath, "esmeralda", summarizeRunForEsmeralda(run), run.id);
+  });
+  // The composer never blocks: a message sent while Esmeralda is already
+  // building goes to `session.queue` instead (see sendChatMessage). This is
+  // what actually processes that queue, one instruction at a time, the
+  // moment the active turn reaches a terminal state.
+  $effect(() => {
+    if (!followUp || busy || draining || sending) return;
+    if (session.queue.length === 0) return;
+    void drainQueue();
   });
 
   function productionBrief(sourceProposal: SolutionProposal | null = proposal): string {
@@ -154,6 +190,7 @@
     catalogDraftActive = false;
     ui.clearCatalogProduct();
     runs.clearCurrent();
+    session.clear();
     void preview.stop();
     toast.success("Nueva intención preparada");
   }
@@ -224,6 +261,17 @@
         projectPath = created.path;
         projects.register(created.path);
       }
+      // Every build now belongs to that project's conversation with
+      // Esmeralda — including a brand-new project's very first turn, so
+      // its workspace is already the one every follow-up turn will reuse
+      // (see resolve_session_workspace in runtime.rs). `priorMessages` is
+      // captured *before* this turn's own message is appended, so
+      // buildConversationalIntent doesn't echo the instruction back to
+      // itself as "previous" context.
+      await session.loadOrCreate(projectPath);
+      const priorMessages = session.messages;
+      await session.appendMessage(projectPath, "user", intent.trim());
+      const sessionId = session.current?.id ?? null;
       const criteria = [acceptance.trim(), "La solución debe ser operable y no presentar mocks como terminados.", "QA y Reality Check deben aportar evidencia verificable.", "Lo construido debe corresponder a la propuesta aprobada."].filter(Boolean);
       const draft = await invoke<Mission>("mission_create", { request: {
         projectPath,
@@ -252,20 +300,52 @@
           "Temporal no está disponible ahora mismo; IntentOS registró tu aprobación localmente y sigue igual.",
         );
       }
-      await runs.start({ intent: productionBrief(approvedProposal), projectPath, runbookId: selected?.slug ?? DEFAULT_RUNBOOK_ID, capabilityId: approvedCapabilities[0].id, capabilityIds: approvedCapabilities.map((item) => item.id), stageIds: approvedPipeline.map((stage) => stage.id), stageKinds: approvedPipeline.map((stage) => stage.kind), stageLabels: approvedPipeline.map((stage) => stage.label), agentSlugs: approvedPipeline.map((stage) => stage.agent), providerId: provider?.id ?? null, missionId: mission.id });
+      const brief = productionBrief(approvedProposal);
+      const conversationalIntent = buildConversationalIntent(priorMessages, brief);
+      await runs.start({ intent: conversationalIntent, projectPath, runbookId: selected?.slug ?? DEFAULT_RUNBOOK_ID, capabilityId: approvedCapabilities[0].id, capabilityIds: approvedCapabilities.map((item) => item.id), stageIds: approvedPipeline.map((stage) => stage.id), stageKinds: approvedPipeline.map((stage) => stage.kind), stageLabels: approvedPipeline.map((stage) => stage.label), agentSlugs: approvedPipeline.map((stage) => stage.agent), providerId: provider?.id ?? null, missionId: mission.id, sessionId });
     } catch (e) { toast.error("No se pudo iniciar la producción aprobada", readableError(e)); }
     finally { approving = false; }
   }
 
-  /** Follow-up turn on a project already in conversation: compute the
+  /** A chat turn on a project already in conversation: compute the
    *  proposal and immediately build, no manual "Aprobar y construir" click.
    *  Reuses prepareProposal()/approveAndStart() untouched — this only
    *  chains them and clears the composer once the turn actually started. */
-  async function sendFollowUpTurn() {
+  async function sendTurn(text: string) {
+    intent = text;
     prepareProposal();
     if (validation || !proposal) return;
     await approveAndStart();
     if (!validation && !runs.error) intent = "";
+  }
+
+  /** The chat composer's send action: never blocks on a build in progress.
+   *  Busy → the instruction goes into `session.queue` (shown immediately as
+   *  a "en cola" bubble — see the template) and `drainQueue` (driven by the
+   *  effect above) starts it for real the moment the active turn ends,
+   *  which is also when it's actually persisted as a message (inside
+   *  approveAndStart, once for every turn — queued or not — so a queued
+   *  instruction is never recorded twice). Idle → starts immediately,
+   *  same as today. */
+  async function sendChatMessage() {
+    const text = intent.trim();
+    if (!text) return;
+    intent = "";
+    if (busy || session.queue.length > 0) {
+      session.enqueue(text);
+      return;
+    }
+    await sendTurn(text);
+  }
+
+  async function drainQueue() {
+    draining = true;
+    try {
+      const next = session.dequeue();
+      if (next) await sendTurn(next);
+    } finally {
+      draining = false;
+    }
   }
 
   function readableError(error: unknown): string {
@@ -293,10 +373,14 @@
   async function applyWorkspace() {
     if (!runs.review) await reviewWorkspace();
     if (!runs.review || !runs.review.sourceUnchanged) return;
-    if (!confirm(`Se aplicarán ${runs.review.changes.length} cambios al proyecto original. IntentOS creará un backup recuperable antes de continuar. ¿Aplicar ahora?`)) return;
+    const changeCount = runs.review.changes.length;
+    if (!confirm(`Se aplicarán ${changeCount} cambios al proyecto original. IntentOS creará un backup recuperable antes de continuar. ¿Aplicar ahora?`)) return;
     try {
       await runs.applyCurrent();
-      await preview.stop();
+      // The evolving workspace keeps living (and the Showroom keeps
+      // pointing at it) — applying only copies its current state onto the
+      // protected original, it does not end the conversation.
+      if (projectPath) await session.appendMessage(projectPath, "system", `${changeCount} cambios aplicados al proyecto original, con backup de seguridad.`);
       toast.success("Cambios aplicados con backup de seguridad");
     } catch (e) { toast.error("No se pudieron aplicar los cambios", String(e)); }
   }
@@ -305,17 +389,21 @@
     catch (e) { toast.error("No se pudo construir el comprobante de entrega", String(e)); }
   }
   async function discardWorkspace() {
-    if (!confirm("Se eliminará únicamente la copia aislada. El proyecto original y los registros de evidencia se conservarán. ¿Descartar copia?")) return;
+    if (!confirm("Se eliminará toda la copia de trabajo de esta conversación (todos los turnos aún no aplicados). El proyecto original y los registros de evidencia se conservarán. La próxima instrucción partirá de una copia nueva del proyecto original. ¿Descartar copia?")) return;
     try {
       await runs.discardCurrentWorkspace();
       await preview.stop();
+      if (projectPath) {
+        await session.appendMessage(projectPath, "system", "Copia de trabajo descartada. La próxima instrucción parte de una copia nueva del proyecto original.");
+        await session.loadOrCreate(projectPath); // resync: backend cleared the session's workspace pointer too
+      }
       toast.success("Copia de trabajo descartada");
     } catch (e) { toast.error("No se pudo descartar la copia", String(e)); }
   }
 </script>
 
 <section class="workspace">
-  <header class="head"><div><h1>{catalogProduct && !catalogDraftActive ? "Catálogo de Creación" : "IntentOS Production"}</h1><p>{catalogProduct && !catalogDraftActive ? `${catalogArea?.number} — ${catalogArea?.name}` : "De una intención humana a una entrega tecnológica verificada."}</p></div><div class="head-actions"><Button variant="secondary" onclick={newIntent} disabled={runs.current?.status === "running" || runs.current?.status === "queued"} ariaLabel="Crear nueva intención">Nueva intención</Button></div></header>
+  <header class="head"><div><h1>{catalogProduct && !catalogDraftActive ? "Catálogo de Creación" : followUp ? "Esmeralda" : "IntentOS Production"}</h1><p>{catalogProduct && !catalogDraftActive ? `${catalogArea?.number} — ${catalogArea?.name}` : followUp ? `Conversación de trabajo · ${projectPath.split(/[\\/]/).pop()}` : "De una intención humana a una entrega tecnológica verificada."}</p></div><div class="head-actions"><Button variant="secondary" onclick={newIntent} disabled={runs.current?.status === "running" || runs.current?.status === "queued"} ariaLabel="Crear nueva intención">Nueva intención</Button></div></header>
   <div class="grid">
     <div class="composer">
       {#if catalogProduct && !catalogDraftActive}
@@ -352,8 +440,8 @@
         </details>
         {#if validation}<p id="validation" class="error" role="alert">{validation}</p>{/if}
         {#if followUp}
-          <Button variant="primary" onclick={sendFollowUpTurn} loading={sending} disabled={!canPropose} ariaLabel="Enviar instrucción">Enviar</Button>
-          <p class="hint">Este proyecto ya está en conversación: cada instrucción se construye directo sobre la copia de trabajo. Solo se te pedirá aprobar cuando quieras aplicar el resultado al proyecto original.</p>
+          <Button variant="primary" onclick={sendChatMessage} loading={sending && !busy} disabled={!intent.trim()} ariaLabel="Enviar a Esmeralda">Enviar</Button>
+          <p class="hint">{busy ? "Esmeralda sigue trabajando en tu instrucción anterior — esta se procesará automáticamente en cuanto termine." : "Esmeralda conserva el contexto de esta conversación y del proyecto. Cada instrucción se construye sobre la copia de trabajo acumulada; el proyecto original solo cambia cuando pides aplicar."}</p>
         {:else}
           <Button variant="primary" onclick={prepareProposal} disabled={!canPropose} ariaLabel="Interpretar intención"><PlayIcon size={15}/> Ver propuesta</Button>
         {/if}
@@ -362,19 +450,26 @@
     </div>
 
     <aside class="console" aria-live="polite">
-      {#if followUp && previousTurns.length}
-        <ol class="thread-history">
-          {#each previousTurns as turn (turn.id)}
-            <li>
-              <span class={`dot ${turn.status}`}></span>
-              <div><strong>{turn.intent.split("\n")[0].slice(0, 90)}</strong><small>{new Date(turn.createdAt).toLocaleTimeString()} · {turn.status}</small></div>
-            </li>
-          {/each}
-        </ol>
+      {#if followUp}
+        <div class="chat">
+          <header class="chat-head"><span class="esmeralda-avatar" aria-hidden="true">E</span><div><strong>Esmeralda</strong><small>{session.loading ? "Cargando conversación…" : `${session.messages.length} mensajes`}</small></div></header>
+          <ol class="chat-log">
+            {#each session.messages as message (message.id)}
+              <li class={`bubble ${message.role}`}>
+                <span class="bubble-role">{message.role === "user" ? "Tú" : message.role === "esmeralda" ? "Esmeralda" : "Sistema"}</span>
+                <p>{message.content}</p>
+                <time>{new Date(message.at).toLocaleTimeString()}</time>
+              </li>
+            {/each}
+            {#each session.queue as queued, index (index)}
+              <li class="bubble user queued"><span class="bubble-role">Tú · en cola</span><p>{queued}</p></li>
+            {/each}
+            {#if busy}<li class="bubble esmeralda pending"><span class="bubble-role">Esmeralda</span><p>Trabajando en tu instrucción…</p></li>{/if}
+            {#if !session.messages.length && !session.queue.length && !busy}<li class="bubble-empty">Escríbele a Esmeralda para empezar a trabajar en este proyecto.</li>{/if}
+          </ol>
+        </div>
       {/if}
-      {#if followUp && sending && !runs.current}
-        <div class="empty"><div class="empty-icon"><PlayIcon size={28}/></div><span class="eyebrow">CONSTRUYENDO</span><h2>Aplicando tu instrucción…</h2></div>
-      {:else if runs.current}
+      {#if runs.current}
         <div class="run-head"><div><span class="eyebrow">EJECUCIÓN · {INTENTOS_CAPABILITIES.find((item) => item.id === runs.current?.capabilityId)?.shortLabel ?? runs.current.capabilityId}</span><h2>{runs.current.status}</h2><p title={runs.current.projectPath}>Origen protegido: {runs.current.projectPath}</p>{#if runs.current.workspacePath}<p title={runs.current.workspacePath}>Copia de trabajo: {runs.current.workspacePath}</p>{/if}</div>{#if runs.current.status === "running" || runs.current.status === "queued"}<Button variant="danger" onclick={() => runs.cancel()} loading={runs.cancelling}><SquareIcon size={13}/> Cancelar</Button>{/if}</div>
         {#if runs.current.workspacePath}
           <section class="showroom">
@@ -413,7 +508,7 @@
           <div class="decision-actions"><Button variant="primary" onclick={approveAndStart} loading={approving} disabled={!teamReady}>Aprobar y construir</Button>{#if rejecting}<Button variant="danger" onclick={rejectProposal}>Enviar rechazo razonado</Button>{:else}<Button variant="secondary" onclick={() => rejecting = true}>Rechazar / pedir cambios</Button>{/if}<Button variant="secondary" onclick={() => proposal = null}>Editar intención</Button></div>
           {#if !provider}<p class="error">El runtime no está disponible; puedes revisar la propuesta, pero no iniciar producción.</p>{/if}
         </section>
-      {:else}
+      {:else if !followUp}
         <div class="empty"><div class="empty-icon"><PlayIcon size={28}/></div><span class="eyebrow">VISTA PREVIA</span><h2>¿Qué quieres construir?</h2><p>IntentOS elegirá internamente capacidades, especialistas y gates. Tú revisarás la solución propuesta antes de que comience la construcción.</p><ol><li>Describe el resultado deseado</li><li>Revisa la propuesta</li><li>Aprueba la construcción</li></ol></div>
       {/if}
     </aside>
@@ -425,7 +520,8 @@
   .dynamic-team{display:grid;grid-template-columns:1fr 1fr;gap:5px;list-style:none}.dynamic-team li{padding:7px;border-radius:var(--radius-sm);background:var(--color-surface-raised)}.dynamic-team li div{min-width:0;display:flex;flex-direction:column}.dynamic-team strong,.dynamic-team small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.dynamic-team strong{font-size:10px;color:var(--color-text-primary)}.dynamic-team small{font-size:9px;color:var(--color-text-muted)}.dynamic-team li.missing{outline:1px solid var(--color-danger)}@media(max-width:520px){.dynamic-team{grid-template-columns:1fr}}
   .head-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
   .showroom{display:flex;flex-direction:column;gap:7px;padding:10px;border:1px solid var(--color-border);border-radius:var(--radius-md);background:var(--color-surface)}.showroom-head{display:flex;justify-content:space-between;align-items:center;gap:10px}.showroom-head a{font-size:10px;color:var(--color-brand);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.showroom-frame{width:100%;height:280px;border:1px solid var(--color-border);border-radius:var(--radius-sm);background:var(--color-surface-sunken)}
-  .thread-history{list-style:none;display:flex;flex-direction:column;gap:6px;padding-bottom:var(--space-3);margin-bottom:var(--space-3);border-bottom:1px solid var(--color-border)}.thread-history li{display:grid;grid-template-columns:12px 1fr;align-items:center;gap:9px;padding:7px 8px;border-radius:var(--radius-md);background:var(--color-surface)}.thread-history strong{display:block;font-size:11px;color:var(--color-text-primary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.thread-history small{font-size:10px;color:var(--color-text-muted)}.dot.succeeded{background:var(--color-success)}.dot.cancelled{background:var(--color-text-muted)}
+  .dot.succeeded{background:var(--color-success)}.dot.cancelled{background:var(--color-text-muted)}
+  .chat{display:flex;flex-direction:column;gap:8px;padding-bottom:var(--space-3);margin-bottom:var(--space-3);border-bottom:1px solid var(--color-border)}.chat-head{display:flex;align-items:center;gap:9px}.esmeralda-avatar{flex:none;width:26px;height:26px;display:grid;place-items:center;border-radius:50%;background:var(--color-brand);color:var(--color-surface);font-size:12px;font-weight:700}.chat-head strong{font-size:12px;color:var(--color-text-primary)}.chat-head small{font-size:10px;color:var(--color-text-muted)}.chat-log{list-style:none;display:flex;flex-direction:column;gap:8px;max-height:320px;overflow-y:auto;padding-right:2px}.bubble{max-width:88%;padding:8px 10px;border-radius:var(--radius-md);background:var(--color-surface)}.bubble.user{align-self:flex-end;background:color-mix(in srgb,var(--color-brand) 14%,var(--color-surface))}.bubble.esmeralda{align-self:flex-start}.bubble.system{align-self:center;max-width:96%;background:transparent;border:1px dashed var(--color-border)}.bubble.queued{opacity:.6}.bubble.pending{font-style:italic;color:var(--color-text-muted)}.bubble-role{display:block;font-size:9px;letter-spacing:.06em;text-transform:uppercase;color:var(--color-brand);margin-bottom:2px}.bubble.system .bubble-role{color:var(--color-text-muted)}.bubble p{font-size:12px;line-height:1.5;color:var(--color-text-primary);white-space:pre-wrap}.bubble time{display:block;margin-top:3px;font-size:9px;color:var(--color-text-muted)}.bubble-empty{font-size:11px;color:var(--color-text-muted);text-align:center;padding:10px}
   .options{border:1px solid var(--color-border);border-radius:var(--radius-md);background:var(--color-surface)}.options>summary{display:flex;justify-content:space-between;gap:8px;padding:9px;cursor:pointer;font-size:11px;font-weight:var(--fw-semibold)}.options>summary small{color:var(--color-text-muted);font-weight:400}.options-body{display:flex;flex-direction:column;gap:10px;padding:0 9px 9px}.existing-toggle{display:flex;flex-direction:row;align-items:center;gap:8px}.existing-toggle input{width:auto}.proposal{display:flex;flex-direction:column;gap:12px;min-height:0;overflow:auto}.proposal-head{display:flex;justify-content:space-between;gap:12px;align-items:flex-start}.proposal-kind{max-width:220px;padding:5px 8px;border-radius:99px;background:color-mix(in srgb,var(--color-brand) 14%,transparent);color:var(--color-brand);font-size:10px;text-align:center}.proposal-summary{display:grid;grid-template-columns:1fr 1fr;gap:8px}.proposal-summary article{padding:10px;border-radius:var(--radius-md);background:var(--color-surface)}.proposal-summary small{font-size:9px;letter-spacing:.08em;color:var(--color-brand)}.proposal-summary p,.proposal-internal p,.experience-map p{font-size:11px;color:var(--color-text-secondary);white-space:pre-wrap}.proposal-internal{display:flex;flex-direction:column;gap:9px;padding-top:9px}.proposal-internal>p{padding:8px;border-radius:var(--radius-sm);background:var(--color-surface)}.experience-map{display:flex;flex-direction:column;gap:6px}.experience-map div{display:grid;grid-template-columns:24px 1fr;gap:8px;align-items:center;padding:8px;background:var(--color-surface);border-radius:var(--radius-md)}.experience-map span{display:grid;place-items:center;width:22px;height:22px;border-radius:50%;background:color-mix(in srgb,var(--color-brand) 16%,transparent);color:var(--color-brand);font-size:10px;font-weight:700}.proposal details{padding:9px;border:1px solid var(--color-border);border-radius:var(--radius-md)}.proposal summary{cursor:pointer;font-size:11px;color:var(--color-text-secondary)}.decision-actions{display:flex;gap:8px;flex-wrap:wrap}
   .revision{padding:11px;border:1px solid color-mix(in srgb,var(--color-brand) 45%,var(--color-border));border-radius:var(--radius-md);background:color-mix(in srgb,var(--color-brand) 7%,var(--color-surface))}.revision p,.revision li{font-size:11px;color:var(--color-text-secondary)}.revision ul{margin:7px 0 0 18px;display:flex;flex-direction:column;gap:3px}
   .workspace-review{display:flex;flex-direction:column;gap:8px;padding:9px;border:1px solid var(--color-border);border-radius:var(--radius-md);background:var(--color-surface)}.review-actions{display:flex;gap:7px;flex-wrap:wrap}.workspace-review p{font-size:11px;color:var(--color-success)}.workspace-review p.conflict{color:var(--color-danger)}.delivery-receipt{display:flex;flex-direction:column;gap:2px;padding:9px;border-radius:var(--radius-md);background:color-mix(in srgb,var(--color-success) 10%,var(--color-surface));color:var(--color-success)}.delivery-receipt span,.delivery-receipt small{font-size:10px;color:var(--color-text-secondary)}.change-list{max-height:160px;overflow:auto;list-style:none;display:flex;flex-direction:column;gap:3px}.change-list li{display:grid;grid-template-columns:58px 1fr;gap:7px;font:10px var(--font-mono)}.change-list span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.change-list b{text-transform:uppercase}.change-list b.added{color:var(--color-success)}.change-list b.modified{color:var(--color-brand)}.change-list b.removed{color:var(--color-danger)}

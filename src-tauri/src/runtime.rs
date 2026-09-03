@@ -23,6 +23,7 @@ use crate::corpus;
 use crate::error::AppError;
 use crate::local_agent;
 use crate::mission::{self, Mission};
+use crate::session;
 use crate::state::AppState;
 use crate::util::fs::{atomic_write, read_capped};
 
@@ -77,6 +78,15 @@ pub struct StartRunRequest {
     /// byte-for-byte: the raw `intent` field is used exactly as before.
     #[serde(default)]
     mission_id: Option<String>,
+    /// Optional conversation session (see `session.rs`) this run is a turn
+    /// of. Purely additive — omitting it preserves the original per-run
+    /// isolated-copy behavior exactly. When present, the workspace is
+    /// resolved from the session (reusing its evolving copy, or creating
+    /// it once on the session's first turn) instead of always copying the
+    /// original project into a fresh run-scoped directory. See the
+    /// `session_id` branch in `runtime_start` below.
+    #[serde(default)]
+    session_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -130,6 +140,11 @@ pub struct RunSummary {
     /// old files exactly like the existing `capability_id` precedent.
     #[serde(default)]
     mission_id: Option<String>,
+    /// Mirrors StartRunRequest.session_id — absent on every run persisted
+    /// before conversational sessions existed, same `#[serde(default)]`
+    /// precedent as `mission_id`/`capability_id` above.
+    #[serde(default)]
+    session_id: Option<String>,
     status: RunStatus,
     current_stage: Option<String>,
     stages: Vec<RunStage>,
@@ -1468,6 +1483,13 @@ pub async fn runtime_discard_workspace(
         })?;
     run.workspace_path = None;
     run.updated_at = Utc::now();
+    // The deleted directory was the session's shared evolving workspace,
+    // not a run-private copy — clear the session's pointer too, or the
+    // next conversational turn would try to reuse a path that no longer
+    // exists instead of creating a fresh one.
+    if let Some(session_id) = run.session_id.as_deref() {
+        session::clear_workspace_path(&state, session_id).await?;
+    }
     persist(&state, &run).await
 }
 
@@ -1552,6 +1574,47 @@ pub async fn runtime_cancel(state: State<'_, AppState>, run_id: String) -> Resul
         persist(&state, &run).await?;
     }
     Ok(())
+}
+
+/// Resolves the workspace a conversational turn builds in: the session's
+/// existing evolving copy if one is already there, or — only on the
+/// session's first-ever turn — a fresh copy of the original project,
+/// which is then attached to the session so every later turn reuses it.
+/// Pulled out of `runtime_start` so it's testable without a `tauri::AppHandle`
+/// or `Channel` (see `resolve_session_workspace_reuses_the_same_directory_across_turns`).
+/// The session id is always derived from `project_path` here — never taken
+/// as-is from the caller — so a stale or mismatched id on `StartRunRequest`
+/// can never point this turn at a different session's workspace than the
+/// one `session_get_or_create`/`session_append_message` for the same
+/// project resolve to. Callers only need to signal "this is a
+/// conversational turn" (`StartRunRequest.session_id: Some(_)`); the value
+/// itself is not load-bearing.
+async fn resolve_session_workspace(
+    state: &AppState,
+    project: &Path,
+    project_path: &str,
+) -> Result<(String, PathBuf), AppError> {
+    let session_id = session::session_id_for(project_path);
+    let existing_workspace = session::get_or_create(state, project_path)
+        .await?
+        .workspace_path
+        .filter(|path| Path::new(path).is_dir());
+    let workspace = match existing_workspace {
+        Some(path) => PathBuf::from(path),
+        None => {
+            let workspace = session::session_workspace_dir(&state.app_data_dir, &session_id);
+            let source = project.to_path_buf();
+            let destination = workspace.clone();
+            tokio::task::spawn_blocking(move || copy_workspace(&source, &destination))
+                .await
+                .map_err(|e| AppError::Internal {
+                    message: e.to_string(),
+                })??;
+            session::set_workspace_path(state, &session_id, &workspace.to_string_lossy()).await?;
+            workspace
+        }
+    };
+    Ok((session_id, workspace))
 }
 
 #[tauri::command]
@@ -1659,33 +1722,56 @@ pub async fn runtime_start(
         &request.stage_ids,
         &request.stage_kinds,
     );
-    let resume = resumable_run(
-        &state,
-        intent,
-        &project_path,
-        &request.runbook_id,
-        &request.capability_id,
-        &request.capability_ids,
-        &default_stages,
-    )
-    .await;
     let run_id = Uuid::new_v4().to_string();
-    let (stages, workspace) = if let Some((previous_id, stages, workspace)) = resume {
-        if let Some(handle) = state.runtime_jobs.lock().await.remove(&previous_id) {
-            handle.abort();
-        }
-        (stages, workspace)
-    } else {
-        let workspace = run_workspace_dir(&state.app_data_dir, &run_id);
-        let source = project.clone();
-        let destination = workspace.clone();
-        tokio::task::spawn_blocking(move || copy_workspace(&source, &destination))
-            .await
-            .map_err(|e| AppError::Internal {
-                message: e.to_string(),
-            })??;
+    // A conversational turn (`session_id` present) never recopies the
+    // original project: it reuses the session's one evolving workspace, so
+    // turn 2 builds on top of what turn 1 actually produced instead of
+    // starting over from the untouched source. This is the fix for the gap
+    // the pre-conversation checkpoint left open — see session.rs's module
+    // doc comment. The crash-resume path below (`resumable_run`, matching
+    // on an *identical* intent) is unrelated and only applies to
+    // session-less runs; a new conversational instruction never has the
+    // same intent text as the previous turn, so it would never have
+    // matched anyway.
+    let mut resolved_session_id: Option<String> = None;
+    let (stages, workspace) = if request.session_id.is_some() {
+        let (session_id, workspace) =
+            resolve_session_workspace(&state, &project, &project_path).await?;
+        resolved_session_id = Some(session_id);
         (default_stages, workspace)
+    } else {
+        let resume = resumable_run(
+            &state,
+            intent,
+            &project_path,
+            &request.runbook_id,
+            &request.capability_id,
+            &request.capability_ids,
+            &default_stages,
+        )
+        .await;
+        if let Some((previous_id, stages, workspace)) = resume {
+            if let Some(handle) = state.runtime_jobs.lock().await.remove(&previous_id) {
+                handle.abort();
+            }
+            (stages, workspace)
+        } else {
+            let workspace = run_workspace_dir(&state.app_data_dir, &run_id);
+            let source = project.clone();
+            let destination = workspace.clone();
+            tokio::task::spawn_blocking(move || copy_workspace(&source, &destination))
+                .await
+                .map_err(|e| AppError::Internal {
+                    message: e.to_string(),
+                })??;
+            (default_stages, workspace)
+        }
     };
+    // Captures this turn's *starting* workspace state, whether that's a
+    // brand-new copy or (for a session turn past the first) the state left
+    // by the previous turn. `build_review`/`runtime_apply` diff against
+    // this, so a session turn's review/apply naturally scopes to "what
+    // changed this turn", not the whole conversation's accumulated diff.
     persist_manifest(&state.app_data_dir, &run_id, "initial", &workspace).await?;
     let now = Utc::now();
     let run = RunSummary {
@@ -1697,6 +1783,7 @@ pub async fn runtime_start(
         capability_id: request.capability_id,
         capability_ids: request.capability_ids,
         mission_id: request.mission_id,
+        session_id: resolved_session_id,
         provider_id: request.provider_id,
         status: RunStatus::Queued,
         current_stage: None,
@@ -2633,6 +2720,7 @@ mod tests {
             agent_slugs: (1..=5).map(|index| format!("agent-{index}")).collect(),
             provider_id: Some(PROVIDER_ID.into()),
             mission_id: None,
+            session_id: None,
         }
     }
     #[test]
@@ -2729,6 +2817,7 @@ mod tests {
             capability_id: "digital-experience".into(),
             capability_ids: vec!["digital-experience".into(), "systems-data".into()],
             mission_id: None,
+            session_id: None,
             provider_id: Some(PROVIDER_ID.into()),
             status: RunStatus::Running,
             current_stage: None,
@@ -3102,6 +3191,7 @@ mod tests {
             capability_id: "digital-experience".into(),
             capability_ids: vec!["digital-experience".into()],
             mission_id: None,
+            session_id: None,
             provider_id: Some(PROVIDER_ID.into()),
             status: RunStatus::Running,
             current_stage: None,
@@ -3136,6 +3226,7 @@ mod tests {
             capability_id: capability_id.into(),
             capability_ids,
             mission_id: None,
+            session_id: None,
             provider_id: Some(PROVIDER_ID.into()),
             status: RunStatus::Running,
             current_stage: None,
@@ -3232,6 +3323,78 @@ mod tests {
         );
         assert!(!destination.join(".git").exists());
     }
+
+    fn test_state(app_data: &Path) -> AppState {
+        AppState {
+            app_data_dir: app_data.to_path_buf(),
+            corpus_cache: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+            corpus_refresh_in_flight: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            settings: std::sync::Arc::new(tokio::sync::RwLock::new(
+                crate::commands::settings::SettingsLoadState::FirstLaunch,
+            )),
+            updater_state: crate::commands::updater::empty_state(),
+            runtime_jobs: std::sync::Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            local_model_process: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+            preview_process: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+        }
+    }
+
+    /// The exact bug the conversational rewrite fixes: before it, every
+    /// follow-up turn called `copy_workspace(original_project, ...)` again
+    /// (see the pre-fix git history), so turn 2 silently lost whatever
+    /// turn 1 had just built. `resolve_session_workspace` must instead
+    /// hand back the *same* directory turn 2, 3, ... — proven here by
+    /// writing a file as "turn 1" and confirming "turn 2" still sees it
+    /// rather than getting a fresh copy of the (untouched) source.
+    #[tokio::test]
+    async fn resolve_session_workspace_reuses_the_same_directory_across_turns() {
+        let app_data = tempfile::tempdir().unwrap();
+        let source = tempfile::tempdir().unwrap();
+        fs::write(source.path().join("index.html"), b"<h1>original</h1>").unwrap();
+        let state = test_state(app_data.path());
+        let project_path = source.path().to_string_lossy().into_owned();
+
+        let (session_id_1, turn1) = resolve_session_workspace(&state, source.path(), &project_path)
+            .await
+            .unwrap();
+        fs::write(turn1.join("index.html"), b"<h1>agrega el visor 3D</h1>").unwrap();
+        fs::write(turn1.join("viewer3d.js"), b"// turn 1 output").unwrap();
+
+        let (session_id_2, turn2) = resolve_session_workspace(&state, source.path(), &project_path)
+            .await
+            .unwrap();
+
+        assert_eq!(session_id_1, session_id_2, "same project must resolve to the same session");
+        assert_eq!(turn1, turn2, "turn 2 must reuse turn 1's exact workspace");
+        assert_eq!(
+            fs::read(turn2.join("index.html")).unwrap(),
+            b"<h1>agrega el visor 3D</h1>",
+            "turn 2 must see turn 1's edit, not a fresh copy of the original"
+        );
+        assert!(
+            turn2.join("viewer3d.js").exists(),
+            "turn 2 must see files turn 1 created"
+        );
+        // The protected original is untouched by either turn.
+        assert_eq!(
+            fs::read(source.path().join("index.html")).unwrap(),
+            b"<h1>original</h1>"
+        );
+
+        // A different session for a different project must never share
+        // this workspace.
+        let other_source = tempfile::tempdir().unwrap();
+        fs::write(other_source.path().join("index.html"), b"<h1>other</h1>").unwrap();
+        let other_project_path = other_source.path().to_string_lossy().into_owned();
+        let (other_session_id, other) =
+            resolve_session_workspace(&state, other_source.path(), &other_project_path)
+                .await
+                .unwrap();
+        assert_ne!(other_session_id, session_id_1);
+        assert_ne!(other, turn1);
+        assert!(!other.join("viewer3d.js").exists());
+    }
+
     #[test]
     fn manifest_is_sorted_and_hashes_file_contents() {
         let workspace = tempfile::tempdir().unwrap();
@@ -3319,6 +3482,7 @@ mod tests {
             capability_id: "iot".into(),
             capability_ids: vec!["iot".into()],
             mission_id: None,
+            session_id: None,
             provider_id: Some(PROVIDER_ID.into()),
             status: RunStatus::Running,
             current_stage: Some("development".into()),
@@ -3348,6 +3512,7 @@ mod tests {
             capability_id: "iot".into(),
             capability_ids: vec!["iot".into()],
             mission_id: None,
+            session_id: None,
             provider_id: Some(PROVIDER_ID.into()),
             status: RunStatus::Failed,
             current_stage: Some("development".into()),
@@ -3389,6 +3554,7 @@ mod tests {
             capability_ids: vec!["digital-experience".into()],
             provider_id: Some(PROVIDER_ID.into()),
             mission_id: None,
+            session_id: None,
             status: RunStatus::Succeeded,
             current_stage: None,
             stages,
@@ -3414,6 +3580,7 @@ mod tests {
             capability_id: "iot".into(),
             capability_ids: vec!["iot".into()],
             mission_id: None,
+            session_id: None,
             provider_id: Some(PROVIDER_ID.into()),
             status: RunStatus::Running,
             current_stage: Some("development".into()),
@@ -3444,6 +3611,7 @@ mod tests {
             capability_id: "digital-experience".into(),
             capability_ids: vec!["digital-experience".into()],
             mission_id: None,
+            session_id: None,
             provider_id: Some(PROVIDER_ID.into()),
             status: RunStatus::Running,
             current_stage: Some("development".into()),
@@ -3490,6 +3658,7 @@ mod tests {
             capability_id: "digital-experience".into(),
             capability_ids: vec!["digital-experience".into()],
             mission_id: Some(mission.id.clone()),
+            session_id: None,
             provider_id: Some(PROVIDER_ID.into()),
             status: RunStatus::Running,
             current_stage: Some("development".into()),
@@ -3622,6 +3791,7 @@ mod tests {
             capability_ids: vec![],
             provider_id: None,
             mission_id: None,
+            session_id: None,
             status: RunStatus::Running,
             current_stage: Some("direction".into()),
             stages: vec![],

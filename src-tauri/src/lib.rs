@@ -18,6 +18,7 @@ mod preview;
 mod registry;
 mod render;
 mod runtime;
+mod session;
 mod soup;
 mod state;
 mod temporal;
@@ -228,6 +229,8 @@ pub fn run() {
             preview::preview_start,
             preview::preview_stop,
             preview::preview_status,
+            session::session_get_or_create,
+            session::session_append_message,
             temporal::temporal_status,
             temporal::temporal_start_mission,
             temporal::temporal_mission_status,

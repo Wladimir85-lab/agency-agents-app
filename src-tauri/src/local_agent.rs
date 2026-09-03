@@ -2003,6 +2003,67 @@ mod tests {
         // runtime_start, provider_id, mission::* or any provider probe.
     }
 
+    // Same proof as the vertical test above, but through the Ollama
+    // backend instead of IntentOS's own managed llama-server — this is
+    // what "Esmeralda's engine is Qwen" cashes out to today: a real
+    // qwen2.5-coder model, reachable, actually writing a file in response
+    // to a conversational-style instruction. Ignored by default (needs a
+    // running `ollama serve` with `qwen2.5-coder:3b` pulled) and mutates
+    // process env vars, so it is meant to be run alone, not alongside
+    // other tests:
+    //   cargo test --lib local_agent::tests::vertical_slice_direction_stage_with_real_ollama_engine -- --ignored --nocapture
+    #[tokio::test]
+    #[ignore]
+    async fn vertical_slice_direction_stage_with_real_ollama_engine() {
+        let app_data = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+
+        std::env::set_var("INTENTOS_INFERENCE_BACKEND", "ollama");
+        // Continuing an existing conversation with Esmeralda about a named
+        // project — the exact shape a follow-up turn's intent has after
+        // buildConversationalIntent wraps it (see session.svelte.ts) —
+        // not a synthetic one-off instruction.
+        let intent = "CONVERSACIÓN PREVIA CON ESMERALDA SOBRE ESTE PROYECTO\n\
+             USUARIO: Continuemos con Naval Studio.\n\
+             ESMERALDA: Listo, aquí sigo.\n\
+             ---\n\
+             NUEVA INSTRUCCIÓN DEL USUARIO:\n\
+             Agrega un archivo NOTES.md que describa en 2-3 líneas el visor 3D que vamos a construir para Naval Studio.";
+        let channel = Channel::new(|_| Ok(()));
+        let loop_started = Instant::now();
+        let result = run_local_agentic_stage(
+            app_data.path(),
+            workspace.path(),
+            intent,
+            "vertical-slice-ollama-run",
+            "direction",
+            "direction",
+            1,
+            None,
+            &channel,
+            &settings_arc(),
+        )
+        .await;
+        std::env::remove_var("INTENTOS_INFERENCE_BACKEND");
+        let result = result.expect("run_local_agentic_stage should not error against a live, reachable Ollama engine");
+        let loop_elapsed = loop_started.elapsed();
+
+        println!("\n========== DIAGNÓSTICO: vertical_slice_direction_stage_with_real_ollama_engine ==========");
+        println!("--- transcripción completa ---\n{}", result.combined);
+        println!("iterations = {}", result.iterations);
+        println!("wrote_file = {}", result.wrote_file);
+        println!("passed (INTENTOS_GATE:PASS) = {}", result.passed);
+        println!("tiempo del loop = {:.3}s", loop_elapsed.as_secs_f64());
+        println!("workspace = {}", workspace.path().display());
+        println!("==========================================================================================\n");
+
+        assert!(
+            result.wrote_file,
+            "expected at least one real write_file action; transcript:\n{}",
+            result.combined
+        );
+    }
+
     // Ignored for the same reason as the direction vertical test — needs a
     // live, ready local engine. Proves the generalized loop end to end for
     // a second stage kind: reads a real prior artifact (seeded here to

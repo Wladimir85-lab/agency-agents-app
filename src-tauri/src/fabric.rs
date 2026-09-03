@@ -88,12 +88,33 @@ pub fn status() -> FabricStatus {
                 "qaRealityLoop",
                 "replaceable",
             ),
+            // Esmeralda's persistent memory (session.rs): one conversation
+            // per project, with the workspace it evolves. Distinct from
+            // EngineeringMemory (run evidence/manifests) — this is the
+            // human-facing conversation itself, not the audit trail.
+            binding(
+                "conversationMemory",
+                "ConversationMemory",
+                "projectSessionsV1",
+                "replaceable",
+            ),
             binding(
                 "showroom",
                 "ShowroomPublisher",
                 "localPreviewV1",
                 "replaceable",
             ),
+            // Reserved, not yet bound: publishing the approved workspace to
+            // a temporary internet-reachable URL (open it from a phone,
+            // share it with a client) without exposing the developer's own
+            // localhost. `localPreviewV1` above only ever serves loopback.
+            // No provider is wired here — doing so without the user
+            // choosing one (and, for most providers, supplying an account
+            // or token) would mean either fabricating a capability that
+            // isn't real or silently trusting a third-party relay with the
+            // user's local dev server on their behalf. `active_binding:
+            // "none"` is the honest state until that decision is made.
+            binding("publicPreview", "PublicPreviewPublisher", "none", "replaceable"),
             binding(
                 "delivery",
                 "DeliveryPublisher",
@@ -144,7 +165,7 @@ mod tests {
     fn intentos_owns_every_contract_and_external_bindings_are_replaceable() {
         let fabric = status();
         assert_eq!(fabric.owner, "IntentOS");
-        assert_eq!(fabric.bindings.len(), 12);
+        assert_eq!(fabric.bindings.len(), 14);
         assert!(fabric
             .bindings
             .iter()
@@ -160,6 +181,17 @@ mod tests {
             binding.contract == "LocalModelGateway"
                 && binding.active_binding == "localGatewayFoundationV1"
         }));
+        assert!(fabric.bindings.iter().any(|binding| {
+            binding.contract == "ConversationMemory"
+                && binding.active_binding == "projectSessionsV1"
+        }));
+        // Honest placeholder, not a fabricated capability: no provider is
+        // wired for a public-reachable preview URL until the user picks one.
+        assert!(fabric
+            .bindings
+            .iter()
+            .any(|binding| binding.contract == "PublicPreviewPublisher"
+                && binding.active_binding == "none"));
     }
 
     #[test]
