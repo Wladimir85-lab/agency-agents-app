@@ -246,6 +246,25 @@ fn find_tunnel_url(line: &str) -> Option<String> {
     candidate.contains(".trycloudflare.com").then_some(candidate)
 }
 
+/// The `host:port` cloudflared should present to the local origin as the
+/// `Host` header, via `--http-host-header`. Without this, a request that
+/// arrives at the Showroom's dev server carrying the tunnel's own
+/// `*.trycloudflare.com` `Host` header gets rejected outright: Vite (and
+/// everything built on it — Astro, SvelteKit, every dev-script shape
+/// `preview.rs` actually launches) refuses any `Host` not in its
+/// `server.allowedHosts` allowlist as a DNS-rebinding protection, and
+/// IntentOS has no business relaxing that allowlist inside a generated
+/// project just to make tunnelling convenient. Rewriting the header back
+/// to what the dev server already trusts (its own `local_url`) satisfies
+/// that check without touching the Showroom's own config at all. Found by
+/// hand this session: the very first real quick tunnel against a real
+/// Astro Showroom 403'd with exactly this message before this existed.
+fn local_host_header(local_url: &str) -> Option<&str> {
+    local_url
+        .strip_prefix("http://")
+        .or_else(|| local_url.strip_prefix("https://"))
+}
+
 #[tauri::command]
 pub async fn public_preview_start(
     state: State<'_, AppState>,
@@ -279,7 +298,11 @@ pub async fn public_preview_start(
 
     let mut command = Command::new(&binary);
     command
-        .args(["tunnel", "--no-autoupdate", "--url", &local_url])
+        .args(["tunnel", "--no-autoupdate", "--url", &local_url]);
+    if let Some(host_header) = local_host_header(&local_url) {
+        command.args(["--http-host-header", host_header]);
+    }
+    command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -478,6 +501,13 @@ mod tests {
             find_tunnel_url("some https://example.com unrelated link"),
             None
         );
+    }
+
+    #[test]
+    fn local_host_header_strips_the_scheme() {
+        assert_eq!(local_host_header("http://localhost:4321"), Some("localhost:4321"));
+        assert_eq!(local_host_header("http://127.0.0.1:1430"), Some("127.0.0.1:1430"));
+        assert_eq!(local_host_header("https://localhost:3000"), Some("localhost:3000"));
     }
 
     #[test]
