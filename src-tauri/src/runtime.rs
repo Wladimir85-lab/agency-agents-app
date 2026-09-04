@@ -713,14 +713,158 @@ fn clean_text(s: &str) -> String {
     out
 }
 
-pub(crate) fn output_gate_passed(output: &str) -> bool {
+/// Whether an executor's raw output carries an explicit gate verdict at
+/// all, and if so which one — `output_gate_passed` collapses `Fail` and
+/// `Missing` into the same `false`, which is correct for pass/fail control
+/// flow but hides a real distinction: a process that ends with no verdict
+/// (crashed, got cut off, or simply never said `INTENTOS_GATE:` anything)
+/// is a different failure mode than one that explicitly reported FAIL, and
+/// P0 of the executor↔runtime contract audit needs to tell them apart for
+/// diagnosis/evidence, not just for the boolean outcome.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GateMarker {
+    Pass,
+    Fail,
+    Missing,
+}
+
+pub(crate) fn gate_marker_status(output: &str) -> GateMarker {
     let passed = output.rfind("INTENTOS_GATE:PASS");
     let failed = output.rfind("INTENTOS_GATE:FAIL");
     match (passed, failed) {
-        (Some(_), None) => true,
-        (Some(pass), Some(fail)) => pass > fail,
-        (None, _) => false,
+        (Some(_), None) => GateMarker::Pass,
+        (None, Some(_)) => GateMarker::Fail,
+        (Some(pass), Some(fail)) => {
+            if pass > fail {
+                GateMarker::Pass
+            } else {
+                GateMarker::Fail
+            }
+        }
+        (None, None) => GateMarker::Missing,
     }
+}
+
+pub(crate) fn output_gate_passed(output: &str) -> bool {
+    gate_marker_status(output) == GateMarker::Pass
+}
+
+/// Stage kinds where "the model said PASS" is not, on its own, credible
+/// evidence that real work happened — mirrors `stage_uses_local_executor`'s
+/// kind set deliberately: these are exactly the kinds that are expected to
+/// materialize something in the workspace (a brief, an architecture
+/// artifact, real code), whether they ran on the sovereign local executor
+/// or an external CLI. `qa` and `reality` stages legitimately can pass
+/// having only *read* the workspace, so they are not held to this bar.
+fn stage_requires_workspace_evidence(stage_kind: &str) -> bool {
+    matches!(stage_kind, "direction" | "architecture" | "development")
+}
+
+/// Diagnosis of what actually happened to one external-executor stage
+/// attempt, kept separate from — and strictly more informative than — the
+/// plain pass/fail boolean the run loop consumes. Persisted as evidence
+/// (`{stage}-{attempt}.completion.json`) alongside the existing stdout/
+/// stderr/manifest/reality-verdict files, so "the model's process ended"
+/// and "the stage's work is actually done" are always distinguishable
+/// after the fact, per the executor↔runtime contract audit (P0).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase", tag = "status", content = "reason")]
+pub(crate) enum StageCompletionDiagnosis {
+    Completed,
+    Failed(String),
+    Incomplete(String),
+    ContractViolated(String),
+}
+
+impl StageCompletionDiagnosis {
+    fn passed(&self) -> bool {
+        matches!(self, StageCompletionDiagnosis::Completed)
+    }
+}
+
+/// The authoritative completion decision for one external-executor (Claude
+/// Code / Codex) stage attempt. Evidence can only ever downgrade a claimed
+/// PASS to a failure — it never manufactures a PASS out of a genuine FAIL
+/// or a crashed process — matching the constitutional rule that a gate
+/// marker "puede formar parte del protocolo; no debe constituir la
+/// realidad" on its own.
+///
+/// `workspace_changed` must be computed by the caller from a real
+/// before/after manifest diff of the actual workspace directory — this
+/// function is pure and never touches disk, precisely so the five
+/// contract cases (A-E) can be asserted directly, with no process spawn
+/// and no filesystem, in a unit test.
+fn evaluate_external_stage_completion(
+    stage_kind: &str,
+    process_success: bool,
+    combined_output: &str,
+    workspace_changed: bool,
+    is_reality: bool,
+    strict_enabled: bool,
+    criteria_len: usize,
+) -> (bool, StageCompletionDiagnosis, Option<String>) {
+    let (strict_or_sentinel_passed, strict_reason) =
+        resolve_stage_outcome(is_reality, strict_enabled, combined_output, criteria_len);
+
+    if !process_success {
+        return (
+            false,
+            StageCompletionDiagnosis::Failed(
+                "el proceso del executor externo terminó con un código de salida distinto de cero".into(),
+            ),
+            strict_reason,
+        );
+    }
+    if gate_marker_status(combined_output) == GateMarker::Missing {
+        return (
+            false,
+            StageCompletionDiagnosis::Incomplete(
+                "el proceso del executor externo terminó sin ningún marcador INTENTOS_GATE:PASS o INTENTOS_GATE:FAIL explícito — el modelo del proceso terminó, pero el trabajo de la etapa no declaró un veredicto".into(),
+            ),
+            strict_reason,
+        );
+    }
+    if !strict_or_sentinel_passed {
+        let reason = strict_reason
+            .clone()
+            .unwrap_or_else(|| "INTENTOS_GATE:FAIL".into());
+        return (false, StageCompletionDiagnosis::Failed(reason), strict_reason);
+    }
+    if stage_requires_workspace_evidence(stage_kind) && !workspace_changed {
+        return (
+            false,
+            StageCompletionDiagnosis::ContractViolated(format!(
+                "la etapa reportó INTENTOS_GATE:PASS pero el workspace no muestra ningún cambio real de archivos entre el inicio y el fin del intento, lo cual es requerido para una etapa de tipo '{stage_kind}'"
+            )),
+            strict_reason,
+        );
+    }
+    (true, StageCompletionDiagnosis::Completed, strict_reason)
+}
+
+/// Narrow, explicit, secondary-only signal: text that reads as the model
+/// promising to pick this stage back up in a future turn. This is
+/// deliberately NOT part of `evaluate_external_stage_completion`'s pass/
+/// fail decision — a one-shot invocation genuinely has no future turn, so
+/// this is surfaced as a visible warning for the human/evidence trail,
+/// never used on its own to fail an otherwise-contract-satisfying stage
+/// (that would risk a false FAIL on a stage that merely *mentions* a
+/// legitimate long-lived background process, e.g. a dev server left
+/// running for Showroom/preview on purpose).
+fn contains_deferred_continuation_claim(output: &str) -> bool {
+    let lower = output.to_lowercase();
+    const PHRASES: &[&str] = &[
+        "continuaré cuando",
+        "continuaré una vez",
+        "seguiré cuando termine",
+        "i'll continue once",
+        "i will continue once",
+        "will continue in the background and",
+        "once it finishes i will",
+        "cuando termine, continuaré",
+        "cuando termine continuaré",
+    ];
+    PHRASES.iter().any(|phrase| lower.contains(phrase))
 }
 
 /// Whether a stage's *kind* is one the sovereign local executor
@@ -1920,6 +2064,7 @@ pub async fn runtime_start(
                                 &prompt,
                                 &current.id,
                                 &stage_id,
+                                &current.stages[index].kind,
                                 attempt,
                                 &run_evidence_dir(&app_data, &current.id),
                                 &on_event,
@@ -2027,6 +2172,7 @@ pub async fn runtime_start(
                                     &fix_prompt,
                                     &current.id,
                                     "development",
+                                    &current.stages[development_index].kind,
                                     current.stages[development_index].attempt,
                                     &run_evidence_dir(&app_data, &current.id),
                                     &on_event,
@@ -2221,6 +2367,7 @@ async fn run_codex_stage(
     prompt: &str,
     run_id: &str,
     stage_id: &str,
+    stage_kind: &str,
     attempt: u8,
     evidence_dir: &Path,
     channel: &Channel<RunEvent>,
@@ -2233,6 +2380,20 @@ async fn run_codex_stage(
     // failures. Keep a finite safety ceiling, but size it for real production.
     const MAX_STAGE_RUNTIME: Duration = Duration::from_secs(60 * 60 * 2);
     let execution = async {
+        // Executor↔runtime contract (P0): a claimed INTENTOS_GATE:PASS from
+        // an external CLI is only credible for stage kinds that are
+        // expected to materialize real work if the workspace actually
+        // changed. Snapshotting here (not reusing the outer loop's
+        // before/after manifest files) keeps this self-contained and never
+        // risks the already-verified before/after evidence write path.
+        let before_manifest = {
+            let root = project.to_path_buf();
+            tokio::task::spawn_blocking(move || workspace_manifest(&root))
+                .await
+                .map_err(|e| AppError::Internal {
+                    message: e.to_string(),
+                })??
+        };
         let mut child = Command::new(codex_binary())
             .args([
                 "exec",
@@ -2370,8 +2531,24 @@ async fn run_codex_stage(
             .await;
         }
         let strict_enabled = reality_gate_strict_enabled();
-        let (final_passed, strict_reason) =
-            resolve_stage_outcome(is_reality, strict_enabled, &combined, criteria_len);
+        let after_manifest = {
+            let root = project.to_path_buf();
+            tokio::task::spawn_blocking(move || workspace_manifest(&root))
+                .await
+                .map_err(|e| AppError::Internal {
+                    message: e.to_string(),
+                })??
+        };
+        let workspace_changed = !manifest_changes(&before_manifest, &after_manifest).is_empty();
+        let (final_passed, diagnosis, strict_reason) = evaluate_external_stage_completion(
+            stage_kind,
+            status.success(),
+            &combined,
+            workspace_changed,
+            is_reality,
+            strict_enabled,
+            criteria_len,
+        );
         if let Some(reason) = &strict_reason {
             // Persisted alongside the existing stdout/stderr/manifest/
             // criteria evidence — the specific, diagnosable reason behind
@@ -2391,7 +2568,30 @@ async fn run_codex_stage(
                 "Reality gate strict mode: structured verdict is authoritative for this stage"
             );
         }
-        Ok::<bool, AppError>(status.success() && final_passed)
+        let _ = atomic_write(
+            &evidence_dir.join(format!("{evidence_stage_id}-{attempt}.completion.json")),
+            &serde_json::to_vec_pretty(&diagnosis).unwrap_or_default(),
+        )
+        .await;
+        if !matches!(diagnosis, StageCompletionDiagnosis::Completed) {
+            tracing::warn!(
+                run_id = %run_id,
+                stage_id = %stage_id,
+                attempt,
+                workspace_changed,
+                ?diagnosis,
+                "External executor stage did not complete per the executor\u{2194}runtime contract"
+            );
+        }
+        if contains_deferred_continuation_claim(&combined) {
+            let _ = channel.send(RunEvent::Output {
+                run_id: run_id.into(),
+                stage_id: stage_id.into(),
+                stream: "system".into(),
+                text: "ADVERTENCIA: el texto del agente sugiere que continuará este trabajo en un futuro turno; esta es una invocación one-shot y no existe un futuro turno que la retome. Este aviso es informativo y no decide por sí solo si la etapa pasó.".into(),
+            });
+        }
+        Ok::<bool, AppError>(diagnosis.passed())
     };
     tokio::time::timeout(MAX_STAGE_RUNTIME, execution)
         .await
@@ -2430,6 +2630,7 @@ async fn run_claude_stage(
     prompt: &str,
     run_id: &str,
     stage_id: &str,
+    stage_kind: &str,
     attempt: u8,
     evidence_dir: &Path,
     channel: &Channel<RunEvent>,
@@ -2438,6 +2639,17 @@ async fn run_claude_stage(
 ) -> Result<bool, AppError> {
     const MAX_STAGE_RUNTIME: Duration = Duration::from_secs(60 * 60 * 2);
     let execution = async {
+        // See the matching comment in run_codex_stage: same executor↔runtime
+        // contract (P0), snapshotted independently per provider so neither
+        // path's already-verified behavior depends on the other.
+        let before_manifest = {
+            let root = project.to_path_buf();
+            tokio::task::spawn_blocking(move || workspace_manifest(&root))
+                .await
+                .map_err(|e| AppError::Internal {
+                    message: e.to_string(),
+                })??
+        };
         let mut child = claude_command()
             .args([
                 "-p",
@@ -2594,8 +2806,24 @@ async fn run_claude_stage(
             .await;
         }
         let strict_enabled = reality_gate_strict_enabled();
-        let (final_passed, strict_reason) =
-            resolve_stage_outcome(is_reality, strict_enabled, &combined, criteria_len);
+        let after_manifest = {
+            let root = project.to_path_buf();
+            tokio::task::spawn_blocking(move || workspace_manifest(&root))
+                .await
+                .map_err(|e| AppError::Internal {
+                    message: e.to_string(),
+                })??
+        };
+        let workspace_changed = !manifest_changes(&before_manifest, &after_manifest).is_empty();
+        let (final_passed, diagnosis, strict_reason) = evaluate_external_stage_completion(
+            stage_kind,
+            status.success(),
+            &combined,
+            workspace_changed,
+            is_reality,
+            strict_enabled,
+            criteria_len,
+        );
         if let Some(reason) = &strict_reason {
             // Persisted alongside the existing stdout/stderr/manifest/
             // criteria evidence — the specific, diagnosable reason behind
@@ -2615,7 +2843,34 @@ async fn run_claude_stage(
                 "Reality gate strict mode: structured verdict is authoritative for this stage"
             );
         }
-        Ok::<bool, AppError>(status.success() && final_passed)
+        // Executor↔runtime contract evidence (P0) — always written, not
+        // only on a contract violation, so "why did this attempt end up
+        // this way" never depends on remembering to check a second place
+        // only when something went wrong.
+        let _ = atomic_write(
+            &evidence_dir.join(format!("{evidence_stage_id}-{attempt}.completion.json")),
+            &serde_json::to_vec_pretty(&diagnosis).unwrap_or_default(),
+        )
+        .await;
+        if !matches!(diagnosis, StageCompletionDiagnosis::Completed) {
+            tracing::warn!(
+                run_id = %run_id,
+                stage_id = %stage_id,
+                attempt,
+                workspace_changed,
+                ?diagnosis,
+                "External executor stage did not complete per the executor\u{2194}runtime contract"
+            );
+        }
+        if contains_deferred_continuation_claim(&combined) {
+            let _ = channel.send(RunEvent::Output {
+                run_id: run_id.into(),
+                stage_id: stage_id.into(),
+                stream: "system".into(),
+                text: "ADVERTENCIA: el texto del agente sugiere que continuará este trabajo en un futuro turno; esta es una invocación one-shot y no existe un futuro turno que la retome. Este aviso es informativo y no decide por sí solo si la etapa pasó.".into(),
+            });
+        }
+        Ok::<bool, AppError>(diagnosis.passed())
     };
     tokio::time::timeout(MAX_STAGE_RUNTIME, execution)
         .await
@@ -2636,6 +2891,7 @@ async fn run_provider_stage(
     prompt: &str,
     run_id: &str,
     stage_id: &str,
+    stage_kind: &str,
     attempt: u8,
     evidence_dir: &Path,
     channel: &Channel<RunEvent>,
@@ -2648,6 +2904,7 @@ async fn run_provider_stage(
             prompt,
             run_id,
             stage_id,
+            stage_kind,
             attempt,
             evidence_dir,
             channel,
@@ -2661,6 +2918,7 @@ async fn run_provider_stage(
             prompt,
             run_id,
             stage_id,
+            stage_kind,
             attempt,
             evidence_dir,
             channel,
@@ -2867,6 +3125,181 @@ mod tests {
             "quoted INTENTOS_GATE:PASS\nfinal INTENTOS_GATE:FAIL"
         ));
     }
+
+    // ---- Executor↔runtime contract (P0) — evaluate_external_stage_completion ----
+    //
+    // Cases A-E named to match the mandate's own acceptance criteria for
+    // this audit item, plus two negative controls (qa-kind exemption and
+    // the deferred-continuation heuristic never gating on its own).
+
+    #[test]
+    fn case_a_completes_correctly_with_real_workspace_evidence() {
+        let (passed, diagnosis, _) = evaluate_external_stage_completion(
+            "architecture",
+            true,
+            "Wrote the architecture doc.\nINTENTOS_GATE:PASS",
+            true, // workspace really changed
+            false,
+            false,
+            0,
+        );
+        assert!(passed);
+        assert_eq!(diagnosis, StageCompletionDiagnosis::Completed);
+    }
+
+    #[test]
+    fn case_b_process_ends_with_no_gate_marker_is_incomplete_not_fail() {
+        let (passed, diagnosis, _) = evaluate_external_stage_completion(
+            "development",
+            true,
+            "The process printed some progress and then just... ended.",
+            true,
+            false,
+            false,
+            0,
+        );
+        assert!(!passed);
+        assert!(matches!(diagnosis, StageCompletionDiagnosis::Incomplete(_)));
+    }
+
+    #[test]
+    fn case_c_claims_pass_but_workspace_never_changed_is_contract_violated() {
+        let (passed, diagnosis, _) = evaluate_external_stage_completion(
+            "architecture",
+            true,
+            "Everything looks good.\nINTENTOS_GATE:PASS",
+            false, // no real file changed
+            false,
+            false,
+            0,
+        );
+        assert!(!passed);
+        assert!(matches!(
+            diagnosis,
+            StageCompletionDiagnosis::ContractViolated(_)
+        ));
+    }
+
+    #[test]
+    fn case_d_deferred_continuation_language_is_flagged_but_does_not_gate_on_its_own() {
+        let output = "I started the migration.\nI'll continue once it finishes in the background.\nINTENTOS_GATE:PASS";
+        assert!(contains_deferred_continuation_claim(output));
+        // The heuristic is advisory only: a stage that otherwise satisfies
+        // the real contract (workspace changed, exit ok, explicit PASS)
+        // must still pass — the mandate is explicit that this signal alone
+        // must never gate, only warn.
+        let (passed, diagnosis, _) =
+            evaluate_external_stage_completion("development", true, output, true, false, false, 0);
+        assert!(passed);
+        assert_eq!(diagnosis, StageCompletionDiagnosis::Completed);
+    }
+
+    #[test]
+    fn case_e_legitimate_background_preview_process_does_not_cause_a_false_fail() {
+        let output = "Started the dev server; it will keep running in the background for the Showroom preview.\nINTENTOS_GATE:PASS";
+        // Must not be misread as a deferred-work promise.
+        assert!(!contains_deferred_continuation_claim(output));
+        let (passed, diagnosis, _) =
+            evaluate_external_stage_completion("development", true, output, true, false, false, 0);
+        assert!(passed);
+        assert_eq!(diagnosis, StageCompletionDiagnosis::Completed);
+    }
+
+    #[test]
+    fn process_exit_failure_overrides_even_a_claimed_pass() {
+        let (passed, diagnosis, _) = evaluate_external_stage_completion(
+            "architecture",
+            false, // non-zero exit
+            "INTENTOS_GATE:PASS",
+            true,
+            false,
+            false,
+            0,
+        );
+        assert!(!passed);
+        assert!(matches!(diagnosis, StageCompletionDiagnosis::Failed(_)));
+    }
+
+    #[test]
+    fn qa_and_reality_kinds_are_exempt_from_the_workspace_evidence_requirement() {
+        // QA/reality legitimately only read and verify; requiring a
+        // workspace mutation from them would produce a false FAIL on a
+        // genuinely correct verification-only pass.
+        let (passed, diagnosis, _) = evaluate_external_stage_completion(
+            "qa",
+            true,
+            "Inspected the workspace, everything required is present.\nINTENTOS_GATE:PASS",
+            false, // no file changed — correct for a pure verification stage
+            false,
+            false,
+            0,
+        );
+        assert!(passed);
+        assert_eq!(diagnosis, StageCompletionDiagnosis::Completed);
+    }
+
+    #[test]
+    fn explicit_fail_is_reported_as_failed_not_incomplete() {
+        let (passed, diagnosis, _) = evaluate_external_stage_completion(
+            "development",
+            true,
+            "Could not finish: missing dependency.\nINTENTOS_GATE:FAIL",
+            false,
+            false,
+            false,
+            0,
+        );
+        assert!(!passed);
+        assert!(matches!(diagnosis, StageCompletionDiagnosis::Failed(_)));
+    }
+
+    // ---- Executor↔runtime contract (P0) — real E2E against the real
+    // Claude Code CLI, not a mock. Ignored like the other real-dependency
+    // tests in this suite (Temporal, soup): requires `claude` installed and
+    // authenticated on the machine running the test. This is the one
+    // required by the mandate's own success criteria — a demonstrable real
+    // run, not just green unit tests — proving the whole path: real
+    // process spawn, real workspace mutation, real gate parsing, real
+    // before/after manifest diff, real completion.json evidence written.
+    #[tokio::test]
+    #[ignore = "spawns the real Claude Code CLI; requires `claude` installed and authenticated"]
+    async fn e2e_real_claude_code_stage_writes_evidence_and_satisfies_the_contract() {
+        let workspace = tempfile::tempdir().unwrap();
+        let evidence_dir = tempfile::tempdir().unwrap();
+        let channel = Channel::new(|_| Ok(()));
+        let prompt = "You are a test stage in an automated contract-verification suite for IntentOS. Create a file named INTENTOS_P0_PROOF.txt in the current working directory containing exactly the text: contract-check-ok\nThen end your final response with exactly INTENTOS_GATE:PASS";
+        let result = run_claude_stage(
+            workspace.path(),
+            prompt,
+            "e2e-run",
+            "development",
+            "development",
+            1,
+            evidence_dir.path(),
+            &channel,
+            false,
+            0,
+        )
+        .await
+        .expect("run_claude_stage must not error for a real, reachable Claude Code CLI");
+
+        assert!(
+            result,
+            "a real Claude Code stage that actually wrote the required file and said PASS must satisfy the contract"
+        );
+        assert!(
+            workspace.path().join("INTENTOS_P0_PROOF.txt").is_file(),
+            "the real workspace must contain the file Claude Code was asked to create — not just a claimed PASS"
+        );
+        let completion_raw =
+            std::fs::read_to_string(evidence_dir.path().join("development-1.completion.json"))
+                .expect("completion.json evidence must be written for a real external stage");
+        assert!(
+            completion_raw.contains("\"completed\""),
+            "completion evidence must record Completed for a genuinely satisfied contract: {completion_raw}"
+        );
+    }
+
     // ---- Reality gate — structured criteria (shadow mode) ----
 
     fn criteria_block(entries_json: &str) -> String {
