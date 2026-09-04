@@ -58,6 +58,13 @@ describe("requirement #7 — the four mandated cases", () => {
     expect(text.toLocaleLowerCase("es")).not.toMatch(/3d|webgl|inmersiv/);
     const proposal = await planSolutionAsync({ intent: text });
     expect(invokeMock).toHaveBeenCalledTimes(1);
+    // Deliberate: this classification forces DeepSeek (open-weight, cheap
+    // API — chosen after Groq was rejected for not being open/sovereign,
+    // and local Qwen2.5-Coder-3B proved unreliable on
+    // creativeTechnologyJustified — see classifyIntentSemantic's doc
+    // comment), independent of whatever INTENTOS_INFERENCE_BACKEND
+    // Esmeralda's own build engine uses.
+    expect(invokeMock).toHaveBeenCalledWith("local_model_complete", expect.objectContaining({ request: expect.objectContaining({ backend: "deepseek" }) }));
     expect(proposal.routing?.source).toBe("semantic");
     expect(proposal.capabilities.map((c) => c.id)).toContain("creative-technology");
     expect(proposal.creativeTechnology?.justified).toBe(true);

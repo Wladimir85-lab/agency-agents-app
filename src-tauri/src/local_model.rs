@@ -57,17 +57,36 @@ const GROQ_DEFAULT_MODEL: &str = "openai/gpt-oss-120b";
 /// outbound call to be treated as loopback-exempt from `network_allowed`.
 const GROQ_ENDPOINT: &str = "https://api.groq.com/openai/v1/chat/completions";
 
+// ---------- DeepSeek backend (opt-in, non-sovereign, network-gated) ----------
+//
+// Same trust category and gating as Groq (network_allowed + a real API key
+// required) — a different company, still not sovereign, still leaves the
+// machine. Added specifically so the classifier override
+// (`LocalCompletionRequest::backend`) can point at an open-weight model's
+// own hosted API instead of Anthropic/OpenAI/Groq, per an explicit user
+// choice after the local Qwen2.5-Coder-1.5B/3B proved unreliable for
+// `creativeTechnologyJustified` specifically (see intentosCapabilities.ts).
+// DeepSeek's API is OpenAI-compatible, same request/response shape as Groq's.
+const DEEPSEEK_API_KEY_ENV: &str = "INTENTOS_DEEPSEEK_API_KEY";
+const DEEPSEEK_MODEL_ENV: &str = "INTENTOS_DEEPSEEK_MODEL";
+const DEEPSEEK_DEFAULT_MODEL: &str = "deepseek-chat";
+/// Fixed, same reasoning as `GROQ_ENDPOINT`: never overridable by a
+/// loopback-looking env var.
+const DEEPSEEK_ENDPOINT: &str = "https://api.deepseek.com/chat/completions";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum InferenceBackend {
     Loopback,
     Groq,
     Ollama,
+    DeepSeek,
 }
 
 fn configured_backend() -> InferenceBackend {
     match env::var(BACKEND_ENV) {
         Ok(value) if value.eq_ignore_ascii_case("groq") => InferenceBackend::Groq,
         Ok(value) if value.eq_ignore_ascii_case("ollama") => InferenceBackend::Ollama,
+        Ok(value) if value.eq_ignore_ascii_case("deepseek") => InferenceBackend::DeepSeek,
         _ => InferenceBackend::Loopback,
     }
 }
@@ -152,6 +171,16 @@ pub struct LocalModelStatus {
 pub struct LocalCompletionRequest {
     pub prompt: String,
     pub max_tokens: Option<u32>,
+    /// Explicit per-call backend override — additive, `None` for every
+    /// pre-existing caller (unchanged `configured_backend()` dispatch).
+    /// Accepted values today: `"groq"`, `"deepseek"`. For a caller that
+    /// needs a specific hosted backend for this one completion regardless
+    /// of what `INTENTOS_INFERENCE_BACKEND` currently points Esmeralda's
+    /// own build/conversation engine at (see `intentosCapabilities.ts`'s
+    /// semantic router — deliberately not routed through the same backend
+    /// switch as the rest of the app, precisely so choosing a classifier
+    /// never silently redirects Esmeralda's actual work too).
+    pub backend: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -561,6 +590,7 @@ pub(crate) async fn complete_raw(
         InferenceBackend::Loopback => complete_raw_loopback(app_data_dir, prompt, max_tokens).await,
         InferenceBackend::Groq => complete_raw_groq(prompt, max_tokens, settings).await,
         InferenceBackend::Ollama => complete_raw_ollama(prompt, max_tokens).await,
+        InferenceBackend::DeepSeek => complete_raw_deepseek(prompt, max_tokens, settings).await,
     }
 }
 
@@ -730,13 +760,45 @@ async fn complete_raw_groq(
     groq_completion_request(GROQ_ENDPOINT, &api_key, &model_name, prompt, max_tokens).await
 }
 
+/// Explicit per-call Groq override for `local_model_complete`'s
+/// `backend: "groq"` request field — used by a caller that wants Groq
+/// specifically for this one completion, independent of whatever
+/// `INTENTOS_INFERENCE_BACKEND` the rest of the app is currently reading
+/// (see `LocalCompletionRequest::backend`'s doc comment). Same safety
+/// gates as the default Groq path (`complete_raw_groq` above) minus "is
+/// Groq the globally selected default backend" — that check doesn't apply
+/// to an explicit override — so `network_allowed` is still consulted
+/// unconditionally and a missing/blank API key still fails closed with the
+/// same `CapabilityProviderUnavailable` shape, never a silent bypass.
+async fn complete_raw_groq_forced(
+    prompt: &str,
+    max_tokens: Option<u32>,
+    settings: &Arc<RwLock<SettingsLoadState>>,
+) -> Result<LocalCompletion, AppError> {
+    {
+        let guard = settings.read().await;
+        network_allowed(&guard, "local_model_groq")?;
+    }
+    let api_key = match env::var(GROQ_API_KEY_ENV) {
+        Ok(key) if !key.trim().is_empty() => key,
+        _ => {
+            return Err(AppError::CapabilityProviderUnavailable {
+                capability_id: "inference.groq".into(),
+                message: format!("{GROQ_API_KEY_ENV} no está configurada."),
+            })
+        }
+    };
+    let model_name = env::var(GROQ_MODEL_ENV).unwrap_or_else(|_| GROQ_DEFAULT_MODEL.into());
+    groq_completion_request(GROQ_ENDPOINT, &api_key, &model_name, prompt, max_tokens).await
+}
+
 /// The actual HTTP request + response classification, parameterised over
 /// the endpoint so tests can point it at a fake server. Production code
-/// only ever reaches this through `complete_raw_groq` above, which always
-/// passes the fixed `GROQ_ENDPOINT` constant and has already run the
-/// `network_allowed` + `groq_status().configured` gates — this function
-/// itself does not re-check either, so it must never be reachable from
-/// outside this module in a non-test build.
+/// only ever reaches this through `complete_raw_groq` (default-backend
+/// path) or `complete_raw_groq_forced` (explicit override) above, both of
+/// which have already run the `network_allowed` + key gates — this
+/// function itself does not re-check either, so it must never be reachable
+/// from outside this module in a non-test build.
 #[cfg_attr(not(test), allow(dead_code))]
 async fn groq_completion_request(
     endpoint: &str,
@@ -832,6 +894,105 @@ async fn groq_completion_request(
     })
 }
 
+/// DeepSeek branch: same gating shape as `complete_raw_groq` —
+/// `network_allowed` consulted first and unconditionally, then a real,
+/// non-empty API key required. The key is read once, used only for the
+/// `Authorization` header, and never appears in any `Serialize` struct or
+/// error message this function returns.
+async fn complete_raw_deepseek(
+    prompt: &str,
+    max_tokens: Option<u32>,
+    settings: &Arc<RwLock<SettingsLoadState>>,
+) -> Result<LocalCompletion, AppError> {
+    {
+        let guard = settings.read().await;
+        network_allowed(&guard, "local_model_deepseek")?;
+    }
+    let api_key = match env::var(DEEPSEEK_API_KEY_ENV) {
+        Ok(key) if !key.trim().is_empty() => key,
+        _ => {
+            return Err(AppError::CapabilityProviderUnavailable {
+                capability_id: "inference.deepseek".into(),
+                message: format!("{DEEPSEEK_API_KEY_ENV} no está configurada."),
+            })
+        }
+    };
+    let model_name = env::var(DEEPSEEK_MODEL_ENV).unwrap_or_else(|_| DEEPSEEK_DEFAULT_MODEL.into());
+    deepseek_completion_request(DEEPSEEK_ENDPOINT, &api_key, &model_name, prompt, max_tokens).await
+}
+
+/// The actual HTTP request + response classification, parameterised over
+/// the endpoint so tests can point it at a fake server — same pattern as
+/// `groq_completion_request`. Production code only ever reaches this
+/// through `complete_raw_deepseek` (default-backend path) or
+/// `complete_raw_deepseek_forced` (explicit override), both of which have
+/// already run the `network_allowed` + API-key gates.
+#[cfg_attr(not(test), allow(dead_code))]
+async fn deepseek_completion_request(
+    endpoint: &str,
+    api_key: &str,
+    model_name: &str,
+    prompt: &str,
+    max_tokens: Option<u32>,
+) -> Result<LocalCompletion, AppError> {
+    let body = serde_json::json!({
+        "model": model_name,
+        "messages": [
+            {"role": "system", "content": "Eres el motor de inferencia de IntentOS. Entrega resultados concisos, técnicos y verificables."},
+            {"role": "user", "content": prompt}
+        ],
+        "temperature": 0.1,
+        "max_tokens": max_tokens.unwrap_or(256).clamp(1, 1024),
+        "stream": false
+    });
+    let started = Instant::now();
+    let response = reqwest::Client::builder()
+        .timeout(Duration::from_secs(120))
+        .build()?
+        .post(endpoint)
+        .bearer_auth(api_key)
+        .json(&body)
+        .send()
+        .await?;
+    let response_status = response.status();
+    if !response_status.is_success() {
+        let body_text = response
+            .text()
+            .await
+            .unwrap_or_else(|e| format!("<no se pudo leer el cuerpo de la respuesta: {e}>"));
+        let message = match response_status.as_u16() {
+            401 | 403 => format!(
+                "DeepSeek rechazó la credencial configurada (HTTP {}): {}",
+                response_status.as_u16(),
+                body_text
+            ),
+            429 => format!("DeepSeek devolvió 429 (límite de tasa): {body_text}"),
+            other => format!(
+                "HTTP {other} de DeepSeek en POST {endpoint} (prompt ~{} bytes enviados): {}",
+                prompt.len(),
+                body_text
+            ),
+        };
+        return Err(AppError::Internal { message });
+    }
+    let response = response.json::<ChatResponse>().await?;
+    let content = response
+        .choices
+        .into_iter()
+        .next()
+        .map(|choice| choice.message.content)
+        .ok_or_else(|| AppError::Internal {
+            message: "DeepSeek respondió sin una opción de resultado".into(),
+        })?;
+    Ok(LocalCompletion {
+        content,
+        model: response.model.unwrap_or_else(|| model_name.to_owned()),
+        latency_ms: started.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
+        local: false,
+        backend: "deepseek",
+    })
+}
+
 #[tauri::command]
 pub async fn local_model_complete(
     state: State<'_, AppState>,
@@ -843,7 +1004,14 @@ pub async fn local_model_complete(
             message: format!("el prompt local debe contener entre 1 y {MAX_PROMPT_BYTES} bytes"),
         });
     }
-    complete_raw(&state.app_data_dir, prompt, request.max_tokens, &state.settings).await
+    match request.backend.as_deref() {
+        None => complete_raw(&state.app_data_dir, prompt, request.max_tokens, &state.settings).await,
+        Some("groq") => complete_raw_groq_forced(prompt, request.max_tokens, &state.settings).await,
+        Some("deepseek") => complete_raw_deepseek(prompt, request.max_tokens, &state.settings).await,
+        Some(other) => Err(AppError::InvalidArgument {
+            message: format!("backend '{other}' no es una anulación soportada; usa \"groq\", \"deepseek\" u omite el campo."),
+        }),
+    }
 }
 
 #[cfg(test)]
@@ -895,6 +1063,15 @@ mod tests {
         api_key: &str,
     ) -> Result<LocalCompletion, AppError> {
         groq_completion_request(endpoint, api_key, GROQ_DEFAULT_MODEL, prompt, Some(10)).await
+    }
+
+    /// Same seam as `complete_raw_groq_over_fake_endpoint`, for DeepSeek.
+    async fn complete_raw_deepseek_over_fake_endpoint(
+        endpoint: &str,
+        prompt: &str,
+        api_key: &str,
+    ) -> Result<LocalCompletion, AppError> {
+        deepseek_completion_request(endpoint, api_key, DEEPSEEK_DEFAULT_MODEL, prompt, Some(10)).await
     }
 
     fn settings_arc(paranoid_mode: bool) -> Arc<RwLock<SettingsLoadState>> {
@@ -1221,6 +1398,116 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn complete_raw_groq_forced_fails_closed_without_an_api_key() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_groq_env();
+
+        let result = complete_raw_groq_forced("hola", Some(10), &settings_arc(false)).await;
+
+        match result {
+            Err(AppError::CapabilityProviderUnavailable { capability_id, .. }) => {
+                assert_eq!(capability_id, "inference.groq");
+            }
+            other => panic!("expected CapabilityProviderUnavailable, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn complete_raw_groq_forced_is_blocked_by_paranoid_mode_even_with_a_key() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_groq_env();
+        // SAFETY: guarded by ENV_LOCK.
+        unsafe {
+            env::set_var(GROQ_API_KEY_ENV, "gsk_real_key");
+        }
+
+        let result = complete_raw_groq_forced("hola", Some(10), &settings_arc(true)).await;
+
+        clear_groq_env();
+
+        match result {
+            Err(AppError::ParanoidModeBlocked { feature }) => {
+                assert_eq!(feature, "local_model_groq");
+            }
+            other => panic!("expected ParanoidModeBlocked, got {other:?}"),
+        }
+    }
+
+    /// The actual differentiator from `complete_raw_groq`: with
+    /// `INTENTOS_INFERENCE_BACKEND` deliberately left unset (i.e. NOT
+    /// "groq" — same setup `complete_raw_groq_fails_closed_when_not_configured`
+    /// uses to prove the *default* path fails closed), the forced override
+    /// must still fail purely on the missing key, never mentioning "backend
+    /// selection" at all — proving it genuinely does not consult
+    /// `groq_status()`'s `backend_selected` gate.
+    #[tokio::test]
+    async fn complete_raw_groq_forced_does_not_require_the_backend_env_to_be_groq() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_groq_env();
+        assert_ne!(env::var(BACKEND_ENV).ok(), Some("groq".to_string()));
+
+        let result = complete_raw_groq_forced("hola", Some(10), &settings_arc(false)).await;
+
+        match result {
+            Err(AppError::CapabilityProviderUnavailable { message, .. }) => {
+                assert!(
+                    !message.contains("no está en"),
+                    "forced override must never fail on backend selection, got: {message}"
+                );
+                assert!(message.contains(GROQ_API_KEY_ENV));
+            }
+            other => panic!("expected CapabilityProviderUnavailable, got {other:?}"),
+        }
+    }
+
+    // ---------- DeepSeek backend ----------
+
+    fn clear_deepseek_env() {
+        // SAFETY: guarded by ENV_LOCK in every caller.
+        unsafe {
+            env::remove_var(BACKEND_ENV);
+            env::remove_var(DEEPSEEK_API_KEY_ENV);
+            env::remove_var(DEEPSEEK_MODEL_ENV);
+        }
+    }
+
+    #[tokio::test]
+    async fn complete_raw_deepseek_fails_closed_without_an_api_key() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_deepseek_env();
+
+        let result = complete_raw_deepseek("hola", Some(10), &settings_arc(false)).await;
+
+        match result {
+            Err(AppError::CapabilityProviderUnavailable { capability_id, .. }) => {
+                assert_eq!(capability_id, "inference.deepseek");
+            }
+            other => panic!("expected CapabilityProviderUnavailable, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn complete_raw_deepseek_is_blocked_by_paranoid_mode_even_with_a_key() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_deepseek_env();
+        // SAFETY: guarded by ENV_LOCK.
+        unsafe {
+            env::set_var(DEEPSEEK_API_KEY_ENV, "sk-real-key");
+        }
+
+        let result = complete_raw_deepseek("hola", Some(10), &settings_arc(true)).await;
+
+        clear_deepseek_env();
+
+        match result {
+            Err(AppError::ParanoidModeBlocked { feature }) => {
+                assert_eq!(feature, "local_model_deepseek");
+            }
+            other => panic!("expected ParanoidModeBlocked, got {other:?}"),
+        }
+    }
+
     /// Same fake-server technique as `spawn_fake_llama_server`, but this
     /// one also records the full raw request it received (headers + JSON
     /// body) so tests can prove both the bearer token and the request
@@ -1320,6 +1607,36 @@ mod tests {
         assert!(
             request.contains(r#""temperature":0.1"#),
             "temperature not sent in the Groq request body: {request}"
+        );
+    }
+
+    #[tokio::test]
+    async fn complete_raw_deepseek_success_sends_bearer_auth_and_marks_backend() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_deepseek_env();
+        let (addr, server, seen_request) = spawn_fake_groq_server(
+            "200 OK",
+            "{\"model\":\"deepseek-chat\",\"choices\":[{\"message\":{\"content\":\"hola\"}}]}",
+            None,
+        )
+        .await;
+
+        let result = complete_raw_deepseek_over_fake_endpoint(&format!("http://{addr}"), "hola", "sk-real-key").await;
+        server.abort();
+
+        let completion = result.expect("2xx must succeed");
+        assert_eq!(completion.content, "hola");
+        assert_eq!(completion.backend, "deepseek");
+        assert!(!completion.local, "a DeepSeek completion must never claim local == true");
+
+        let request = seen_request.lock().await.clone().expect("a request must have arrived");
+        assert!(
+            request.to_ascii_lowercase().contains("authorization: bearer sk-real-key"),
+            "bearer token not sent: {request}"
+        );
+        assert!(
+            request.contains(r#""temperature":0.1"#),
+            "temperature not sent in the DeepSeek request body: {request}"
         );
     }
 

@@ -679,26 +679,52 @@ function extractJsonObject(text: string): Record<string, unknown> | null {
   return match ? attempt(match[0]) : null;
 }
 
-/** Semantic fallback — "el motor actual de Esmeralda/Qwen" per the
- *  approved plan: the same single-shot local completion command
- *  (`local_model_complete`, backed by whichever inference backend is
- *  configured — the managed loopback Qwen2.5-Coder, Ollama, or Groq, see
- *  `local_model.rs`) already used elsewhere in IntentOS, not a new
- *  inference path. Only ever called when `isFastPathConfident` says the
- *  deterministic router is not enough — see `resolveCapabilitiesHybrid`.
+/** Semantic fallback — still `local_model_complete` (`local_model.rs`),
+ *  not a new inference path, but requested with an explicit
+ *  `backend: "deepseek"` override rather than whatever
+ *  `INTENTOS_INFERENCE_BACKEND` currently points Esmeralda's own
+ *  build/conversation engine at.
+ *
+ *  This went through two real iterations this session, both against live
+ *  engines, not guesses:
+ *  1. First tried the local sovereign engine (Qwen2.5-Coder-3B via
+ *     Ollama) — probed for real across 5 live classifications, and it was
+ *     genuinely unreliable specifically on `creativeTechnologyJustified`:
+ *     the same "girar el barco" intent (requirement 7-A) got `true` once
+ *     and `false` on a repeat with no change to the input.
+ *  2. Then tried Groq (`openai/gpt-oss-120b`) — reliable and fast, but
+ *     it's a hosted, closed-weight, non-sovereign backend from a company
+ *     other than DeepSeek's, which conflicts with the explicit reason this
+ *     project chose a local/open engine in the first place: not paying
+ *     Anthropic/OpenAI for one, specific, foreign, closed dependency to
+ *     replace it with another. Reverted (see git history) once that
+ *     conflict was raised directly.
+ *  DeepSeek is the resolution: an open-weight model (DeepSeek-V3, served
+ *  via DeepSeek's own hosted API here — genuinely open weights, unlike
+ *  Claude/GPT/Gemini/Groq's models, even though this specific call still
+ *  leaves the machine over their API) at a real API cost far below Groq's
+ *  free-tier constraints, without pulling in Anthropic or OpenAI. It is
+ *  NOT sovereign — still an outbound call, still gated by
+ *  `network_allowed`/Paranoid Mode exactly like Groq was — but it is the
+ *  closest available fit to "free/open, not one of the big incumbents"
+ *  for a task (a single small classification call) that has already
+ *  proven unreliable on the fully local model. Only ever called when
+ *  `isFastPathConfident` says the deterministic router is not enough —
+ *  see `resolveCapabilitiesHybrid`. If DeepSeek isn't configured (no
+ *  `INTENTOS_DEEPSEEK_API_KEY`, or Paranoid Mode is on) this fails closed
+ *  to `null` exactly like any other unavailable engine — see the catch
+ *  below; the deterministic router still decides on its own.
  *
  *  Fails closed toward "unavailable", never toward "invent an answer": a
  *  network/model error or a totally non-JSON reply returns `null` outright.
  *  A `capabilityId` outside `INTENTOS_CAPABILITIES` is dropped on its own
  *  (never trusted as the primary capability — the router can never end up
  *  running a capability that does not exist) but does NOT discard the rest
- *  of an otherwise-usable reply. This split is not theoretical: probed for
- *  real against the actual running Qwen2.5-Coder-3B (Ollama) this session,
- *  it returned `"capabilityId":"i3d"` — not a real id — inside an otherwise
- *  well-formed, correctly-reasoned response (valid confidence/reason, and
- *  a correct `creativeTechnologyJustified:true`). Discarding the whole
- *  reply over the one bad field would have silently failed exactly the
- *  case (requirement 7-A) this fallback exists for. */
+ *  of an otherwise-usable reply — found to matter for real against the
+ *  local Qwen probe above, which once returned `"capabilityId":"i3d"` (not
+ *  a real id) inside an otherwise well-formed, correctly-reasoned
+ *  response. Discarding the whole reply over one bad field would silently
+ *  fail requirement 7-A even with a reliable model behind it. */
 async function classifyIntentSemantic(text: string): Promise<SemanticClassification | null> {
   const catalog = INTENTOS_CAPABILITIES.map((capability) => `- ${capability.id}: ${capability.description}`).join("\n");
   const prompt = [
@@ -715,10 +741,10 @@ async function classifyIntentSemantic(text: string): Promise<SemanticClassificat
   ].join("\n");
   let content: string;
   try {
-    const completion = await invoke<{ content: string }>("local_model_complete", { request: { prompt, maxTokens: 220 } });
+    const completion = await invoke<{ content: string }>("local_model_complete", { request: { prompt, maxTokens: 220, backend: "deepseek" } });
     content = completion.content;
   } catch (error) {
-    console.warn("[intentosCapabilities] semantic fallback unavailable (Esmeralda/Qwen unreachable):", error);
+    console.warn("[intentosCapabilities] semantic fallback unavailable (DeepSeek not configured, or Paranoid Mode is on):", error);
     return null;
   }
   const parsed = extractJsonObject(content);
