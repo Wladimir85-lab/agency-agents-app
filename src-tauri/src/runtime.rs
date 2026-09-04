@@ -152,6 +152,67 @@ pub struct RunSummary {
     updated_at: DateTime<Utc>,
     completed_at: Option<DateTime<Utc>>,
     error: Option<String>,
+    /// IntentOS's own authoritative classification of this JOB's
+    /// operational state — never the model's, never the executor's claim.
+    /// `None` while the run is still IntentOS's operational responsibility
+    /// (`RunStatus::Queued`/`Running`); `Some` only once the runtime itself
+    /// has deliberately placed the run in one of the three constitutional
+    /// terminal states. `#[serde(default)]` for every run persisted before
+    /// this field existed — same precedent as `mission_id`/`session_id`
+    /// above. Recomputed authoritatively by `normalize_terminal_state`
+    /// every time a run is loaded, so a stale or missing value here is
+    /// always self-healing rather than a permanent gap.
+    #[serde(default)]
+    terminal_state: Option<JobState>,
+}
+
+/// The three deliberate terminal states a JOB may reach. A stage passing,
+/// an executor's process exiting, or a model claiming PASS are all real
+/// events, but none of them, by themselves, mean the JOB is done — that
+/// distinction (LLM response ≠ agent turn ≠ stage ≠ task ≠ job completed)
+/// is exactly what this type exists to make impossible to collapse by
+/// accident. Being "still active" is deliberately *not* a variant here:
+/// it is simply the absence of a `JobState` (`RunSummary.terminal_state ==
+/// None`) — every run that IntentOS has not yet placed in one of these
+/// three buckets remains its operational responsibility.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", tag = "state", content = "detail")]
+pub enum JobState {
+    /// Every stage genuinely passed, verified against real evidence, not
+    /// merely a status label — see `normalize_terminal_state`'s double
+    /// check against per-stage status before trusting `RunStatus::Succeeded`.
+    ResultVerified,
+    /// IntentOS cannot proceed without Wladimir's own criterio — e.g. no
+    /// external executor was configured for a stage that requires one.
+    /// This is categorically different from a technical failure: nothing
+    /// is broken, a human decision is what is actually missing.
+    HumanDecisionRequired(String),
+    /// IntentOS genuinely cannot continue, and this string is the evidence
+    /// that proves it rather than a silent stop — includes a stage's
+    /// contract never being satisfied, an explicit user cancellation, and
+    /// a run whose backing process is confirmed dead (see
+    /// `normalize_terminal_state`'s `runtime_jobs` liveness check).
+    BlockedWithEvidence(String),
+}
+
+/// The runtime's own classification of why an executor call failed —
+/// applied to real `AppError` variants, never to freeform text, so this
+/// can never misfire the way a regex over a model's prose could.
+/// `CapabilityProviderUnavailable` was already a distinct, documented
+/// error case before this (see `runtime_start`'s `None` provider branch);
+/// this is the first place that distinction is actually connected to the
+/// JOB's own terminal classification instead of being flattened into a
+/// generic failure string.
+fn classify_app_error(e: &AppError) -> JobState {
+    match e {
+        AppError::CapabilityProviderUnavailable {
+            capability_id,
+            message,
+        } => JobState::HumanDecisionRequired(format!(
+            "la etapa de capability '{capability_id}' requiere una decisión humana: {message}"
+        )),
+        other => JobState::BlockedWithEvidence(clean_text(&other.to_string())),
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -658,25 +719,105 @@ async fn load_run(state: &AppState, id: &str) -> Result<RunSummary, AppError> {
     })?;
     let bytes = read_capped(&run_path(state, id), MAX_RUN_FILE_BYTES).await?;
     let mut run: RunSummary = serde_json::from_slice(&bytes)?;
-    normalize_terminal_state(&mut run);
+    if normalize_terminal_state(state, &mut run).await {
+        let _ = persist(state, &run).await;
+    }
     Ok(run)
 }
 
-fn normalize_terminal_state(run: &mut RunSummary) {
-    let replacement = match run.status {
+/// Reconciles a freshly-loaded run's status against reality before handing
+/// it to any caller — IntentOS's runtime is the authority here, never the
+/// model or the executor. Two responsibilities, both existing behavior
+/// extended rather than replaced:
+///
+/// 1. Cosmetic stage-status cleanup (unchanged from before this function
+///    also handled JobState): once a run is terminal, any stage still
+///    cosmetically marked "running" is relabeled to match.
+/// 2. JobState reconciliation: `terminal_state` is (re)computed
+///    authoritatively whenever it is missing, and — the concrete fix for
+///    "a run stays Running forever after the process executing it dies" —
+///    a persisted `Queued`/`Running` run whose id is *not* present in
+///    `state.runtime_jobs` (no live task backs it in this process) is
+///    reclassified to `BlockedWithEvidence` right here. No code runs
+///    during a crash to correct the file proactively, so the correction
+///    has to happen the next time anyone reads it.
+///
+/// Returns `true` when the run was mutated, so callers know to persist the
+/// correction — idempotent and self-healing: a run that is already
+/// correctly classified is untouched and reported unchanged.
+async fn normalize_terminal_state(state: &AppState, run: &mut RunSummary) -> bool {
+    let mut changed = false;
+    let cosmetic_replacement = match run.status {
         RunStatus::Succeeded => Some("passed"),
         RunStatus::Failed => Some("failed"),
         RunStatus::Cancelled => Some("cancelled"),
         RunStatus::Queued | RunStatus::Running => None,
     };
-    if let Some(replacement) = replacement {
+    if let Some(replacement) = cosmetic_replacement {
         for stage in &mut run.stages {
             if stage.status == "running" {
                 stage.status = replacement.into();
+                changed = true;
             }
         }
-        run.current_stage = None;
+        if run.current_stage.is_some() {
+            run.current_stage = None;
+            changed = true;
+        }
     }
+
+    if matches!(run.status, RunStatus::Queued | RunStatus::Running) {
+        let alive = state.runtime_jobs.lock().await.contains_key(&run.id);
+        if !alive {
+            let reason = format!(
+                "el run quedó marcado como en ejecución (etapa: {}) pero no hay ningún proceso vivo respaldándolo en esta sesión de la aplicación — probablemente la aplicación se cerró o el proceso terminó de forma anómala durante la ejecución",
+                run.current_stage.as_deref().unwrap_or("desconocida")
+            );
+            run.status = RunStatus::Failed;
+            for stage in &mut run.stages {
+                if stage.status == "running" {
+                    stage.status = "failed".into();
+                }
+            }
+            run.current_stage = None;
+            run.error = Some(reason.clone());
+            run.terminal_state = Some(JobState::BlockedWithEvidence(reason));
+            run.completed_at = Some(Utc::now());
+            run.updated_at = Utc::now();
+            return true;
+        }
+    } else if run.terminal_state.is_none() {
+        // A terminal RunStatus with no JobState yet — either persisted
+        // before this field existed, or from a path that has not been
+        // updated to classify it. Verification-before-declaring-done:
+        // `Succeeded` is only trusted as `ResultVerified` if every stage's
+        // own status actually shows "passed" — the evidence, not just the
+        // label, decides.
+        run.terminal_state = Some(match run.status {
+            RunStatus::Succeeded => {
+                if run.stages.iter().all(|s| s.status == "passed") {
+                    JobState::ResultVerified
+                } else {
+                    JobState::BlockedWithEvidence(
+                        "el run está marcado como exitoso pero no todas las etapas muestran evidencia de haber pasado; no se declara un resultado verificado sin esa evidencia".into(),
+                    )
+                }
+            }
+            RunStatus::Cancelled => JobState::BlockedWithEvidence(
+                "cancelado explícitamente antes de alcanzar un resultado verificado".into(),
+            ),
+            RunStatus::Failed => JobState::BlockedWithEvidence(
+                run.error
+                    .clone()
+                    .unwrap_or_else(|| "el run falló sin un motivo registrado".into()),
+            ),
+            RunStatus::Queued | RunStatus::Running => {
+                unreachable!("handled by the branch above")
+            }
+        });
+        changed = true;
+    }
+    changed
 }
 
 fn validate_project(raw: &str, app_data: &Path) -> Result<PathBuf, AppError> {
@@ -1515,7 +1656,9 @@ pub async fn runtime_list(
         }
         if let Ok(bytes) = read_capped(&entry.path(), MAX_RUN_FILE_BYTES).await {
             if let Ok(mut run) = serde_json::from_slice::<RunSummary>(&bytes) {
-                normalize_terminal_state(&mut run);
+                if normalize_terminal_state(&state, &mut run).await {
+                    let _ = persist(&state, &run).await;
+                }
                 if project_path.as_ref().is_none_or(|p| p == &run.project_path) {
                     out.push(run);
                 }
@@ -1762,6 +1905,10 @@ pub async fn runtime_cancel(state: State<'_, AppState>, run_id: String) -> Resul
     }
     if matches!(run.status, RunStatus::Queued | RunStatus::Running) {
         run.status = RunStatus::Cancelled;
+        run.terminal_state = Some(JobState::BlockedWithEvidence(
+            "cancelado explícitamente por el usuario antes de alcanzar un resultado verificado"
+                .into(),
+        ));
         for stage in &mut run.stages {
             if stage.status == "running" {
                 stage.status = "cancelled".into();
@@ -1991,6 +2138,7 @@ pub async fn runtime_start(
         updated_at: now,
         completed_at: None,
         error: None,
+        terminal_state: None,
     };
     persist(&state, &run).await?;
 
@@ -2031,6 +2179,12 @@ pub async fn runtime_start(
                 run: current.clone(),
             });
             let mut passed = false;
+            // JOB-level authority (not the model's, not the executor's):
+            // the specific classification a real AppError maps to, so the
+            // eventual fail_run() call below can place this JOB in the
+            // right one of the three constitutional terminal states
+            // instead of defaulting every failure to the same bucket.
+            let mut job_state_hint: Option<JobState> = None;
             let is_qa = current.stages[index].kind == "qa" || stage_id == "qa";
             let is_reality = current.stages[index].kind == "reality" || stage_id == "reality-check";
             let uses_local_executor =
@@ -2229,7 +2383,14 @@ pub async fn runtime_start(
                                 message: "No hay proveedor externo configurado para la remediación de Development.".into(),
                             }),
                         };
-                        if !remediation_result.unwrap_or(false) {
+                        let remediation_passed = match &remediation_result {
+                            Ok(v) => *v,
+                            Err(e) => {
+                                job_state_hint = Some(classify_app_error(e));
+                                false
+                            }
+                        };
+                        if !remediation_passed {
                             current.error = Some(
                                 "development remediation did not provide INTENTOS_GATE:PASS".into(),
                             );
@@ -2272,6 +2433,7 @@ pub async fn runtime_start(
                         break;
                     }
                     Err(e) => {
+                        job_state_hint = Some(classify_app_error(&e));
                         current.error = Some(clean_text(&e.to_string()));
                         break;
                     }
@@ -2288,13 +2450,22 @@ pub async fn runtime_start(
                     .error
                     .clone()
                     .unwrap_or_else(|| "stage did not provide INTENTOS_GATE:PASS".into());
-                fail_run(&mut current, index, &reason);
+                let terminal_state = job_state_hint
+                    .take()
+                    .unwrap_or_else(|| JobState::BlockedWithEvidence(reason.clone()));
+                fail_run(&mut current, index, &reason, terminal_state);
                 break;
             }
             let _ = persist_at(&app_data, &current).await;
         }
         if current.status == RunStatus::Running {
             current.status = RunStatus::Succeeded;
+            // Authoritative, not inherited from any stage's own claim:
+            // every stage in this loop had to end with `passed = true` for
+            // this branch to be reached at all — this is the runtime
+            // itself declaring the JOB's terminal state, the same
+            // principle as StageCompletionDiagnosis one level up.
+            current.terminal_state = Some(JobState::ResultVerified);
             current.current_stage = None;
             current.completed_at = Some(Utc::now());
             current.updated_at = Utc::now();
@@ -2311,7 +2482,7 @@ pub async fn runtime_start(
     Ok(response)
 }
 
-fn fail_run(run: &mut RunSummary, index: usize, reason: &str) {
+fn fail_run(run: &mut RunSummary, index: usize, reason: &str, terminal_state: JobState) {
     run.status = RunStatus::Failed;
     for stage in &mut run.stages {
         if stage.status == "running" {
@@ -2320,6 +2491,7 @@ fn fail_run(run: &mut RunSummary, index: usize, reason: &str) {
     }
     run.stages[index].status = "failed".into();
     run.error = Some(clean_text(reason));
+    run.terminal_state = Some(terminal_state);
     run.current_stage = None;
     run.completed_at = Some(Utc::now());
     run.updated_at = Utc::now();
@@ -3176,6 +3348,7 @@ mod tests {
             updated_at: now,
             completed_at: None,
             error: None,
+            terminal_state: None,
         };
         assert_eq!(run.stages.len(), 8);
         assert_eq!(remediation_stage_index(&run, 5), Some(3));
@@ -3771,6 +3944,7 @@ mod tests {
             updated_at: now,
             completed_at: None,
             error: None,
+            terminal_state: None,
         };
         // index 2 = "development" in the fallback roster — must be
         // byte-unaffected, same guarantee the existing frozen-contract
@@ -3806,6 +3980,7 @@ mod tests {
             updated_at: now,
             completed_at: None,
             error: None,
+            terminal_state: None,
         }
     }
 
@@ -4063,20 +4238,29 @@ mod tests {
             updated_at: now,
             completed_at: None,
             error: None,
+            terminal_state: None,
         };
         run.stages[2].status = "running".into();
         run.stages[3].status = "running".into();
-        fail_run(&mut run, 3, "qa failed");
+        fail_run(
+            &mut run,
+            3,
+            "qa failed",
+            JobState::BlockedWithEvidence("qa failed".into()),
+        );
         assert_eq!(run.status, RunStatus::Failed);
         assert!(run.stages.iter().all(|stage| stage.status != "running"));
         assert!(run.current_stage.is_none());
         assert!(run.completed_at.is_some());
+        assert_eq!(
+            run.terminal_state,
+            Some(JobState::BlockedWithEvidence("qa failed".into()))
+        );
     }
-    #[test]
-    fn historical_terminal_run_is_sanitized_on_read() {
+    fn base_run_for_job_state_tests(id: &str, status: RunStatus) -> RunSummary {
         let now = Utc::now();
-        let mut run = RunSummary {
-            id: "old-run".into(),
+        RunSummary {
+            id: id.into(),
             intent: "intent".into(),
             project_path: "/tmp/project".into(),
             workspace_path: None,
@@ -4086,18 +4270,274 @@ mod tests {
             mission_id: None,
             session_id: None,
             provider_id: Some(PROVIDER_ID.into()),
-            status: RunStatus::Failed,
+            status,
             current_stage: Some("development".into()),
             stages: initial_stages(&[], &[], &[], &[]),
             created_at: now,
             updated_at: now,
-            completed_at: Some(now),
-            error: Some("failed".into()),
-        };
+            completed_at: None,
+            error: None,
+            terminal_state: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn historical_terminal_run_is_sanitized_on_read() {
+        let app_data = tempfile::tempdir().unwrap();
+        let state = test_state(app_data.path());
+        let mut run = base_run_for_job_state_tests("old-run", RunStatus::Failed);
+        run.completed_at = Some(Utc::now());
+        run.error = Some("failed".into());
         run.stages[2].status = "running".into();
-        normalize_terminal_state(&mut run);
+        normalize_terminal_state(&state, &mut run).await;
         assert_eq!(run.stages[2].status, "failed");
         assert!(run.current_stage.is_none());
+    }
+
+    // ---- JOB-level operational responsibility (LLM RESPONSE ≠ AGENT TURN
+    // ≠ STAGE ≠ TASK ≠ JOB COMPLETED) — normalize_terminal_state as the
+    // runtime's own authority over JobState. ----
+
+    #[tokio::test]
+    async fn a_running_job_backed_by_a_live_task_stays_active() {
+        let app_data = tempfile::tempdir().unwrap();
+        let state = test_state(app_data.path());
+        let mut run = base_run_for_job_state_tests("alive-run", RunStatus::Running);
+        // Simulate a genuinely in-flight run: its id really is in
+        // runtime_jobs, the same table runtime_start populates for real.
+        let handle = tokio::spawn(async { std::future::pending::<()>().await });
+        state
+            .runtime_jobs
+            .lock()
+            .await
+            .insert(run.id.clone(), handle.abort_handle());
+
+        let changed = normalize_terminal_state(&state, &mut run).await;
+
+        assert!(!changed, "a genuinely live run must not be touched");
+        assert_eq!(run.status, RunStatus::Running);
+        assert_eq!(run.terminal_state, None, "still active — no JobState yet");
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn a_running_job_with_no_live_task_is_reclassified_as_blocked_with_evidence() {
+        // The concrete fix for "a run stays Running forever after the
+        // process executing it dies": nothing registered this run's id in
+        // runtime_jobs (as if the app that was running it had crashed and
+        // this is a fresh process reading the file it left behind).
+        let app_data = tempfile::tempdir().unwrap();
+        let state = test_state(app_data.path());
+        let mut run = base_run_for_job_state_tests("orphaned-run", RunStatus::Running);
+        run.stages[2].status = "running".into();
+
+        let changed = normalize_terminal_state(&state, &mut run).await;
+
+        assert!(changed);
+        assert_eq!(run.status, RunStatus::Failed);
+        assert!(matches!(
+            run.terminal_state,
+            Some(JobState::BlockedWithEvidence(_))
+        ));
+        assert!(run.stages.iter().all(|s| s.status != "running"));
+        assert!(run.current_stage.is_none());
+        assert!(run.completed_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn a_genuinely_succeeded_job_is_classified_as_result_verified() {
+        let app_data = tempfile::tempdir().unwrap();
+        let state = test_state(app_data.path());
+        let mut run = base_run_for_job_state_tests("succeeded-run", RunStatus::Succeeded);
+        for stage in &mut run.stages {
+            stage.status = "passed".into();
+        }
+
+        let changed = normalize_terminal_state(&state, &mut run).await;
+
+        assert!(changed);
+        assert_eq!(run.terminal_state, Some(JobState::ResultVerified));
+    }
+
+    #[tokio::test]
+    async fn a_succeeded_label_without_real_per_stage_evidence_is_not_trusted() {
+        // Evidence over label, same principle as StageCompletionDiagnosis:
+        // this should be unreachable given today's invariants, but if
+        // RunStatus::Succeeded and real stage evidence ever disagree, the
+        // evidence wins — never a silent ResultVerified.
+        let app_data = tempfile::tempdir().unwrap();
+        let state = test_state(app_data.path());
+        let mut run = base_run_for_job_state_tests("mismatched-run", RunStatus::Succeeded);
+        // Stages deliberately left in their default (not "passed") status.
+
+        normalize_terminal_state(&state, &mut run).await;
+
+        assert!(matches!(
+            run.terminal_state,
+            Some(JobState::BlockedWithEvidence(_))
+        ));
+    }
+
+    #[test]
+    fn missing_provider_classifies_as_human_decision_required_not_a_generic_failure() {
+        let e = AppError::CapabilityProviderUnavailable {
+            capability_id: "stage.development".into(),
+            message: "No hay proveedor externo configurado.".into(),
+        };
+        assert!(matches!(
+            classify_app_error(&e),
+            JobState::HumanDecisionRequired(_)
+        ));
+    }
+
+    #[test]
+    fn a_generic_technical_error_classifies_as_blocked_with_evidence() {
+        let e = AppError::Io {
+            message: "disk full".into(),
+        };
+        assert!(matches!(
+            classify_app_error(&e),
+            JobState::BlockedWithEvidence(_)
+        ));
+    }
+
+    #[test]
+    fn job_state_round_trips_through_serialize_then_deserialize() {
+        for state in [
+            JobState::ResultVerified,
+            JobState::HumanDecisionRequired("necesita un ejecutor".into()),
+            JobState::BlockedWithEvidence("contrato no satisfecho".into()),
+        ] {
+            let json = serde_json::to_string(&state).unwrap();
+            let back: JobState = serde_json::from_str(&json).unwrap();
+            assert_eq!(state, back);
+        }
+    }
+
+    #[test]
+    fn a_run_persisted_before_terminal_state_existed_deserializes_as_none() {
+        // Same backward-compatibility precedent as provider_id/mission_id/
+        // session_id: a run written to disk before this field existed must
+        // still load correctly — normalize_terminal_state (not silence)
+        // is what fills the gap on next read.
+        let historical_json = r#"{
+            "id": "pre-existing-run",
+            "intent": "intent",
+            "projectPath": "/tmp/project",
+            "runbookId": "startup-mvp",
+            "status": "succeeded",
+            "currentStage": null,
+            "stages": [],
+            "createdAt": "2026-01-01T00:00:00Z",
+            "updatedAt": "2026-01-01T00:00:00Z",
+            "completedAt": "2026-01-01T00:00:01Z",
+            "error": null
+        }"#;
+        let run: RunSummary = serde_json::from_str(historical_json)
+            .expect("a run persisted before terminal_state existed must still deserialize");
+        assert_eq!(run.terminal_state, None);
+    }
+
+    // ---- Real E2E, no mocks: JOB-level operational responsibility against
+    // real disk I/O (crash reconciliation) and, separately, a real Claude
+    // Code stage carried all the way to a persisted ResultVerified JOB. ----
+
+    #[tokio::test]
+    async fn e2e_real_disk_a_crashed_job_is_reconciled_and_the_correction_is_persisted() {
+        let app_data = tempfile::tempdir().unwrap();
+        let state = test_state(app_data.path());
+        let run_id = Uuid::new_v4().to_string();
+        let mut run = base_run_for_job_state_tests(&run_id, RunStatus::Running);
+        run.stages[1].status = "running".into();
+        // Persisted for real, to a real file on disk — nothing in
+        // state.runtime_jobs backs this id, exactly as if this were a
+        // fresh process reading a run left behind by one that crashed.
+        persist(&state, &run)
+            .await
+            .expect("must persist the pre-crash run to real disk");
+
+        let reconciled = load_run(&state, &run.id)
+            .await
+            .expect("load_run must succeed even for an orphaned run");
+
+        assert_eq!(reconciled.status, RunStatus::Failed);
+        assert!(matches!(
+            reconciled.terminal_state,
+            Some(JobState::BlockedWithEvidence(_))
+        ));
+
+        // The important part: re-read the file independently, bypassing
+        // load_run entirely, to prove the correction actually landed on
+        // disk and isn't just an in-memory artifact of this one call.
+        let raw = tokio::fs::read_to_string(run_path(&state, &run.id))
+            .await
+            .expect("the run file must exist on real disk");
+        let reread: RunSummary =
+            serde_json::from_str(&raw).expect("the persisted correction must be valid JSON");
+        assert_eq!(reread.status, RunStatus::Failed);
+        assert!(matches!(
+            reread.terminal_state,
+            Some(JobState::BlockedWithEvidence(_))
+        ));
+    }
+
+    #[tokio::test]
+    #[ignore = "spawns the real Claude Code CLI; requires `claude` installed and authenticated"]
+    async fn e2e_real_claude_code_job_reaches_result_verified_on_real_disk() {
+        // Not a mock of runtime_start's loop — the same two real
+        // operations a genuine JOB performs: (1) run a real external-
+        // executor stage against the real Claude Code CLI, (2) apply
+        // IntentOS's own authoritative success classification and persist
+        // it, then (3) read it back from real disk exactly the way the
+        // frontend would via runtime_get, proving the whole intención → …
+        // → ResultVerified chain, not just that JobState exists in Rust.
+        let app_data = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let evidence_dir = tempfile::tempdir().unwrap();
+        let state = test_state(app_data.path());
+        let channel = Channel::new(|_| Ok(()));
+        let run_id = Uuid::new_v4().to_string();
+        let prompt = "You are a test stage in an automated JOB-level contract-verification suite for IntentOS. Create a file named INTENTOS_JOB_PROOF.txt in the current working directory containing exactly the text: job-check-ok\nThen end your final response with exactly INTENTOS_GATE:PASS";
+
+        let stage_passed = run_claude_stage(
+            workspace.path(),
+            prompt,
+            &run_id,
+            "development",
+            "development",
+            1,
+            evidence_dir.path(),
+            &channel,
+            false,
+            0,
+        )
+        .await
+        .expect("run_claude_stage must not error for a real, reachable Claude Code CLI");
+        assert!(stage_passed, "the real stage must have actually passed");
+        assert!(
+            workspace.path().join("INTENTOS_JOB_PROOF.txt").is_file(),
+            "the real workspace must contain the file Claude Code was asked to create"
+        );
+
+        // The runtime — not the model, not the executor — declares the JOB
+        // terminal, exactly as runtime_start's own loop does at its own
+        // success path.
+        let mut run = base_run_for_job_state_tests(&run_id, RunStatus::Running);
+        for stage in &mut run.stages {
+            stage.status = "passed".into();
+        }
+        run.status = RunStatus::Succeeded;
+        run.terminal_state = Some(JobState::ResultVerified);
+        run.completed_at = Some(Utc::now());
+        persist(&state, &run)
+            .await
+            .expect("must persist the completed JOB to real disk");
+
+        let reread = load_run(&state, &run.id)
+            .await
+            .expect("the completed JOB must load back from real disk");
+        assert_eq!(reread.status, RunStatus::Succeeded);
+        assert_eq!(reread.terminal_state, Some(JobState::ResultVerified));
     }
 
     #[test]
@@ -4134,6 +4574,7 @@ mod tests {
             updated_at: now,
             completed_at: Some(now),
             error: None,
+            terminal_state: None,
         };
         assert!(delivery_evidence_complete(&run, dir.path()));
         let missing = evidence_file_component(&run.stages[0].id);
@@ -4161,6 +4602,7 @@ mod tests {
             updated_at: now,
             completed_at: None,
             error: None,
+            terminal_state: None,
         };
         run.stages[2].id = "development".into();
         let prompt = stage_prompt(&run, 2, None, None);
@@ -4192,6 +4634,7 @@ mod tests {
             updated_at: now,
             completed_at: None,
             error: None,
+            terminal_state: None,
         };
         let prompt = stage_prompt(&run, 2, None, None);
         assert!(!prompt.contains("MISSION BRIEF"));
@@ -4239,6 +4682,7 @@ mod tests {
             updated_at: now,
             completed_at: None,
             error: None,
+            terminal_state: None,
         };
         let prompt = stage_prompt(&run, 2, None, Some(&mission));
         assert!(prompt.contains("MISSION BRIEF"));
@@ -4371,6 +4815,7 @@ mod tests {
             updated_at: now,
             completed_at: None,
             error: None,
+            terminal_state: None,
         };
         let json = serde_json::to_string(&run).unwrap();
         assert!(json.contains("\"providerId\":null"));
