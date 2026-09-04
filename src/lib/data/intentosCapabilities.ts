@@ -808,7 +808,7 @@ async function classifyIntentSemantic(text: string): Promise<SemanticClassificat
   ].join("\n");
   let content: string;
   try {
-    const completion = await invoke<{ content: string }>("local_model_complete", { request: { prompt, maxTokens: 220, backend: "deepseek" } });
+    const completion = await invoke<{ content: string }>("local_model_complete", { request: { prompt, maxTokens: 220, backend: "deepseek", purpose: "capability_classifier" } });
     content = completion.content;
   } catch (error) {
     console.warn("[intentosCapabilities] semantic fallback unavailable (DeepSeek not configured, or Paranoid Mode is on):", error);

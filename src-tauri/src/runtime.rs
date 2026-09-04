@@ -2379,6 +2379,23 @@ async fn run_codex_stage(
     // an arbitrary wall-clock boundary and incorrectly marked them as agent
     // failures. Keep a finite safety ceiling, but size it for real production.
     const MAX_STAGE_RUNTIME: Duration = Duration::from_secs(60 * 60 * 2);
+    // Observability (P1.1): the stage executor's own start event, distinct
+    // by construction from the capability-classifier's `local_model_complete`
+    // log line in local_model.rs — a `run_id`/`stage_id` here can never be
+    // the same event as a classifier call, so "openai/gpt-oss-120b appeared
+    // in a log" and "IntentOS ran this stage on OpenAI" stop being
+    // conflatable even by someone just grepping logs, not only by someone
+    // who has read the source.
+    tracing::info!(
+        run_id = %run_id,
+        stage_id = %stage_id,
+        stage_kind = %stage_kind,
+        attempt,
+        provider = "codexCli",
+        executable = %codex_binary().to_string_lossy(),
+        status = "running",
+        "stage executor starting"
+    );
     let execution = async {
         // Executor↔runtime contract (P0): a claimed INTENTOS_GATE:PASS from
         // an external CLI is only credible for stage kinds that are
@@ -2638,6 +2655,17 @@ async fn run_claude_stage(
     criteria_len: usize,
 ) -> Result<bool, AppError> {
     const MAX_STAGE_RUNTIME: Duration = Duration::from_secs(60 * 60 * 2);
+    // See the matching comment in run_codex_stage (P1.1 observability).
+    tracing::info!(
+        run_id = %run_id,
+        stage_id = %stage_id,
+        stage_kind = %stage_kind,
+        attempt,
+        provider = "claudeCode",
+        executable = %claude_binary().to_string_lossy(),
+        status = "running",
+        "stage executor starting"
+    );
     let execution = async {
         // See the matching comment in run_codex_stage: same executor↔runtime
         // contract (P0), snapshotted independently per provider so neither

@@ -181,6 +181,17 @@ pub struct LocalCompletionRequest {
     /// switch as the rest of the app, precisely so choosing a classifier
     /// never silently redirects Esmeralda's actual work too).
     pub backend: Option<String>,
+    /// Caller-declared reason for this completion — e.g.
+    /// `"capability_classifier"` for `intentosCapabilities.ts`'s semantic
+    /// router, the only caller of this command today. Purely for
+    /// structured observability (P1.1 of the executor↔runtime contract
+    /// audit): logged alongside the resolved backend/model so a completion
+    /// from, say, `openai/gpt-oss-120b` via Groq can never again be
+    /// misread as "IntentOS switched the stage executor to OpenAI" — it is
+    /// always attributable to a specific, named caller, not just a model
+    /// string that happens to contain "openai". Never used for routing or
+    /// dispatch, only for the log line.
+    pub purpose: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1004,14 +1015,38 @@ pub async fn local_model_complete(
             message: format!("el prompt local debe contener entre 1 y {MAX_PROMPT_BYTES} bytes"),
         });
     }
-    match request.backend.as_deref() {
+    let result = match request.backend.as_deref() {
         None => complete_raw(&state.app_data_dir, prompt, request.max_tokens, &state.settings).await,
         Some("groq") => complete_raw_groq_forced(prompt, request.max_tokens, &state.settings).await,
         Some("deepseek") => complete_raw_deepseek(prompt, request.max_tokens, &state.settings).await,
         Some(other) => Err(AppError::InvalidArgument {
             message: format!("backend '{other}' no es una anulación soportada; usa \"groq\", \"deepseek\" u omite el campo."),
         }),
+    };
+    // Observability (P1.1 of the executor↔runtime contract audit): this
+    // command is a general-purpose inference primitive, not a stage
+    // executor — a capability-classifier call (backend=deepseek/groq,
+    // model e.g. "openai/gpt-oss-120b") must be traceable as exactly that,
+    // never confusable with the runtime's own Claude/Codex stage executor
+    // (see the tracing::info! at the start of run_claude_stage /
+    // run_codex_stage in runtime.rs). `purpose` is attacker/caller-declared
+    // metadata, logged verbatim — never used to make a decision.
+    match &result {
+        Ok(completion) => tracing::info!(
+            purpose = request.purpose.as_deref().unwrap_or("unspecified"),
+            backend = completion.backend,
+            model = %completion.model,
+            latency_ms = completion.latency_ms,
+            "capability classifier / local_model_complete finished"
+        ),
+        Err(e) => tracing::warn!(
+            purpose = request.purpose.as_deref().unwrap_or("unspecified"),
+            requested_backend = request.backend.as_deref().unwrap_or("default"),
+            error = %e,
+            "capability classifier / local_model_complete failed"
+        ),
     }
+    result
 }
 
 #[cfg(test)]
