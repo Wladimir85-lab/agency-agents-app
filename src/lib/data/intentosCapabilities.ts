@@ -679,39 +679,26 @@ function extractJsonObject(text: string): Record<string, unknown> | null {
   return match ? attempt(match[0]) : null;
 }
 
-/** Semantic fallback — still "el motor actual de Esmeralda/Qwen"'s own
- *  `local_model_complete` command (`local_model.rs`), not a new inference
- *  path, but requested with an explicit `backend: "groq"` override rather
- *  than whatever `INTENTOS_INFERENCE_BACKEND` currently points Esmeralda's
- *  own build/conversation engine at. This is a deliberate choice, not a
- *  drive-by swap: probed for real against the actual running local engine
- *  (Qwen2.5-Coder-3B via Ollama) across five live classifications this
- *  session, and it was genuinely unreliable specifically on
- *  `creativeTechnologyJustified` — the same "girar el barco" intent
- *  (requirement 7-A) got `true` once and `false` on a repeat with no
- *  change to the input, and a live product configurator (a case that
- *  should justify creative-technology) also got `false`. Groq's larger
- *  hosted model doesn't have that reliability problem and IntentOS already
- *  has a real, working Groq client (`complete_raw_groq`) — reusing it via
- *  the additive `backend` override means this one call gets a materially
- *  better classifier without silently redirecting Esmeralda's actual
- *  build/conversation work to a non-sovereign backend too, and without a
- *  second inference client to maintain. Only ever called when
- *  `isFastPathConfident` says the deterministic router is not enough —
- *  see `resolveCapabilitiesHybrid`. If Groq isn't configured (no
- *  `INTENTOS_GROQ_API_KEY`, or Paranoid Mode is on) this fails closed to
- *  `null` exactly like any other unavailable engine — see the catch below.
+/** Semantic fallback — "el motor actual de Esmeralda/Qwen" per the
+ *  approved plan: the same single-shot local completion command
+ *  (`local_model_complete`, backed by whichever inference backend is
+ *  configured — the managed loopback Qwen2.5-Coder, Ollama, or Groq, see
+ *  `local_model.rs`) already used elsewhere in IntentOS, not a new
+ *  inference path. Only ever called when `isFastPathConfident` says the
+ *  deterministic router is not enough — see `resolveCapabilitiesHybrid`.
  *
  *  Fails closed toward "unavailable", never toward "invent an answer": a
  *  network/model error or a totally non-JSON reply returns `null` outright.
  *  A `capabilityId` outside `INTENTOS_CAPABILITIES` is dropped on its own
  *  (never trusted as the primary capability — the router can never end up
  *  running a capability that does not exist) but does NOT discard the rest
- *  of an otherwise-usable reply — found to matter for real: the same
- *  Qwen probe above once returned `"capabilityId":"i3d"` (not a real id)
- *  inside an otherwise well-formed, correctly-reasoned response. Discarding
- *  the whole reply over one bad field would silently fail requirement 7-A
- *  even with a more reliable model behind it. */
+ *  of an otherwise-usable reply. This split is not theoretical: probed for
+ *  real against the actual running Qwen2.5-Coder-3B (Ollama) this session,
+ *  it returned `"capabilityId":"i3d"` — not a real id — inside an otherwise
+ *  well-formed, correctly-reasoned response (valid confidence/reason, and
+ *  a correct `creativeTechnologyJustified:true`). Discarding the whole
+ *  reply over the one bad field would have silently failed exactly the
+ *  case (requirement 7-A) this fallback exists for. */
 async function classifyIntentSemantic(text: string): Promise<SemanticClassification | null> {
   const catalog = INTENTOS_CAPABILITIES.map((capability) => `- ${capability.id}: ${capability.description}`).join("\n");
   const prompt = [
@@ -728,10 +715,10 @@ async function classifyIntentSemantic(text: string): Promise<SemanticClassificat
   ].join("\n");
   let content: string;
   try {
-    const completion = await invoke<{ content: string }>("local_model_complete", { request: { prompt, maxTokens: 220, backend: "groq" } });
+    const completion = await invoke<{ content: string }>("local_model_complete", { request: { prompt, maxTokens: 220 } });
     content = completion.content;
   } catch (error) {
-    console.warn("[intentosCapabilities] semantic fallback unavailable (Groq not configured, or Paranoid Mode is on):", error);
+    console.warn("[intentosCapabilities] semantic fallback unavailable (Esmeralda/Qwen unreachable):", error);
     return null;
   }
   const parsed = extractJsonObject(content);

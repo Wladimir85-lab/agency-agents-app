@@ -152,16 +152,6 @@ pub struct LocalModelStatus {
 pub struct LocalCompletionRequest {
     pub prompt: String,
     pub max_tokens: Option<u32>,
-    /// Explicit per-call backend override — additive, `None` for every
-    /// pre-existing caller (unchanged `configured_backend()` dispatch). The
-    /// only accepted value today is `"groq"`, for a caller that needs
-    /// Groq specifically for this one completion regardless of what
-    /// `INTENTOS_INFERENCE_BACKEND` currently points Esmeralda's own
-    /// build/conversation engine at (see `intentosCapabilities.ts`'s
-    /// semantic router — deliberately not routed through the same backend
-    /// switch as the rest of the app, precisely so choosing a better
-    /// classifier never silently redirects Esmeralda's actual work too).
-    pub backend: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -740,44 +730,11 @@ async fn complete_raw_groq(
     groq_completion_request(GROQ_ENDPOINT, &api_key, &model_name, prompt, max_tokens).await
 }
 
-/// Explicit per-call Groq override for `local_model_complete`'s
-/// `backend: "groq"` request field — used by a caller that wants Groq
-/// specifically for this one completion, independent of whatever
-/// `INTENTOS_INFERENCE_BACKEND` the rest of the app is currently reading
-/// (see `LocalCompletionRequest::backend`'s doc comment). Same safety
-/// gates as the default Groq path (`complete_raw_groq` above) minus "is
-/// Groq the globally selected default backend" — that check doesn't apply
-/// to an explicit override — so `network_allowed` is still consulted
-/// unconditionally and a missing/blank API key still fails closed with the
-/// same `CapabilityProviderUnavailable` shape, never a silent bypass.
-async fn complete_raw_groq_forced(
-    prompt: &str,
-    max_tokens: Option<u32>,
-    settings: &Arc<RwLock<SettingsLoadState>>,
-) -> Result<LocalCompletion, AppError> {
-    {
-        let guard = settings.read().await;
-        network_allowed(&guard, "local_model_groq")?;
-    }
-    let api_key = match env::var(GROQ_API_KEY_ENV) {
-        Ok(key) if !key.trim().is_empty() => key,
-        _ => {
-            return Err(AppError::CapabilityProviderUnavailable {
-                capability_id: "inference.groq".into(),
-                message: format!("{GROQ_API_KEY_ENV} no está configurada."),
-            })
-        }
-    };
-    let model_name = env::var(GROQ_MODEL_ENV).unwrap_or_else(|_| GROQ_DEFAULT_MODEL.into());
-    groq_completion_request(GROQ_ENDPOINT, &api_key, &model_name, prompt, max_tokens).await
-}
-
 /// The actual HTTP request + response classification, parameterised over
 /// the endpoint so tests can point it at a fake server. Production code
-/// only ever reaches this through `complete_raw_groq` (the default-backend
-/// path, gated on `network_allowed` + `groq_status().configured`) or
-/// `complete_raw_groq_forced` (the explicit per-call override, gated on
-/// `network_allowed` + a direct API-key check) above — this function
+/// only ever reaches this through `complete_raw_groq` above, which always
+/// passes the fixed `GROQ_ENDPOINT` constant and has already run the
+/// `network_allowed` + `groq_status().configured` gates — this function
 /// itself does not re-check either, so it must never be reachable from
 /// outside this module in a non-test build.
 #[cfg_attr(not(test), allow(dead_code))]
@@ -886,13 +843,7 @@ pub async fn local_model_complete(
             message: format!("el prompt local debe contener entre 1 y {MAX_PROMPT_BYTES} bytes"),
         });
     }
-    match request.backend.as_deref() {
-        None => complete_raw(&state.app_data_dir, prompt, request.max_tokens, &state.settings).await,
-        Some("groq") => complete_raw_groq_forced(prompt, request.max_tokens, &state.settings).await,
-        Some(other) => Err(AppError::InvalidArgument {
-            message: format!("backend '{other}' no es una anulación soportada; usa \"groq\" u omite el campo."),
-        }),
-    }
+    complete_raw(&state.app_data_dir, prompt, request.max_tokens, &state.settings).await
 }
 
 #[cfg(test)]
@@ -1265,69 +1216,6 @@ mod tests {
         match result {
             Err(AppError::CapabilityProviderUnavailable { capability_id, .. }) => {
                 assert_eq!(capability_id, "inference.groq");
-            }
-            other => panic!("expected CapabilityProviderUnavailable, got {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn complete_raw_groq_forced_fails_closed_without_an_api_key() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        clear_groq_env();
-
-        let result = complete_raw_groq_forced("hola", Some(10), &settings_arc(false)).await;
-
-        match result {
-            Err(AppError::CapabilityProviderUnavailable { capability_id, .. }) => {
-                assert_eq!(capability_id, "inference.groq");
-            }
-            other => panic!("expected CapabilityProviderUnavailable, got {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn complete_raw_groq_forced_is_blocked_by_paranoid_mode_even_with_a_key() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        clear_groq_env();
-        // SAFETY: guarded by ENV_LOCK.
-        unsafe {
-            env::set_var(GROQ_API_KEY_ENV, "gsk_real_key");
-        }
-
-        let result = complete_raw_groq_forced("hola", Some(10), &settings_arc(true)).await;
-
-        clear_groq_env();
-
-        match result {
-            Err(AppError::ParanoidModeBlocked { feature }) => {
-                assert_eq!(feature, "local_model_groq");
-            }
-            other => panic!("expected ParanoidModeBlocked, got {other:?}"),
-        }
-    }
-
-    /// The actual differentiator from `complete_raw_groq`: with
-    /// `INTENTOS_INFERENCE_BACKEND` deliberately left unset (i.e. NOT
-    /// "groq" — same setup `complete_raw_groq_fails_closed_when_not_configured`
-    /// uses to prove the *default* path fails closed), the forced override
-    /// must still fail purely on the missing key, never mentioning "backend
-    /// selection" at all — proving it genuinely does not consult
-    /// `groq_status()`'s `backend_selected` gate.
-    #[tokio::test]
-    async fn complete_raw_groq_forced_does_not_require_the_backend_env_to_be_groq() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        clear_groq_env();
-        assert_ne!(env::var(BACKEND_ENV).ok(), Some("groq".to_string()));
-
-        let result = complete_raw_groq_forced("hola", Some(10), &settings_arc(false)).await;
-
-        match result {
-            Err(AppError::CapabilityProviderUnavailable { message, .. }) => {
-                assert!(
-                    !message.contains("no está en"),
-                    "forced override must never fail on backend selection, got: {message}"
-                );
-                assert!(message.contains(GROQ_API_KEY_ENV));
             }
             other => panic!("expected CapabilityProviderUnavailable, got {other:?}"),
         }
