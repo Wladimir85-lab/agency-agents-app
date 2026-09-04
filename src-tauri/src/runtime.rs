@@ -723,16 +723,19 @@ pub(crate) fn output_gate_passed(output: &str) -> bool {
     }
 }
 
-/// Whether a stage runs on the sovereign local executor (`local_agent`)
-/// instead of the run's external `provider_id`. Deliberately narrow — only
-/// the kinds `local_agent::local_stage_task` actually defines a task for
-/// (`direction`, `architecture`, `development` today) — and deliberately
-/// not a third `provider_id` value: this is a per-stage routing decision
-/// the runtime makes on its own, not something a run is configured with.
-/// Mirrors the existing `is_qa`/`is_reality` dual `kind`-or-`id` check used
-/// at the call site. Adding a stage kind here without a matching
-/// `local_stage_task` entry fails closed at dispatch time
-/// (`AppError::Internal`), not silently — see `run_local_agentic_stage`.
+/// Whether a stage's *kind* is one the sovereign local executor
+/// (`local_agent`) can run at all — only the kinds
+/// `local_agent::local_stage_task` actually defines a task for
+/// (`direction`, `architecture`, `development` today). This is necessary
+/// but not sufficient: the call site additionally requires
+/// `current.provider_id.is_none()` before actually routing a stage here —
+/// an explicit provider choice (Codex/Claude Code) takes every stage,
+/// including these, so sovereign-local is this kind's default, not a
+/// forced floor. Mirrors the existing `is_qa`/`is_reality` dual
+/// `kind`-or-`id` check used at the call site. Adding a stage kind here
+/// without a matching `local_stage_task` entry fails closed at dispatch
+/// time (`AppError::Internal`), not silently — see
+/// `run_local_agentic_stage`.
 fn stage_uses_local_executor(stage: &RunStage) -> bool {
     matches!(stage.kind.as_str(), "direction" | "architecture" | "development")
         || stage.id == "direction"
@@ -1834,7 +1837,8 @@ pub async fn runtime_start(
             let mut passed = false;
             let is_qa = current.stages[index].kind == "qa" || stage_id == "qa";
             let is_reality = current.stages[index].kind == "reality" || stage_id == "reality-check";
-            let uses_local_executor = stage_uses_local_executor(&current.stages[index]);
+            let uses_local_executor =
+                current.provider_id.is_none() && stage_uses_local_executor(&current.stages[index]);
             let max_attempts = if is_qa { 3 } else { 1 };
             while current.stages[index].attempt <= max_attempts {
                 let attempt = current.stages[index].attempt;
@@ -1872,16 +1876,17 @@ pub async fn runtime_start(
                     profiles.get(&current.stages[index].agent_slug),
                     mission.as_ref(),
                 );
-                // Stages `local_agent::local_stage_task` covers (currently
-                // `direction`, `architecture`) always run on the sovereign
-                // local executor, regardless of `provider_id` — it is never
-                // consulted for them, and Qwen/local_agent is not added as
-                // a third value `provider_id` could hold. Every other stage
-                // kind keeps today's behavior exactly, except that a
-                // missing `provider_id` now fails that stage explicitly
-                // instead of never having been reachable (see
-                // `runtime_start`, which no longer requires an external
-                // provider up front).
+                // Stages `local_agent::local_stage_task` covers (direction,
+                // architecture, development) run on the sovereign local
+                // executor only when this run has no external `provider_id`
+                // — i.e. sovereign-local is the *default* for those kinds,
+                // not a forced floor. A run that explicitly picked Codex or
+                // Claude Code uses it for every stage, direction through
+                // reality: an explicit provider choice is a real decision
+                // about where the actual creative/build work happens, not
+                // just about who checks it afterward. Every other stage
+                // kind (qa, reality) is unaffected — a missing `provider_id`
+                // there still fails that stage explicitly, same as before.
                 let stage_result: Result<bool, AppError> = if uses_local_executor {
                     local_agent::run_local_agentic_stage(
                         &app_data,
