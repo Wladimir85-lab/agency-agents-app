@@ -237,3 +237,51 @@ describe("routeIntent().ranked stays additive", () => {
     expect(routed.ranked).toHaveLength(INTENTOS_CAPABILITIES.length);
   });
 });
+
+describe("architecture audit fixes — dormant corpus personas connected, broken refs removed", () => {
+  it("no agent slug referenced by any capability roster or override is missing from INTENTOS_CAPABILITIES' own agent lists (regression guard for the two dangling refs found in the audit)", () => {
+    // These two slugs never existed in the real corpus and silently
+    // degraded their stage to "Catalog persona unavailable" (runtime.rs's
+    // stage_prompt). The fix replaced them with real personas; this test
+    // guards against either name ever reappearing.
+    const serialized = JSON.stringify(INTENTOS_CAPABILITIES);
+    expect(serialized).not.toContain("engineering-data-visualization-engineer");
+    expect(serialized).not.toContain("testing-test-automation-engineer");
+  });
+
+  it("iot: a firmware-first intent (ESP32/RTOS, no MQTT/backend/dashboard signal) gets the real embedded-firmware persona", () => {
+    const capabilities = [INTENTOS_CAPABILITIES.find((c) => c.id === "iot")!];
+    const stages = composePipeline(capabilities, "Necesito firmware para un ESP32 con FreeRTOS que lea un sensor y controle un relé.");
+    expect(stages.find((s) => s.kind === "development")?.agent).toBe("engineering-embedded-firmware-engineer");
+  });
+
+  it("iot: a full-vertical intent (ESP32 + MQTT + dashboard) keeps the breadth generalist, not the firmware-only specialist", () => {
+    const capabilities = [INTENTOS_CAPABILITIES.find((c) => c.id === "iot")!];
+    const stages = composePipeline(capabilities, "Necesito un ESP32 que publique por MQTT a un backend con dashboard en tiempo real.");
+    expect(stages.find((s) => s.kind === "development")?.agent).toBe("engineering-rapid-prototyper");
+  });
+
+  it("digital-experience: an explicit native-mobile intent (React Native) gets the real mobile-app-builder persona instead of the web frontend developer", () => {
+    const capabilities = [INTENTOS_CAPABILITIES.find((c) => c.id === "digital-experience")!];
+    const stages = composePipeline(capabilities, "Quiero una app multiplataforma con React Native para iOS y Android.");
+    expect(stages.find((s) => s.kind === "development")?.agent).toBe("engineering-mobile-app-builder");
+  });
+
+  it("digital-experience: a plain landing-page intent still uses the web frontend developer, not the mobile builder", () => {
+    const capabilities = [INTENTOS_CAPABILITIES.find((c) => c.id === "digital-experience")!];
+    const stages = composePipeline(capabilities, "Necesito una landing page para mi estudio de fotografía.");
+    expect(stages.find((s) => s.kind === "development")?.agent).toBe("engineering-frontend-developer");
+  });
+
+  it("ai-agents: an explicit MCP/tooling intent gets the real mcp-builder persona instead of the generalist AI engineer", () => {
+    const capabilities = [INTENTOS_CAPABILITIES.find((c) => c.id === "ai-agents")!];
+    const stages = composePipeline(capabilities, "Quiero construir un servidor MCP que le dé herramientas a mi agente.");
+    expect(stages.find((s) => s.kind === "development")?.agent).toBe("specialized-mcp-builder");
+  });
+
+  it("ai-agents: a plain RAG/chatbot intent still uses the generalist AI engineer, not the tooling specialist", () => {
+    const capabilities = [INTENTOS_CAPABILITIES.find((c) => c.id === "ai-agents")!];
+    const stages = composePipeline(capabilities, "Necesito un chatbot con RAG sobre mis documentos internos.");
+    expect(stages.find((s) => s.kind === "development")?.agent).toBe("engineering-ai-engineer");
+  });
+});

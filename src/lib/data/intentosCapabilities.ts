@@ -236,7 +236,16 @@ export const INTENTOS_CAPABILITIES: IntentOSCapability[] = [
     shortLabel: "Automatización operativa",
     description: "Sistemas que eliminan trabajo repetitivo, coordinan flujos y convierten eventos en acciones verificables.",
     stageLabels: ["Dirección del trabajo", "Arquitectura del proceso", "Implementación de automatización", "QA del flujo operativo", "Reality Check"],
-    agents: ["project-manager-senior", "specialized-workflow-architect", "engineering-rapid-prototyper", "testing-test-automation-engineer", "testing-reality-checker"],
+    // QA slot was "testing-test-automation-engineer", a slug that does not
+    // exist anywhere in the real corpus — every run of this stage silently
+    // fell back to "Catalog persona unavailable" (see stage_prompt in
+    // runtime.rs) instead of a real persona. testing-workflow-optimizer is
+    // a real, dormant corpus persona ("process improvement and automation
+    // specialist... eliminating inefficiencies, streamlining processes,
+    // implementing intelligent automation solutions") that is a strictly
+    // better fit for this exact QA stage than the nonexistent slug it
+    // replaces.
+    agents: ["project-manager-senior", "specialized-workflow-architect", "engineering-rapid-prototyper", "testing-workflow-optimizer", "testing-reality-checker"],
     keywords: ["automatizar", "automatización", "proceso", "flujo de trabajo", "workflow", "tarea repetitiva", "operaciones", "notificación", "integración", "sincronizar", "trabajos realizados", "pendiente", "en proceso", "terminado"],
   },
   {
@@ -245,7 +254,14 @@ export const INTENTOS_CAPABILITIES: IntentOSCapability[] = [
     shortLabel: "Datos y decisiones",
     description: "Sistemas para estructurar datos, calcular, proyectar, visualizar escenarios y apoyar decisiones.",
     stageLabels: ["Dirección analítica", "Arquitectura de información", "Construcción del sistema de datos", "Validación de datos y decisiones", "Reality Check"],
-    agents: ["project-manager-senior", "engineering-data-engineer", "engineering-data-visualization-engineer", "testing-evidence-collector", "testing-reality-checker"],
+    // Development slot was "engineering-data-visualization-engineer", a
+    // slug that does not exist anywhere in the real corpus (no dedicated
+    // data-visualization persona exists at all — verified by grepping every
+    // corpus filename for visual/chart/viz). Unlike the operations-automation
+    // fix above, there is no better real substitute, so this falls back to
+    // the same real persona already doing this capability's architecture
+    // stage rather than inventing a name that isn't backed by anything.
+    agents: ["project-manager-senior", "engineering-data-engineer", "engineering-data-engineer", "testing-evidence-collector", "testing-reality-checker"],
     keywords: ["analizar", "análisis", "indicador", "métrica", "proyección", "escenario", "flujo de caja", "financiero", "cálculo", "reporte", "visualizar", "decisión"],
   },
   {
@@ -445,6 +461,49 @@ function isFastPathConfident(routed: ReturnType<typeof routeIntent>): boolean {
  *  the specialization lookup only ever *narrows which agent fills
  *  creative-technology's own development slot*, never adds, removes, or
  *  reorders a stage, so the pipeline never grows because of it. */
+/** `iot`'s default development agent (engineering-rapid-prototyper) is a
+ *  breadth generalist, deliberately kept as the default because runtime.rs's
+ *  IOT FULL-VERTICAL IMPLEMENTATION MANDATE expects one agent to cover
+ *  firmware AND the MQTT path AND backend AND dashboard in a single stage.
+ *  The corpus's real embedded-firmware persona (RTOS/ESP-IDF/STM32
+ *  HAL/bare-metal — verified by hand) has zero MQTT/backend/dashboard
+ *  knowledge, so swapping it in unconditionally would regress every
+ *  full-vertical IoT build. It only replaces the generalist when the intent
+ *  is genuinely firmware-first (real embedded keywords) and shows no sign of
+ *  needing the rest of the vertical — never when both are present. */
+function isFirmwareFirstIotIntent(text: string): boolean {
+  const normalized = text.toLocaleLowerCase("es");
+  const firmwareKeywords = ["firmware", "esp-idf", "esp32", "stm32", "rtos", "freertos", "zephyr", "bare-metal", "bare metal", "microcontrolador", "nrf5", "nordic", "bajo nivel"];
+  const fullVerticalKeywords = ["mqtt", "dashboard", "backend", "alerta", "nube", "servidor", "persistencia", "base de datos"];
+  return firmwareKeywords.some((keyword) => normalized.includes(keyword)) && !fullVerticalKeywords.some((keyword) => normalized.includes(keyword));
+}
+
+/** digital-experience's default development agent (engineering-frontend-
+ *  developer) already covers PWA/responsive/web-wrapper mobile work, which
+ *  is most of catalog area 06. It only steps aside for the real, dormant
+ *  engineering-mobile-app-builder persona (Swift/SwiftUI, Kotlin/Jetpack
+ *  Compose, React Native, Flutter) when the intent names an actual native
+ *  toolchain — connecting the right persona knowledge does not by itself
+ *  give IntentOS a native build/run/verify toolchain (it still has none;
+ *  see the architecture study), so this stays honest about what it fixes. */
+function isNativeMobileIntent(text: string): boolean {
+  const normalized = text.toLocaleLowerCase("es");
+  const keywords = ["swift", "swiftui", "kotlin", "jetpack compose", "react native", "flutter", "ios nativo", "android nativo", "app store", "play store", "aplicación multiplataforma", "aplicacion multiplataforma"];
+  return keywords.some((keyword) => normalized.includes(keyword));
+}
+
+/** ai-agents' default development agent (engineering-ai-engineer) covers the
+ *  broad majority of catalog area 03 (RAG, clasificación, resúmenes,
+ *  generación, visión, etc). It only steps aside for the real, dormant
+ *  specialized-mcp-builder persona when the intent is specifically about
+ *  building tools/integrations for an agent to call, not every "agente"
+ *  mention. */
+function isAgentToolingIntent(text: string): boolean {
+  const normalized = text.toLocaleLowerCase("es");
+  const keywords = ["mcp", "model context protocol", "servidor de herramientas", "function calling", "llamado a funciones", "llamada a funciones", "agentes con herramientas", "integrar herramienta", "herramientas personalizadas"];
+  return keywords.some((keyword) => normalized.includes(keyword));
+}
+
 export function composePipeline(capabilities: IntentOSCapability[], intentText = ""): IntentOSPipelineStage[] {
   const primary = capabilities[0] ?? INTENTOS_CAPABILITIES[0];
   const stages: IntentOSPipelineStage[] = [{ id: "direction", kind: "direction", label: primary.stageLabels[0], agent: primary.agents[0], capabilityId: primary.id }];
@@ -466,6 +525,12 @@ export function composePipeline(capabilities: IntentOSCapability[], intentText =
         capabilityId: capability.id,
         specializationId: chosen.id,
       });
+    } else if (capability.id === "iot" && isFirmwareFirstIotIntent(intentText)) {
+      stages.push({ id: `${capability.id}:development`, kind: "development", label: capability.stageLabels[2], agent: "engineering-embedded-firmware-engineer", capabilityId: capability.id });
+    } else if (capability.id === "digital-experience" && isNativeMobileIntent(intentText)) {
+      stages.push({ id: `${capability.id}:development`, kind: "development", label: capability.stageLabels[2], agent: "engineering-mobile-app-builder", capabilityId: capability.id });
+    } else if (capability.id === "ai-agents" && isAgentToolingIntent(intentText)) {
+      stages.push({ id: `${capability.id}:development`, kind: "development", label: capability.stageLabels[2], agent: "specialized-mcp-builder", capabilityId: capability.id });
     } else {
       stages.push({ id: `${capability.id}:development`, kind: "development", label: capability.stageLabels[2], agent: capability.agents[2], capabilityId: capability.id });
     }
