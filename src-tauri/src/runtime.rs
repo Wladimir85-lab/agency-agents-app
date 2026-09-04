@@ -721,7 +721,8 @@ fn clean_text(s: &str) -> String {
 /// is a different failure mode than one that explicitly reported FAIL, and
 /// P0 of the executor↔runtime contract audit needs to tell them apart for
 /// diagnosis/evidence, not just for the boolean outcome.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) enum GateMarker {
     Pass,
     Fail,
@@ -782,6 +783,52 @@ impl StageCompletionDiagnosis {
     }
 }
 
+/// Objective, code-verified evidence about a stage attempt — deliberately
+/// kept to signals IntentOS can already produce today, per the P1.2 scope
+/// decision: start with what exists and unify it under one mechanism,
+/// don't build a universal verifier this cycle. `workspace_changed` (a
+/// real before/after manifest diff, never the model's own claim) is the
+/// one such signal available for every external-executor stage attempt.
+///
+/// Deliberately NOT included here yet: build-exit-code, test-exit-code,
+/// and endpoint/Playwright checks. Those are a real extension point for a
+/// later pass (they need a per-capability declared command and, for the
+/// endpoint case, wiring into `preview_status`) — not stubbed here as an
+/// always-`None` field, which would look like wired capability this cycle
+/// does not actually have.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ObjectiveEvidence {
+    pub workspace_changed: bool,
+}
+
+/// The full, inspectable record of one external-executor stage attempt's
+/// completion decision: what the model claimed, what objective evidence
+/// actually showed, and the final diagnosis — the constitutional "MODEL:
+/// PASS / EVIDENCE: FAIL / FINAL: FAIL" shape, persisted as evidence
+/// (`{stage}-{attempt}.completion.json`) rather than collapsed into a
+/// single boolean. `model_claim` is read verbatim from the executor's own
+/// output and is never itself the authority — see `evidence`/`diagnosis`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct StageCompletionOutcome {
+    pub model_claim: GateMarker,
+    pub evidence: ObjectiveEvidence,
+    #[serde(flatten)]
+    pub diagnosis: StageCompletionDiagnosis,
+    /// Not part of the persisted evidence shape (it is already captured as
+    /// the `.reality-verdict.txt` file by the caller when present) — kept
+    /// on the outcome only so callers don't need a second return value.
+    #[serde(skip)]
+    pub strict_reason: Option<String>,
+}
+
+impl StageCompletionOutcome {
+    fn passed(&self) -> bool {
+        self.diagnosis.passed()
+    }
+}
+
 /// The authoritative completion decision for one external-executor (Claude
 /// Code / Codex) stage attempt. Evidence can only ever downgrade a claimed
 /// PASS to a failure — it never manufactures a PASS out of a genuine FAIL
@@ -802,44 +849,40 @@ fn evaluate_external_stage_completion(
     is_reality: bool,
     strict_enabled: bool,
     criteria_len: usize,
-) -> (bool, StageCompletionDiagnosis, Option<String>) {
+) -> StageCompletionOutcome {
+    let model_claim = gate_marker_status(combined_output);
+    let evidence = ObjectiveEvidence { workspace_changed };
     let (strict_or_sentinel_passed, strict_reason) =
         resolve_stage_outcome(is_reality, strict_enabled, combined_output, criteria_len);
 
-    if !process_success {
-        return (
-            false,
-            StageCompletionDiagnosis::Failed(
-                "el proceso del executor externo terminó con un código de salida distinto de cero".into(),
-            ),
-            strict_reason,
-        );
+    let diagnosis = if !process_success {
+        StageCompletionDiagnosis::Failed(
+            "el proceso del executor externo terminó con un código de salida distinto de cero".into(),
+        )
+    } else if model_claim == GateMarker::Missing {
+        StageCompletionDiagnosis::Incomplete(
+            "el proceso del executor externo terminó sin ningún marcador INTENTOS_GATE:PASS o INTENTOS_GATE:FAIL explícito — el modelo del proceso terminó, pero el trabajo de la etapa no declaró un veredicto".into(),
+        )
+    } else if !strict_or_sentinel_passed {
+        StageCompletionDiagnosis::Failed(
+            strict_reason
+                .clone()
+                .unwrap_or_else(|| "INTENTOS_GATE:FAIL".into()),
+        )
+    } else if stage_requires_workspace_evidence(stage_kind) && !workspace_changed {
+        StageCompletionDiagnosis::ContractViolated(format!(
+            "la etapa reportó INTENTOS_GATE:PASS pero el workspace no muestra ningún cambio real de archivos entre el inicio y el fin del intento, lo cual es requerido para una etapa de tipo '{stage_kind}'"
+        ))
+    } else {
+        StageCompletionDiagnosis::Completed
+    };
+
+    StageCompletionOutcome {
+        model_claim,
+        evidence,
+        diagnosis,
+        strict_reason,
     }
-    if gate_marker_status(combined_output) == GateMarker::Missing {
-        return (
-            false,
-            StageCompletionDiagnosis::Incomplete(
-                "el proceso del executor externo terminó sin ningún marcador INTENTOS_GATE:PASS o INTENTOS_GATE:FAIL explícito — el modelo del proceso terminó, pero el trabajo de la etapa no declaró un veredicto".into(),
-            ),
-            strict_reason,
-        );
-    }
-    if !strict_or_sentinel_passed {
-        let reason = strict_reason
-            .clone()
-            .unwrap_or_else(|| "INTENTOS_GATE:FAIL".into());
-        return (false, StageCompletionDiagnosis::Failed(reason), strict_reason);
-    }
-    if stage_requires_workspace_evidence(stage_kind) && !workspace_changed {
-        return (
-            false,
-            StageCompletionDiagnosis::ContractViolated(format!(
-                "la etapa reportó INTENTOS_GATE:PASS pero el workspace no muestra ningún cambio real de archivos entre el inicio y el fin del intento, lo cual es requerido para una etapa de tipo '{stage_kind}'"
-            )),
-            strict_reason,
-        );
-    }
-    (true, StageCompletionDiagnosis::Completed, strict_reason)
 }
 
 /// Narrow, explicit, secondary-only signal: text that reads as the model
@@ -2557,7 +2600,7 @@ async fn run_codex_stage(
                 })??
         };
         let workspace_changed = !manifest_changes(&before_manifest, &after_manifest).is_empty();
-        let (final_passed, diagnosis, strict_reason) = evaluate_external_stage_completion(
+        let outcome = evaluate_external_stage_completion(
             stage_kind,
             status.success(),
             &combined,
@@ -2566,7 +2609,7 @@ async fn run_codex_stage(
             strict_enabled,
             criteria_len,
         );
-        if let Some(reason) = &strict_reason {
+        if let Some(reason) = &outcome.strict_reason {
             // Persisted alongside the existing stdout/stderr/manifest/
             // criteria evidence — the specific, diagnosable reason behind
             // the strict verdict must outlive the log line.
@@ -2580,23 +2623,28 @@ async fn run_codex_stage(
                 stage_id = %stage_id,
                 attempt,
                 sentinel_passed,
-                final_passed,
+                final_passed = outcome.passed(),
                 reason = %reason,
                 "Reality gate strict mode: structured verdict is authoritative for this stage"
             );
         }
+        // Executor↔runtime contract evidence (P0/P1.2) — the full MODEL
+        // CLAIM / OBJECTIVE EVIDENCE / FINAL DIAGNOSIS record, not just the
+        // final boolean, so a human (or a future UI) can see exactly where
+        // a claimed PASS and reality diverged, not only that they did.
         let _ = atomic_write(
             &evidence_dir.join(format!("{evidence_stage_id}-{attempt}.completion.json")),
-            &serde_json::to_vec_pretty(&diagnosis).unwrap_or_default(),
+            &serde_json::to_vec_pretty(&outcome).unwrap_or_default(),
         )
         .await;
-        if !matches!(diagnosis, StageCompletionDiagnosis::Completed) {
+        if !outcome.passed() {
             tracing::warn!(
                 run_id = %run_id,
                 stage_id = %stage_id,
                 attempt,
-                workspace_changed,
-                ?diagnosis,
+                model_claim = ?outcome.model_claim,
+                evidence = ?outcome.evidence,
+                diagnosis = ?outcome.diagnosis,
                 "External executor stage did not complete per the executor\u{2194}runtime contract"
             );
         }
@@ -2608,7 +2656,7 @@ async fn run_codex_stage(
                 text: "ADVERTENCIA: el texto del agente sugiere que continuará este trabajo en un futuro turno; esta es una invocación one-shot y no existe un futuro turno que la retome. Este aviso es informativo y no decide por sí solo si la etapa pasó.".into(),
             });
         }
-        Ok::<bool, AppError>(diagnosis.passed())
+        Ok::<bool, AppError>(outcome.passed())
     };
     tokio::time::timeout(MAX_STAGE_RUNTIME, execution)
         .await
@@ -2843,7 +2891,7 @@ async fn run_claude_stage(
                 })??
         };
         let workspace_changed = !manifest_changes(&before_manifest, &after_manifest).is_empty();
-        let (final_passed, diagnosis, strict_reason) = evaluate_external_stage_completion(
+        let outcome = evaluate_external_stage_completion(
             stage_kind,
             status.success(),
             &combined,
@@ -2852,7 +2900,7 @@ async fn run_claude_stage(
             strict_enabled,
             criteria_len,
         );
-        if let Some(reason) = &strict_reason {
+        if let Some(reason) = &outcome.strict_reason {
             // Persisted alongside the existing stdout/stderr/manifest/
             // criteria evidence — the specific, diagnosable reason behind
             // the strict verdict must outlive the log line.
@@ -2866,27 +2914,29 @@ async fn run_claude_stage(
                 stage_id = %stage_id,
                 attempt,
                 sentinel_passed,
-                final_passed,
+                final_passed = outcome.passed(),
                 reason = %reason,
                 "Reality gate strict mode: structured verdict is authoritative for this stage"
             );
         }
-        // Executor↔runtime contract evidence (P0) — always written, not
-        // only on a contract violation, so "why did this attempt end up
-        // this way" never depends on remembering to check a second place
-        // only when something went wrong.
+        // Executor↔runtime contract evidence (P0/P1.2) — the full MODEL
+        // CLAIM / OBJECTIVE EVIDENCE / FINAL DIAGNOSIS record, always
+        // written, not only on a violation, so "why did this attempt end
+        // up this way" never depends on remembering to check a second
+        // place only when something went wrong.
         let _ = atomic_write(
             &evidence_dir.join(format!("{evidence_stage_id}-{attempt}.completion.json")),
-            &serde_json::to_vec_pretty(&diagnosis).unwrap_or_default(),
+            &serde_json::to_vec_pretty(&outcome).unwrap_or_default(),
         )
         .await;
-        if !matches!(diagnosis, StageCompletionDiagnosis::Completed) {
+        if !outcome.passed() {
             tracing::warn!(
                 run_id = %run_id,
                 stage_id = %stage_id,
                 attempt,
-                workspace_changed,
-                ?diagnosis,
+                model_claim = ?outcome.model_claim,
+                evidence = ?outcome.evidence,
+                diagnosis = ?outcome.diagnosis,
                 "External executor stage did not complete per the executor\u{2194}runtime contract"
             );
         }
@@ -2898,7 +2948,7 @@ async fn run_claude_stage(
                 text: "ADVERTENCIA: el texto del agente sugiere que continuará este trabajo en un futuro turno; esta es una invocación one-shot y no existe un futuro turno que la retome. Este aviso es informativo y no decide por sí solo si la etapa pasó.".into(),
             });
         }
-        Ok::<bool, AppError>(diagnosis.passed())
+        Ok::<bool, AppError>(outcome.passed())
     };
     tokio::time::timeout(MAX_STAGE_RUNTIME, execution)
         .await
@@ -3154,15 +3204,17 @@ mod tests {
         ));
     }
 
-    // ---- Executor↔runtime contract (P0) — evaluate_external_stage_completion ----
+    // ---- Executor↔runtime contract (P0 + P1.2) — evaluate_external_stage_completion ----
     //
     // Cases A-E named to match the mandate's own acceptance criteria for
-    // this audit item, plus two negative controls (qa-kind exemption and
-    // the deferred-continuation heuristic never gating on its own).
+    // this audit item, plus negative controls (qa-kind exemption, the
+    // deferred-continuation heuristic never gating on its own) and, for
+    // P1.2, direct assertions on the MODEL CLAIM / OBJECTIVE EVIDENCE
+    // separation itself, not just the final boolean.
 
     #[test]
     fn case_a_completes_correctly_with_real_workspace_evidence() {
-        let (passed, diagnosis, _) = evaluate_external_stage_completion(
+        let outcome = evaluate_external_stage_completion(
             "architecture",
             true,
             "Wrote the architecture doc.\nINTENTOS_GATE:PASS",
@@ -3171,13 +3223,15 @@ mod tests {
             false,
             0,
         );
-        assert!(passed);
-        assert_eq!(diagnosis, StageCompletionDiagnosis::Completed);
+        assert!(outcome.passed());
+        assert_eq!(outcome.diagnosis, StageCompletionDiagnosis::Completed);
+        assert_eq!(outcome.model_claim, GateMarker::Pass);
+        assert!(outcome.evidence.workspace_changed);
     }
 
     #[test]
     fn case_b_process_ends_with_no_gate_marker_is_incomplete_not_fail() {
-        let (passed, diagnosis, _) = evaluate_external_stage_completion(
+        let outcome = evaluate_external_stage_completion(
             "development",
             true,
             "The process printed some progress and then just... ended.",
@@ -3186,13 +3240,17 @@ mod tests {
             false,
             0,
         );
-        assert!(!passed);
-        assert!(matches!(diagnosis, StageCompletionDiagnosis::Incomplete(_)));
+        assert!(!outcome.passed());
+        assert!(matches!(
+            outcome.diagnosis,
+            StageCompletionDiagnosis::Incomplete(_)
+        ));
+        assert_eq!(outcome.model_claim, GateMarker::Missing);
     }
 
     #[test]
     fn case_c_claims_pass_but_workspace_never_changed_is_contract_violated() {
-        let (passed, diagnosis, _) = evaluate_external_stage_completion(
+        let outcome = evaluate_external_stage_completion(
             "architecture",
             true,
             "Everything looks good.\nINTENTOS_GATE:PASS",
@@ -3201,11 +3259,16 @@ mod tests {
             false,
             0,
         );
-        assert!(!passed);
+        assert!(!outcome.passed());
         assert!(matches!(
-            diagnosis,
+            outcome.diagnosis,
             StageCompletionDiagnosis::ContractViolated(_)
         ));
+        // The exact P1.2 shape: MODEL says PASS, EVIDENCE says no real
+        // change happened, FINAL is FAIL — both halves must be inspectable
+        // on the same record, not collapsed into just the boolean.
+        assert_eq!(outcome.model_claim, GateMarker::Pass);
+        assert!(!outcome.evidence.workspace_changed);
     }
 
     #[test]
@@ -3216,10 +3279,10 @@ mod tests {
         // the real contract (workspace changed, exit ok, explicit PASS)
         // must still pass — the mandate is explicit that this signal alone
         // must never gate, only warn.
-        let (passed, diagnosis, _) =
+        let outcome =
             evaluate_external_stage_completion("development", true, output, true, false, false, 0);
-        assert!(passed);
-        assert_eq!(diagnosis, StageCompletionDiagnosis::Completed);
+        assert!(outcome.passed());
+        assert_eq!(outcome.diagnosis, StageCompletionDiagnosis::Completed);
     }
 
     #[test]
@@ -3227,15 +3290,15 @@ mod tests {
         let output = "Started the dev server; it will keep running in the background for the Showroom preview.\nINTENTOS_GATE:PASS";
         // Must not be misread as a deferred-work promise.
         assert!(!contains_deferred_continuation_claim(output));
-        let (passed, diagnosis, _) =
+        let outcome =
             evaluate_external_stage_completion("development", true, output, true, false, false, 0);
-        assert!(passed);
-        assert_eq!(diagnosis, StageCompletionDiagnosis::Completed);
+        assert!(outcome.passed());
+        assert_eq!(outcome.diagnosis, StageCompletionDiagnosis::Completed);
     }
 
     #[test]
     fn process_exit_failure_overrides_even_a_claimed_pass() {
-        let (passed, diagnosis, _) = evaluate_external_stage_completion(
+        let outcome = evaluate_external_stage_completion(
             "architecture",
             false, // non-zero exit
             "INTENTOS_GATE:PASS",
@@ -3244,8 +3307,16 @@ mod tests {
             false,
             0,
         );
-        assert!(!passed);
-        assert!(matches!(diagnosis, StageCompletionDiagnosis::Failed(_)));
+        assert!(!outcome.passed());
+        assert!(matches!(
+            outcome.diagnosis,
+            StageCompletionDiagnosis::Failed(_)
+        ));
+        // MODEL still claimed PASS here — the process exit code, not the
+        // model's own claim, is what overrides it. Worth asserting
+        // explicitly: this is the one failure path where EVIDENCE isn't
+        // even the deciding factor, exit status is checked first.
+        assert_eq!(outcome.model_claim, GateMarker::Pass);
     }
 
     #[test]
@@ -3253,7 +3324,7 @@ mod tests {
         // QA/reality legitimately only read and verify; requiring a
         // workspace mutation from them would produce a false FAIL on a
         // genuinely correct verification-only pass.
-        let (passed, diagnosis, _) = evaluate_external_stage_completion(
+        let outcome = evaluate_external_stage_completion(
             "qa",
             true,
             "Inspected the workspace, everything required is present.\nINTENTOS_GATE:PASS",
@@ -3262,13 +3333,14 @@ mod tests {
             false,
             0,
         );
-        assert!(passed);
-        assert_eq!(diagnosis, StageCompletionDiagnosis::Completed);
+        assert!(outcome.passed());
+        assert_eq!(outcome.diagnosis, StageCompletionDiagnosis::Completed);
+        assert!(!outcome.evidence.workspace_changed);
     }
 
     #[test]
     fn explicit_fail_is_reported_as_failed_not_incomplete() {
-        let (passed, diagnosis, _) = evaluate_external_stage_completion(
+        let outcome = evaluate_external_stage_completion(
             "development",
             true,
             "Could not finish: missing dependency.\nINTENTOS_GATE:FAIL",
@@ -3277,8 +3349,32 @@ mod tests {
             false,
             0,
         );
-        assert!(!passed);
-        assert!(matches!(diagnosis, StageCompletionDiagnosis::Failed(_)));
+        assert!(!outcome.passed());
+        assert!(matches!(
+            outcome.diagnosis,
+            StageCompletionDiagnosis::Failed(_)
+        ));
+        assert_eq!(outcome.model_claim, GateMarker::Fail);
+    }
+
+    #[test]
+    fn completion_outcome_serializes_model_claim_and_evidence_alongside_the_diagnosis() {
+        // The persisted evidence shape itself (what a human or a future UI
+        // would actually read from {stage}-{attempt}.completion.json) —
+        // not just the Rust-side struct fields.
+        let outcome = evaluate_external_stage_completion(
+            "architecture",
+            true,
+            "Looks done.\nINTENTOS_GATE:PASS",
+            false,
+            false,
+            false,
+            0,
+        );
+        let json = serde_json::to_string(&outcome).unwrap();
+        assert!(json.contains("\"modelClaim\":\"pass\""), "{json}");
+        assert!(json.contains("\"workspaceChanged\":false"), "{json}");
+        assert!(json.contains("\"status\":\"contractViolated\""), "{json}");
     }
 
     // ---- Executor↔runtime contract (P0) — real E2E against the real
