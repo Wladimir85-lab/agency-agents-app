@@ -18,7 +18,7 @@
   import { publicPreview } from "$lib/stores/publicPreview.svelte";
   import { toast } from "$lib/stores/toast.svelte";
   import { ui } from "$lib/stores/ui.svelte";
-  import { CREATION_CATALOG, findCatalogProduct, INTENTOS_CAPABILITIES, planSolution } from "$lib/data/intentosCapabilities";
+  import { CREATION_CATALOG, findCatalogProduct, INTENTOS_CAPABILITIES, planSolutionAsync } from "$lib/data/intentosCapabilities";
   import { session, buildConversationalIntent, summarizeRunForEsmeralda } from "$lib/stores/session.svelte";
   import type { SolutionProposal } from "$lib/data/intentosCapabilities";
   import type { Agent, AutomaticProject, Mission, RunEvent } from "$lib/types";
@@ -58,6 +58,12 @@
   let rejecting = $state(false);
   let approving = $state(false);
   let validation = $state("");
+  // True only while the hybrid router's semantic fallback is actually
+  // running (an unambiguous intent never sets this — see
+  // isFastPathConfident in intentosCapabilities.ts) so the UI can show
+  // real activity instead of looking frozen during the one case that adds
+  // latency.
+  let resolvingProposal = $state(false);
   let catalogDraftActive = $state(false);
   let loadedCatalogProductId = $state<string | null>(null);
   const catalogProduct = $derived(findCatalogProduct(ui.catalogProductId));
@@ -205,16 +211,21 @@
     validation = "";
   }
 
-  function prepareProposal() {
+  async function prepareProposal() {
     validation = "";
     if (!intent.trim()) validation = "Describe la intención del producto.";
     if (validation) return;
-    const nextProposal = planSolution({ intent, constraints, acceptance, requiredCapabilityIds: catalogProduct?.capabilityIds });
-    proposalChanges = previousProposal ? proposalDiff(previousProposal, nextProposal) : [];
-    proposal = nextProposal;
-    proposalRevision += 1;
-    rejecting = false;
-    rejectionReason = "";
+    resolvingProposal = true;
+    try {
+      const nextProposal = await planSolutionAsync({ intent, constraints, acceptance, requiredCapabilityIds: catalogProduct?.capabilityIds });
+      proposalChanges = previousProposal ? proposalDiff(previousProposal, nextProposal) : [];
+      proposal = nextProposal;
+      proposalRevision += 1;
+      rejecting = false;
+      rejectionReason = "";
+    } finally {
+      resolvingProposal = false;
+    }
   }
 
   function rejectProposal() {
@@ -251,7 +262,7 @@
     try {
       // Recompute the approved plan at the decision boundary. This prevents a
       // stale HMR-era proposal from ever starting an incomplete pipeline.
-      const approvedProposal = planSolution({ intent, constraints, acceptance, requiredCapabilityIds: catalogProduct?.capabilityIds });
+      const approvedProposal = await planSolutionAsync({ intent, constraints, acceptance, requiredCapabilityIds: catalogProduct?.capabilityIds });
       proposal = approvedProposal;
       const approvedCapabilities = approvedProposal.capabilities;
       const approvedPipeline = approvedProposal.pipeline;
@@ -315,7 +326,7 @@
    *  chains them and clears the composer once the turn actually started. */
   async function sendTurn(text: string) {
     intent = text;
-    prepareProposal();
+    await prepareProposal();
     if (validation || !proposal) return;
     await approveAndStart();
     if (!validation && !runs.error) intent = "";
@@ -446,7 +457,7 @@
           <Button variant="primary" onclick={sendChatMessage} loading={sending && !busy} disabled={!intent.trim()} ariaLabel="Enviar a Esmeralda">Enviar</Button>
           <p class="hint">{busy ? "Esmeralda sigue trabajando en tu instrucción anterior — esta se procesará automáticamente en cuanto termine." : "Esmeralda conserva el contexto de esta conversación y del proyecto. Cada instrucción se construye sobre la copia de trabajo acumulada; el proyecto original solo cambia cuando pides aplicar."}</p>
         {:else}
-          <Button variant="primary" onclick={prepareProposal} disabled={!canPropose} ariaLabel="Interpretar intención"><PlayIcon size={15}/> Ver propuesta</Button>
+          <Button variant="primary" onclick={prepareProposal} disabled={!canPropose} loading={resolvingProposal} ariaLabel="Interpretar intención"><PlayIcon size={15}/> {resolvingProposal ? "Analizando intención…" : "Ver propuesta"}</Button>
         {/if}
       </div>
       {/if}
