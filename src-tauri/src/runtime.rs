@@ -1292,7 +1292,16 @@ fn claude_command() -> Command {
 pub async fn runtime_providers() -> Result<Vec<RuntimeProvider>, AppError> {
     // Ordered internal bindings. Runbooks consumes the first healthy runtime;
     // provider identity is deliberately absent from the human intention flow.
-    Ok(vec![probe_codex().await, probe_claude().await])
+    // Claude Code first: found by hand this session that `available` here
+    // only proves the binary runs `--version` successfully, not that its
+    // account has remaining usage (see probe_codex's own doc comment on
+    // that exact gap) — a quota-exhausted Codex CLI still probed as
+    // available and, picked first, silently hung a real run for ~15
+    // minutes with zero output (its `exec` JSON stream never got a chance
+    // to report the actual "usage limit" error back through this path).
+    // Not a permanent ranking of one provider over the other — just today's
+    // honest default until probing verifies real usability, not presence.
+    Ok(vec![probe_claude().await, probe_codex().await])
 }
 
 #[tauri::command]
