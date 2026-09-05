@@ -5,7 +5,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const invokeMock = vi.hoisted(() => vi.fn());
 vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
 
-import { draftBuildConfirmation, narrateRunForEsmeralda, replyToEsmeraldaChat, summarizeRunForEsmeralda } from "./session.svelte";
+import { draftBuildConfirmation, draftTeamExplanation, narrateRunForEsmeralda, replyToEsmeraldaChat, summarizeRunForEsmeralda } from "./session.svelte";
 import type { RunSummary } from "$lib/types";
 
 beforeEach(() => {
@@ -201,5 +201,37 @@ describe("draftBuildConfirmation — the agreement step before a project is crea
     const message = await draftBuildConfirmation("quiero un blog", []);
     expect(message).toContain("¿");
     expect(message.length).toBeGreaterThan(0);
+  });
+});
+
+describe("draftTeamExplanation — real catalog roster, never invented roles (2026-09-05)", () => {
+  const realRoster = [
+    { label: "Dirección de proyecto", agentName: "Senior Project Manager" },
+    { label: "UX y dirección creativa", agentName: "UX Architect" },
+    { label: "Desarrollo de experiencia", agentName: "Frontend Developer" },
+  ];
+
+  it("the prompt sent to the model carries the real roster verbatim, not a generic placeholder", async () => {
+    invokeMock.mockResolvedValueOnce({ content: "ok" });
+    await draftTeamExplanation("solo dime a quiénes convocas", realRoster, []);
+    const sentPrompt = invokeMock.mock.calls[0][1].request.prompt as string;
+    expect(sentPrompt).toContain("Senior Project Manager");
+    expect(sentPrompt).toContain("UX Architect");
+    expect(sentPrompt).toContain("Frontend Developer");
+    expect(sentPrompt).toContain("no inventes otros");
+  });
+
+  it("the fallback (model unavailable) still uses the real roster, never a generic invented team", async () => {
+    invokeMock.mockRejectedValueOnce(new Error("Paranoid Mode is on"));
+    const message = await draftTeamExplanation("qué equipo convocarías", realRoster, []);
+    expect(message).toContain("Senior Project Manager");
+    expect(message).toContain("UX Architect");
+    expect(message).not.toMatch(/dise[ñn]ador gen[ée]rico|desarrollador gen[ée]rico/i);
+  });
+
+  it("never claims anything was built or created — this is a hypothetical explanation only", async () => {
+    invokeMock.mockResolvedValueOnce({ content: "El equipo sería: Senior Project Manager, UX Architect y Frontend Developer." });
+    const message = await draftTeamExplanation("cómo organizarías el equipo", realRoster, []);
+    expect(message).not.toMatch(/ya (lo )?constru|ya (lo )?cre[ée]|ya empec[ée]|proyecto creado/i);
   });
 });

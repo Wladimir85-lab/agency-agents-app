@@ -9,14 +9,19 @@ const invokeMock = vi.hoisted(() => vi.fn());
 vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
 
 import {
+  classifyConversationalIntent,
+  classifyConversationalIntentDeterministic,
   composePipeline,
   CREATIVE_TECH_SPECIALIZATIONS,
   INTENTOS_CAPABILITIES,
+  isBuildNegation,
   isConversationalMessage,
   isExplicitConfirmation,
+  isTeamCompositionQuestion,
   planSolution,
   planSolutionAsync,
   routeIntent,
+  type PendingBuildProposal,
 } from "./intentosCapabilities";
 
 function semanticReply(body: Record<string, unknown>) {
@@ -343,5 +348,184 @@ describe("isExplicitConfirmation — real mandate gate before a project is creat
   it("an empty message or an unrelated message is not a confirmation", () => {
     expect(isExplicitConfirmation("")).toBe(false);
     expect(isExplicitConfirmation("cuánto cuesta esto")).toBe(false);
+  });
+});
+
+// Regression suite for the real conversation Wladimir reported live,
+// 2026-09-05: he asked Esmeralda to hypothetically describe the team for a
+// build, explicitly saying not to build anything yet — she kept re-asking
+// to confirm a build across several turns anyway. Root cause: the
+// classifier had no concept of negation or hypothetical framing, so every
+// reply (including his refusals, which themselves contained "construyas")
+// was misread as a new build instruction.
+describe("real bug, 2026-09-05: hypothetical team planning + explicit negation must never enter the build-confirmation flow", () => {
+  it("the exact reported opening message is chat, not a build instruction", () => {
+    expect(
+      isConversationalMessage(
+        "Diseña hipotéticamente el equipo necesario para construir un sistema de gestión de inventario. No construyas nada todavía; solo explícame cómo organizarías el equipo.",
+      ),
+    ).toBe(true);
+  });
+
+  it("each of his actual follow-up refusals is chat, not a new build description", () => {
+    expect(isConversationalMessage("aún no construyamos")).toBe(true);
+    expect(isConversationalMessage("no construyas nada")).toBe(true);
+    expect(isConversationalMessage("no construyas nada todavía")).toBe(true);
+    expect(isConversationalMessage("todavía no lo hagas")).toBe(true);
+  });
+
+  it("those same refusals are recognized as explicit build negations, not just generic chat", () => {
+    // The distinction matters: isBuildNegation is what tells sendTurn to
+    // clear a pending build description instead of silently replacing it
+    // with the refusal text (the actual loop Wladimir hit).
+    expect(isBuildNegation("aún no construyamos")).toBe(true);
+    expect(isBuildNegation("no construyas nada")).toBe(true);
+    expect(isBuildNegation("no construyas nada todavía")).toBe(true);
+    expect(isBuildNegation("todavía no lo hagas")).toBe(true);
+    expect(isBuildNegation("quiero construir un blog")).toBe(false);
+  });
+
+  it("a purely hypothetical planning question, with no negation at all, is still chat", () => {
+    expect(isConversationalMessage("¿Cómo organizarías el equipo para construir un sistema de reservas?")).toBe(true);
+    expect(isConversationalMessage("hipotéticamente, ¿qué equipo usarías para esto?")).toBe(true);
+  });
+
+  it("his exact follow-up asking who would be convened is recognized as a team-composition question", () => {
+    expect(isTeamCompositionQuestion("solo dime a quiénes convocas")).toBe(true);
+    expect(isTeamCompositionQuestion("¿qué equipo necesitaría para un sistema de inventario?")).toBe(true);
+    expect(isTeamCompositionQuestion("hola, ¿cómo estás?")).toBe(false);
+  });
+
+  it("a real, direct build instruction is never swallowed by the new hypothetical/negation patterns", () => {
+    // The fix must not overcorrect — an actual order to build still builds.
+    expect(isConversationalMessage("quiero construir un blog personal ahora mismo")).toBe(false);
+    expect(isConversationalMessage("necesito un dashboard administrativo")).toBe(false);
+    expect(isBuildNegation("quiero construir un blog personal ahora mismo")).toBe(false);
+  });
+});
+
+// 2026-09-05 cognitive-architecture mandate ("CEREBRO COGNITIVO DE
+// ESMERALDA"): the regex classifier above is now only the deterministic
+// fallback. These tests cover the mandate's own adversarial phrase list
+// (its section 12) against `classifyConversationalIntentDeterministic`
+// directly, and separately verify the semantic layer's plumbing
+// (`classifyConversationalIntent`) — prompt content, JSON parsing,
+// validation, and fail-closed fallback.
+describe("classifyConversationalIntentDeterministic — mandate §12 phrase battery (fallback path, no model)", () => {
+  const noPending: PendingBuildProposal | null = null;
+  const pending: PendingBuildProposal = { text: "una tienda online", restrictions: [] };
+
+  it("a direct order to build is 'execute'", () => {
+    expect(classifyConversationalIntentDeterministic("Construye una tienda.", noPending).act).toBe("execute");
+    expect(classifyConversationalIntentDeterministic("Diseña y construye la aplicación.", noPending).act).toBe("execute");
+  });
+
+  it("an explicit negation is 'cancel', with negated: true", () => {
+    const result = classifyConversationalIntentDeterministic("No construyas una tienda.", pending);
+    expect(result.act).toBe("cancel");
+    expect(result.negated).toBe(true);
+    expect(classifyConversationalIntentDeterministic("Todavía no.", pending).act).toBe("cancel");
+  });
+
+  it("a question naming its own team-planning verb is non-executive ('explain', via the team-composition check)", () => {
+    // "primero dime qué equipo usarías" matches the team-composition
+    // pattern (checked before the generic hypothetical pattern) — either
+    // way it must never become 'execute' despite containing "construir".
+    const result = classifyConversationalIntentDeterministic("Quiero construir una tienda; primero dime qué equipo usarías.", noPending);
+    expect(result.act).not.toBe("execute");
+    expect(result.act).toBe("explain");
+  });
+
+  it("'Sí, pero solo explícame.' never becomes an execute confirmation, even with a proposal pending", () => {
+    // The mandate's own adversarial case: a bare confirmation word
+    // ('sí') wrapped around an explanation-only request must not trigger
+    // a real build just because it's short and contains 'sí'.
+    const result = classifyConversationalIntentDeterministic("Sí, pero solo explícame.", pending);
+    expect(result.act).not.toBe("execute");
+    expect(result.act).not.toBe("confirm");
+  });
+
+  it("a bare 'Sí.' or 'Ahora sí.' against a real pending proposal is 'confirm'", () => {
+    expect(classifyConversationalIntentDeterministic("Sí.", pending).act).toBe("confirm");
+    expect(classifyConversationalIntentDeterministic("Ahora sí.", pending).act).toBe("confirm");
+  });
+
+  it("the same 'Sí.' with nothing pending is never treated as a confirmation to build", () => {
+    expect(classifyConversationalIntentDeterministic("Sí.", noPending).act).not.toBe("confirm");
+  });
+
+  it("'Cancela.' and 'Continúa.' read as cancel/execute respectively when something is pending", () => {
+    expect(classifyConversationalIntentDeterministic("Cancela.", pending).act).toBe("cancel");
+  });
+
+  it("known, accepted fallback limitation: rhetorical/hypothetical phrasing that reuses a build verb without a recognized hedge word degrades to 'execute', never silently to something unsafe", () => {
+    // '¿Cómo construirías una tienda?', '¿Puedes construir una tienda?' and
+    // 'Imagínate que construimos una tienda.' are all genuinely
+    // hypothetical per the mandate, but none contain a word the
+    // deterministic patterns recognize as a hedge (no 'hipotéticamente',
+    // no 'organizarías/armarías/compondrías', no 'imagínate' keyword). The
+    // semantic layer (tested below) resolves these correctly; this
+    // fallback path only exists for when that layer is unavailable, and
+    // its worst-case failure mode here is asking for confirmation before
+    // building — never an unconfirmed build, never a crash, never a loop.
+    expect(classifyConversationalIntentDeterministic("¿Cómo construirías una tienda?", noPending).act).toBe("execute");
+    expect(classifyConversationalIntentDeterministic("¿Puedes construir una tienda?", noPending).act).toBe("execute");
+  });
+});
+
+describe("classifyConversationalIntent — semantic layer plumbing (mocked model)", () => {
+  it("uses the model's structured verdict when it replies with valid JSON", async () => {
+    invokeMock.mockResolvedValueOnce(
+      semanticReply({ act: "plan", negated: false, restrictions: [], confidence: 0.82, reason: "Pregunta hipotética sobre el equipo." }),
+    );
+    const result = await classifyConversationalIntent("¿Cómo construirías una tienda?", [], null);
+    expect(result.act).toBe("plan");
+    expect(result.confidence).toBe(0.82);
+  });
+
+  it("correctly resolves the mandate's hardest case — 'Sí, pero solo explícame.' — via the model, not the regex fallback", async () => {
+    invokeMock.mockResolvedValueOnce(
+      semanticReply({ act: "explain", negated: false, restrictions: [], confidence: 0.75, reason: "Acepta que se le explique, no que se ejecute." }),
+    );
+    const pending: PendingBuildProposal = { text: "una tienda online", restrictions: [] };
+    const result = await classifyConversationalIntent("Sí, pero solo explícame.", [], pending);
+    expect(result.act).toBe("explain");
+  });
+
+  it("carries the pending proposal and recent conversation into the prompt", async () => {
+    invokeMock.mockResolvedValueOnce(semanticReply({ act: "execute", negated: false, restrictions: [], confidence: 0.9, reason: "ok" }));
+    const pending: PendingBuildProposal = { text: "una landing page de fotografía", restrictions: [] };
+    await classifyConversationalIntent("dale, hazlo", [{ role: "user", content: "quiero algo simple" }], pending);
+    const sentPrompt = invokeMock.mock.calls[0][1].request.prompt as string;
+    expect(sentPrompt).toContain("una landing page de fotografía");
+    expect(sentPrompt).toContain("quiero algo simple");
+  });
+
+  it("captures explicit restrictions the model extracts, e.g. 'pero no implementes nada todavía'", async () => {
+    invokeMock.mockResolvedValueOnce(
+      semanticReply({ act: "execute", negated: false, restrictions: ["no implementes nada todavía"], confidence: 0.7, reason: "Pide diseñar, con una restricción explícita." }),
+    );
+    const result = await classifyConversationalIntent("Diseña la arquitectura, pero no implementes nada todavía.", [], null);
+    expect(result.act).toBe("execute");
+    expect(result.restrictions).toContain("no implementes nada todavía");
+  });
+
+  it("falls back to the deterministic classifier when the model call fails", async () => {
+    invokeMock.mockRejectedValueOnce(new Error("Paranoid Mode is on"));
+    const result = await classifyConversationalIntent("Construye una tienda.", [], null);
+    expect(result.act).toBe("execute");
+  });
+
+  it("falls back to the deterministic classifier when the model returns an unrecognized act", async () => {
+    invokeMock.mockResolvedValueOnce(semanticReply({ act: "delete_everything", confidence: 0.9 }));
+    const result = await classifyConversationalIntent("No construyas una tienda.", [], { text: "x", restrictions: [] });
+    expect(result.act).toBe("cancel"); // deterministic fallback still gets this one right
+  });
+
+  it("falls back to the deterministic classifier when the model returns unparseable content", () => {
+    invokeMock.mockResolvedValueOnce({ content: "no soy json" });
+    return classifyConversationalIntent("Construye una tienda.", [], null).then((result) => {
+      expect(result.act).toBe("execute");
+    });
   });
 });

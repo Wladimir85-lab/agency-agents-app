@@ -433,3 +433,65 @@ active watchdog process. Frontend surfacing of `HumanDecisionRequired` (Requisit
 session, commit `89a1ed2`) depends on this shape being stable - changing `JobState`'s variants
 later must also update `types.ts`'s discriminated union and `summarizeRunForEsmeralda`. Rust
 464→476 across the session's four implementation commits (P0/P1.1/P1.2/JOB-level), 0 failed.
+
+### 2026-09-05: Cognitive comprehension layer for Esmeralda's conversational intent - semantic-first, regex fallback, domain-neutral act vocabulary
+
+**Status**: Approved and implemented. **Context**: three same-day live bugs (a generic
+capability question containing "crear" silently started a build; a bare accented "sí" failed
+to match a `\b`-wrapped confirmation regex because JS's `\b` is ASCII-only; "no construyas nada
+todavía" was itself read as a new build instruction, trapping the chat in an infinite
+confirmation loop) were all one root cause - a flat regex classifier trying to enumerate Spanish
+grammar (negation, hypothetical framing, confirmation) instead of understanding it, checked in a
+fragile priority order inside `Runbooks.svelte`'s `sendTurn`. Wladimir explicitly rejected
+shipping a third targeted regex patch (already implemented, tested, and live-verified against
+the exact reported conversation) and issued a mandate for a principled comprehension
+architecture, with a same-session follow-up requiring the design to stay domain-neutral (not
+hardwired to "programming"/"builds") without asserting or designing toward AGI, and without
+requiring a future core redesign to grow.
+
+**Decision**: `ConversationalIntent { act, negated, restrictions, confidence, reason }` is the
+new single comprehension output, where `act` is one of `execute | explain | plan | smalltalk |
+confirm | cancel | unclear`. `classifyConversationalIntent` (`intentosCapabilities.ts`) is
+hybrid, mirroring the exact shape `resolveCapabilitiesHybrid` already used for capability
+routing: a semantic layer (`classifyConversationalIntentSemantic`, reusing the same
+`local_model_complete`/DeepSeek primitive as the existing capability classifier - no new
+inference path or risk surface) asks the model to genuinely interpret negation/modality/
+hypothesis/confirmation/restrictions given recent conversation context and any pending build
+proposal, returning strict validated JSON; on any failure (model unavailable, Paranoid Mode,
+unparseable/invalid JSON) it fails closed to `classifyConversationalIntentDeterministic` - the
+*same* six regex patterns built earlier the same day, reframed as first-class acts instead of an
+ad hoc boolean if/else chain, not deleted. `act` is named `"execute"`, deliberately not
+`"build"`: it is the domain-neutral verdict "the user is authorizing a real effect right now,"
+independent of which domain that effect belongs to - today the only real effect IntentOS's
+runtime can produce is its 5-stage software pipeline, and this decision does not pretend
+otherwise, but a future non-software action (research, analysis, etc.) can plug into the same
+verdict without this comprehension layer being redesigned. `PendingBuildProposal { text,
+restrictions }` (`Runbooks.svelte`) replaces the old plain-string `pendingBuildText` so explicit
+conditions ("pero no implementes nada todavía") survive into the eventual build instruction
+instead of being silently dropped when the classifier moves on to the next message.
+`Runbooks.svelte`'s `sendTurn` was rewritten around one `classifyConversationalIntent` call
+feeding a small, fixed decision table - the only place real authority lives, structurally
+unchanged from before this mandate (only `act === "execute"` combined with either an existing
+project or an explicit `"confirm"` on a real pending proposal can ever reach `approveAndStart`).
+
+**Alternatives rejected**: a fourth/fifth regex pattern for the newly reported phrasing
+(rejected explicitly by Wladimir - this is the exact whack-a-mole pattern that produced three
+bugs in one day and cannot keep up with every future phrasing "capaz que", "por ahora no", "ni
+se te ocurra" would need). Building a full multi-domain tool-selection/action-plugin system now
+to satisfy the generalist-architecture follow-up (rejected as scope creep - no such runtime
+capability exists yet in IntentOS; only the comprehension vocabulary was made domain-neutral, so
+real generality can be added later without redesigning this layer). Deleting the regex
+classifier once the semantic layer existed (rejected - kept as the tested, instant, network-
+independent fallback, same posture as every other hybrid classifier in this file).
+
+**Consequences**: the regex classifier from earlier the same day is now purely a fallback, not
+dead code - still fully tested and exercised whenever DeepSeek is unavailable. A known,
+accepted fallback limitation: purely rhetorical/hypothetical phrasings that reuse a build verb
+without a recognized hedge word (e.g. "¿Cómo construirías una tienda?") degrade to `"execute"`
+under the deterministic fallback alone - never unsafely, since without an already-open project
+this only opens a confirmation discussion, never an unconfirmed build. `vitest` 52→67 same
+session (new coverage: the mandate's own §12 adversarial phrase battery against the
+deterministic classifier, plus semantic-layer plumbing tests), `npm run check` 495/0/0. Live-
+verified against the real running app via CDP: replayed the exact reported conversation plus the
+mandate's hardest adversarial phrase ("Sí, pero solo explícame.") with zero confirmation-loop
+and zero unwanted build.

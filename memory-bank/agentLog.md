@@ -942,3 +942,71 @@ relaunched with `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9
 via Playwright `chromium.connectOverCDP`, opened the real ALMARNAVAL project's conversation, sent
 "Hola Esmeralda, ¿cómo estás?", got a real model-generated reply grounded in the actual project
 context, no new run triggered. `vitest` 36 passed (up from 26); no Rust touched.
+
+## 2026-09-05 — Cognitive-comprehension architecture for Esmeralda's conversational intent
+
+**Root cause of three same-day live bugs** (generic-question false positive, plain "sí" not
+matching due to JS `\b` being ASCII-only, "no construyas nada todavía" read as a new build order
+and trapping the chat in an infinite confirmation loop): every fix so far was one more regex
+bolted onto a flat if/else chain in `Runbooks.svelte`'s `sendTurn` — enumerating Spanish grammar
+instead of understanding it. Wladimir explicitly rejected shipping the third regex patch (already
+implemented and live-verified) and issued a full mandate ("CEREBRO COGNITIVO DE ESMERALDA")
+demanding genuine comprehension of negation/modality/hypothesis/confirmation/restrictions, a
+structured intent representation, and a hard separation between comprehension (interpret),
+decision (fixed code, never the model), and authority (only one path ever spends a real Mission).
+A follow-up instruction mid-session added: design Esmeralda as a domain-neutral generalist
+architecture (not hardwired to "software builds"), without overclaiming AGI or requiring a core
+redesign later.
+
+**Audit first** (per the mandate's own procedure) — read `Runbooks.svelte`, `session.svelte.ts`,
+and `intentosCapabilities.ts` end to end. Finding: the six existing regex patterns
+(`BUILD_INTENT_PATTERN`, `GENERIC_CAPABILITY_QUESTION_PATTERN`, `BUILD_NEGATION_PATTERN`,
+`HYPOTHETICAL_PLANNING_PATTERN`, `CONFIRMATION_PATTERN`, `TEAM_COMPOSITION_QUESTION_PATTERN`)
+were the *entire* comprehension layer, each checked in raw-text-surface order inside `sendTurn`;
+`pendingBuildText: string | null` had no structure (couldn't carry restrictions or resolve
+references); `session.svelte.ts`'s draft/reply functions were already correctly downstream-only
+(phrase a decided fact, never decide) — that separation didn't need to change.
+
+**Implementation** (`intentosCapabilities.ts`): added `ConversationalIntent` (`act: "execute" |
+"explain" | "plan" | "smalltalk" | "confirm" | "cancel" | "unclear"`, `negated`, `restrictions`,
+`confidence`, `reason`) and `PendingBuildProposal` (`{ text, restrictions }`, replacing the plain
+string). `classifyConversationalIntent` is a hybrid: `classifyConversationalIntentSemantic` (same
+`local_model_complete`/DeepSeek primitive as the existing `classifyIntentSemantic` capability
+router — no new inference path) asks the model to genuinely interpret the turn given recent
+context and any pending proposal, returning strict validated JSON; on any failure it falls back to
+`classifyConversationalIntentDeterministic`, which is the *old* regex classifier reframed as acts
+instead of ad hoc booleans — not deleted, demoted to safety net, same hybrid-router shape
+`resolveCapabilitiesHybrid` already used for capability selection. `act` is named "execute", not
+"build" — the domain-neutral verdict "authorize a real effect now"; today the only real effect is
+the 5-stage software pipeline, but the comprehension vocabulary itself doesn't assume that, so a
+future non-software action plugs in without touching this layer (the generalist-architecture
+follow-up, addressed by naming alone — no multi-domain tool-selection engine was built, since none
+of that exists in the runtime yet and inventing it now would be scope creep).
+
+`Runbooks.svelte`'s `sendTurn` was rewritten around one `classifyConversationalIntent` call
+feeding a small decision table: `confirm` + a real pending proposal is the only path besides
+`execute` (with an already-open project) that reaches `approveAndStart`; `cancel` clears the
+pending proposal; every other act replies conversationally and touches nothing on disk. Explicit
+restrictions (`"pero no implementes nada todavía"`) get folded into the eventual build intent text
+instead of silently dropped.
+
+**Tests**: added `classifyConversationalIntentDeterministic` coverage against the mandate's own
+§12 adversarial phrase list, plus semantic-layer plumbing tests (prompt content, JSON validation,
+fail-closed fallback) — including the hardest case, "Sí, pero solo explícame.", which must never
+become an execute/confirm even with a real pending proposal (fixed by checking
+`HYPOTHETICAL_PLANNING_PATTERN`'s explain-only override before the confirmation check in the
+fallback path). Added a standalone `CANCEL_WORD_PATTERN` for bare "Cancela." (grammatically not a
+negation, conversationally identical). `vitest` 67 passed (up from 52 same-day), `npm run check`
+495/0/0.
+
+**Live-verified against the real running app** (CDP, not simulated): replayed the exact reported
+conversation end to end — hypothetical team-planning opener, three different refusal phrasings,
+the team-composition follow-up, and the mandate's hardest adversarial phrase "Sí, pero solo
+explícame." — zero confirmation-loop, zero unwanted build, the hardest phrase correctly explained
+the team instead of asking to confirm. A closing "dale, constrúyelo" with nothing actually pending
+correctly asked for more detail instead of guessing.
+
+**Deliberately not built** (scope discipline, per the mandate's own "no construir un monstruo"):
+a multi-domain tool-selection engine, real "research" capabilities, or a plugin system for new
+action types — none of these exist in IntentOS's runtime today; only the comprehension vocabulary
+was made domain-neutral so they could be added later without a core redesign.

@@ -208,6 +208,50 @@ export async function draftBuildConfirmation(
   }
 }
 
+/** Esmeralda's answer to a hypothetical "qué equipo convocarías" question —
+ *  2026-09-05, real bug/requirement: describing the team must use
+ *  IntentOS's real agent catalog, never invented generic roles ("un
+ *  diseñador, un desarrollador..."), when a canonical source exists. The
+ *  caller (Runbooks.svelte) computes the real roster first — via the same
+ *  `planSolutionAsync` routing a real build would use, applied here purely
+ *  informationally, no project/run/side-effect involved — and passes it
+ *  in as `roster`; this function never invents the team itself, only asks
+ *  the model to phrase the real one naturally. Same fallback discipline as
+ *  every other Esmeralda-reply function here: a real, useful answer even
+ *  if the model call fails, never silence. */
+export async function draftTeamExplanation(
+  text: string,
+  roster: { label: string; agentName: string }[],
+  priorMessages: ConversationMessage[],
+): Promise<string> {
+  const rosterText = roster.map((s, i) => `${i + 1}. ${s.label} — ${s.agentName}`).join("\n");
+  const fallback = `El equipo real que IntentOS convocaría para esto:\n${rosterText}\n\nEsto es solo la explicación que pediste — no construí ni creé nada.`;
+  const context = priorMessages
+    .slice(-MAX_CONTEXT_MESSAGES)
+    .map((m) => `${ROLE_LABEL[m.role]}: ${preview(m.content)}`)
+    .join("\n");
+  const prompt = [
+    "Eres Esmeralda, la inteligencia conversacional de IntentOS. El usuario te pidió, de forma hipotética o explicativa, describir qué equipo convocarías — NO te pidió construir nada, y no se creó ni se va a crear ningún proyecto a partir de este mensaje.",
+    context ? `\nCONVERSACIÓN PREVIA CON ESTE USUARIO:\n${context}` : "",
+    `\nPREGUNTA DEL USUARIO:\n${text.trim()}`,
+    `\nEQUIPO REAL QUE INTENTOS COMPONDRÍA PARA ESTO (datos reales del catálogo de agentes — usa exactamente estos roles y nombres, no inventes otros ni cambies estos):\n${rosterText}`,
+    "\nExplícale el equipo al usuario en español, en primera persona, en 3 a 6 frases, con un tono conversacional — usando exactamente los roles y nombres reales de arriba. No digas en ningún momento que ya construiste algo, que ya creaste un proyecto o que ya empezaste a trabajar — esto es solo una explicación hipotética que pidió.",
+  ].join("\n");
+  try {
+    const completion = await invoke<{ content: string }>("local_model_complete", {
+      request: { prompt, maxTokens: 320, purpose: "esmeralda_team_explanation" },
+    });
+    const reply = completion.content.trim();
+    return reply || fallback;
+  } catch (error) {
+    console.warn(
+      "[session] Esmeralda's team-explanation draft is unavailable right now (Paranoid Mode, no backend configured, or a real error):",
+      error,
+    );
+    return fallback;
+  }
+}
+
 class SessionStore {
   current: ProjectSession | null = $state(null);
   loading = $state(false);

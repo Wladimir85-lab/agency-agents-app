@@ -1,5 +1,45 @@
 # Active Context — Agency Agents
 
+## Cognitive-comprehension architecture for Esmeralda's conversational intent — 2026-09-05
+
+**Read this before touching `sendTurn`/`isConversationalMessage`-adjacent code.** Three
+same-day live bugs (generic-question false positive, plain "sí" not matching a `\b`-wrapped
+regex, "no construyas nada todavía" trapping the chat in an infinite build-confirmation loop)
+were all the same failure mode: a flat regex classifier enumerating Spanish grammar instead of
+understanding it, checked in a fragile if/else order inside `Runbooks.svelte`'s `sendTurn`.
+Wladimir explicitly rejected shipping a third regex patch (already built, tested, live-verified)
+and issued a full mandate for genuine comprehension, plus a follow-up requiring the architecture
+to stay domain-neutral (not hardwired to "software builds") without overclaiming AGI.
+
+**What changed** (`intentosCapabilities.ts`): `ConversationalIntent` (`act: "execute" | "explain"
+| "plan" | "smalltalk" | "confirm" | "cancel" | "unclear"`, `negated`, `restrictions`,
+`confidence`, `reason`) is now the single comprehension output. `classifyConversationalIntent` is
+hybrid — a semantic layer (`classifyConversationalIntentSemantic`, same DeepSeek/
+`local_model_complete` primitive as the existing capability classifier) genuinely interprets
+negation/hypothesis/confirmation/restrictions given conversation context and any pending
+proposal; on failure it falls back to `classifyConversationalIntentDeterministic`, which is the
+*old* regex classifier (`BUILD_INTENT_PATTERN` etc. — all six patterns, unchanged) reframed as
+acts instead of ad hoc booleans, not deleted. `act: "execute"` (not "build") is the deliberately
+domain-neutral verdict "authorize a real effect now" — today that only ever means the 5-stage
+software pipeline, but the vocabulary itself doesn't assume that, so a future non-software action
+plugs in without redesigning this layer. `PendingBuildProposal { text, restrictions }` replaces
+the old plain-string `pendingBuildText`, so explicit conditions ("pero no implementes nada
+todavía") survive into the eventual build intent instead of being dropped.
+
+`Runbooks.svelte`'s `sendTurn` is now one `classifyConversationalIntent` call feeding a small,
+fixed decision table — the only place authority lives, unchanged in spirit from before this
+mandate, just fed a structured signal instead of raw regex booleans.
+
+**Live-verified against the real running app** (CDP): replayed the exact reported conversation
+(hypothetical team-planning opener, three refusal phrasings, the team-composition follow-up, and
+the hardest adversarial phrase "Sí, pero solo explícame.") — zero confirmation-loop, zero
+unwanted build, the hardest phrase correctly explained instead of asking to confirm.
+
+**Deliberately not built**: a multi-domain tool-selection engine, real "research" capabilities, or
+an action-type plugin system — none exist in the runtime today; only the comprehension vocabulary
+was made domain-neutral. `vitest` 67 passed (up from 52), `npm run check` 495/0/0. Full detail:
+`agentLog.md` 2026-09-05, `decisions.md`'s new ADR.
+
 ## Runtime engineering audit + JOB-level operational responsibility — 2026-09-04
 
 **Read this before every section below** — it supersedes the "Architecture blocked" framing

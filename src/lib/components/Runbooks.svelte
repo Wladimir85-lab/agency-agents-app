@@ -17,10 +17,10 @@
   import { publicPreview } from "$lib/stores/publicPreview.svelte";
   import { toast } from "$lib/stores/toast.svelte";
   import { ui } from "$lib/stores/ui.svelte";
-  import { CREATION_CATALOG, findCatalogProduct, INTENTOS_CAPABILITIES, isConversationalMessage, isExplicitConfirmation, planSolutionAsync } from "$lib/data/intentosCapabilities";
-  import { session, buildConversationalIntent, draftBuildConfirmation, narrateRunForEsmeralda, replyToEsmeraldaChat } from "$lib/stores/session.svelte";
-  import type { SolutionProposal } from "$lib/data/intentosCapabilities";
-  import type { Agent, AutomaticProject, Mission, RunEvent } from "$lib/types";
+  import { CREATION_CATALOG, classifyConversationalIntent, findCatalogProduct, INTENTOS_CAPABILITIES, isTeamCompositionQuestion, planSolutionAsync } from "$lib/data/intentosCapabilities";
+  import { session, buildConversationalIntent, draftBuildConfirmation, draftTeamExplanation, narrateRunForEsmeralda, replyToEsmeraldaChat } from "$lib/stores/session.svelte";
+  import type { PendingBuildProposal, SolutionProposal } from "$lib/data/intentosCapabilities";
+  import type { Agent, AutomaticProject, ConversationMessage, Mission, RunEvent } from "$lib/types";
 
   const LEGACY_DRAFT_KEY = "intentos.productionBrief.v1";
   // `selected` (a NEXUS scenario runbook from strategy/runbooks.json) is
@@ -55,11 +55,12 @@
    *  that project's real, persisted `session.messages` — this array is
    *  only ever shown before that point. */
   let localMessages = $state<{ id: string; role: "user" | "esmeralda"; content: string; at: string }[]>([]);
-  /** The build description awaiting an explicit go-ahead before any
-   *  project gets created — see sendTurn's own doc comment. `null` means
-   *  no build discussion is pending (either none started, or the last one
-   *  was confirmed/abandoned via `newIntent`). */
-  let pendingBuildText = $state<string | null>(null);
+  /** The build description (plus any explicit restrictions attached to it,
+   *  e.g. "pero no implementes nada todavía") awaiting an explicit
+   *  go-ahead before any project gets created — see sendTurn's own doc
+   *  comment. `null` means no build discussion is pending (either none
+   *  started, or the last one was confirmed/abandoned via `newIntent`). */
+  let pendingBuildProposal = $state<PendingBuildProposal | null>(null);
   let chatLogEl: HTMLOListElement | undefined = $state();
   let selectedSlug = $state("");
   let proposal = $state<SolutionProposal | null>(null);
@@ -225,7 +226,7 @@
     projectPath = "";
     useExistingProject = false;
     localMessages = [];
-    pendingBuildText = null;
+    pendingBuildProposal = null;
     proposal = null;
     previousProposal = null;
     proposalChanges = [];
@@ -380,31 +381,78 @@
     ];
   }
 
+  /** The single place a conversational (non-build) message becomes
+   *  Esmeralda's actual reply — used for both the persisted (real project)
+   *  and ephemeral (no project yet) chat paths, so the team-composition
+   *  grounding below only has to exist once.
+   *
+   *  2026-09-05 requirement: a hypothetical "qué equipo convocarías"
+   *  question must be answered from IntentOS's real agent catalog, never
+   *  invented generic roles. `planSolutionAsync` — the exact same routing
+   *  a real build would use — is called here purely informationally: it
+   *  only reads the catalog and computes a pipeline in memory, it never
+   *  touches disk or creates anything, so this stays the side-effect-free
+   *  query the Constitución requires for planning/consulting. */
+  async function computeEsmeraldaChatReply(
+    text: string,
+    priorMessages: ConversationMessage[],
+  ): Promise<string> {
+    if (isTeamCompositionQuestion(text)) {
+      const hypothetical = await planSolutionAsync({ intent: text });
+      const roster = hypothetical.pipeline.map((stage) => ({
+        label: stage.label,
+        agentName: bySlug.get(stage.agent)?.name ?? stage.agent,
+      }));
+      return draftTeamExplanation(text, roster, priorMessages);
+    }
+    return replyToEsmeraldaChat(text, priorMessages);
+  }
+
+  /** The single dispatcher for a chat turn — 2026-09-05 cognitive
+   *  architecture mandate. Replaces the earlier if/else chain of regex
+   *  booleans (`isConversationalMessage`/`isBuildNegation`/
+   *  `isExplicitConfirmation` checked in a specific, fragile order) with
+   *  one structured comprehension step (`classifyConversationalIntent`)
+   *  followed by a small, deterministic decision table. The model
+   *  interprets (negation, hypothesis, confirmation, restrictions); this
+   *  function decides and acts — it is the only place authority actually
+   *  lives, exactly as much as it did before this mandate.
+   *
+   *  `act === "execute"` is the only branch that can ever reach
+   *  `approveAndStart` (a real project_create_automatic + Mission +
+   *  production run). Every other act — including "confirm" with nothing
+   *  pending, or "unclear" — falls through to a conversational reply and
+   *  touches nothing on disk. */
   async function sendTurn(text: string) {
-    // Checked *before* isConversationalMessage on purpose: a short
-    // confirmation like "sí, dale" reads as plain chat to the generic
-    // classifier (it matches no build verb and no capability keyword) —
-    // correct in isolation, wrong here, where it actually means "yes,
-    // build the thing we just discussed". Found live: without this check
-    // first, a pending build description was silently dropped and every
-    // confirmation just chatted back instead of ever building anything.
-    if (!projectPath && pendingBuildText && isExplicitConfirmation(text)) {
-      const agreedText = pendingBuildText;
-      pendingBuildText = null;
+    const priorMessages = projectPath ? session.messages : localMessages;
+    const decision = await classifyConversationalIntent(text, priorMessages, pendingBuildProposal);
+
+    if (decision.act === "confirm" && !projectPath && pendingBuildProposal) {
+      const agreed = pendingBuildProposal;
+      pendingBuildProposal = null;
       appendLocalMessage("user", text);
-      intent = agreedText;
+      intent = agreed.restrictions.length
+        ? `${agreed.text}\n\nRESTRICCIONES EXPLÍCITAS DEL USUARIO: ${agreed.restrictions.join("; ")}`
+        : agreed.text;
       await prepareProposal();
       if (validation || !proposal) return;
       await approveAndStart();
       if (!validation && !runs.error) intent = "";
       return;
     }
-    if (isConversationalMessage(text)) {
+
+    if (decision.act !== "execute") {
+      // Every non-executive act (explain/plan/smalltalk/confirm-with-
+      // nothing-pending/cancel/unclear) is conversation, never a build.
+      // "cancel" additionally clears whatever was pending — there is
+      // nothing left to confirm once the human explicitly refused it (the
+      // real infinite-loop bug this mandate started from).
+      if (decision.act === "cancel") pendingBuildProposal = null;
       if (projectPath) {
         await session.loadOrCreate(projectPath);
-        const priorMessages = session.messages;
+        const prior = session.messages;
         await session.appendMessage(projectPath, "user", text);
-        const reply = await replyToEsmeraldaChat(text, priorMessages);
+        const reply = await computeEsmeraldaChatReply(text, prior);
         await session.appendMessage(projectPath, "esmeralda", reply);
       } else {
         // No project exists yet — this is chat before any work has
@@ -412,17 +460,18 @@
         // in-memory (localMessages); the moment a later message actually
         // needs a project, the conversation continues in that project's
         // real, persisted session instead.
-        const priorMessages = localMessages;
+        const prior = localMessages;
         appendLocalMessage("user", text);
-        const reply = await replyToEsmeraldaChat(text, priorMessages);
+        const reply = await computeEsmeraldaChatReply(text, prior);
         appendLocalMessage("esmeralda", reply);
       }
       return;
     }
-    // A build-shaped message. Inside an already-agreed project, every
-    // further instruction still builds immediately — the human already
-    // committed to this project once, so re-confirming every single turn
-    // would be exactly the ceremony the chat redesign was meant to remove.
+
+    // act === "execute". Inside an already-agreed project, every further
+    // instruction still builds immediately — the human already committed
+    // to this project once, so re-confirming every single turn would be
+    // exactly the ceremony the chat redesign was meant to remove.
     if (projectPath) {
       intent = text;
       await prepareProposal();
@@ -436,21 +485,15 @@
     // reunión de acuerdo". Creating a project is a real filesystem
     // commitment (project_create_automatic inside approveAndStart), so the
     // first build-sounding message opens a discussion instead of
-    // triggering it — a real bug the same day (a generic question
-    // containing "crear" silently started a full production run) is
-    // exactly why this gate exists now, not just caution for its own sake.
-    // (The confirmation check itself lives at the top of this function,
-    // ahead of isConversationalMessage — see that comment for why.)
-    //
-    // Either the first mention of wanting something built, or a
-    // refinement of what was already discussed — either way, still just
-    // conversation until an explicit go-ahead arrives. Replacing (not
-    // appending to) pendingBuildText on every pass means the *latest*
+    // triggering it. Either the first mention of wanting something built,
+    // or a refinement of what was already discussed — either way, still
+    // just conversation until an explicit go-ahead arrives. Replacing (not
+    // appending to) pendingBuildProposal on every pass means the *latest*
     // description is always what actually gets built once confirmed.
-    pendingBuildText = text;
-    const priorMessages = localMessages;
+    pendingBuildProposal = { text, restrictions: decision.restrictions };
+    const priorLocal = localMessages;
     appendLocalMessage("user", text);
-    const reply = await draftBuildConfirmation(text, priorMessages);
+    const reply = await draftBuildConfirmation(text, priorLocal);
     appendLocalMessage("esmeralda", reply);
   }
 

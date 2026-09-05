@@ -444,6 +444,25 @@ const BUILD_INTENT_PATTERN =
 const GENERIC_CAPABILITY_QUESTION_PATTERN =
   /\b(qu[ée] se puede|qu[ée] puedo|qu[ée] es posible|qu[ée] cosas? (se pueden|puedo|podr[ií]a)|c[oó]mo funciona|c[oó]mo se hace|para qu[ée] sirve|qu[ée] significa|qu[ée] tipos? de|qu[ée] opciones (hay|existen)|cu[aá]les? son (las|los) (opciones|posibilidades))\b/i;
 
+// Second real bug, found live the same day by Wladimir: "no construyas
+// nada todavía" contains "construyas", so BUILD_INTENT_PATTERN alone
+// misread an explicit REFUSAL to build as a build instruction — worse,
+// each such reply then *replaced* the pending build description in
+// Runbooks.svelte's sendTurn, so Esmeralda kept asking to confirm a build
+// no one asked for, in a loop, no matter how many times the human said no.
+// An explicit negation of building always wins over any verb it contains.
+const BUILD_NEGATION_PATTERN =
+  /\b(no\s+(lo\s+|los\s+|la\s+|las\s+)?(constru\w*|creemos|crees\b|hag\w*|empieces|comiences|inicies)|a[uú]n\s+no|todav[ií]a\s+no|sin\s+construir|sin\s+crear|no\s+construyamos|no\s+lo\s+hagamos)\b/i;
+
+// Same bug's other half: "diseña hipotéticamente el equipo... solo
+// explícame cómo organizarías esto" is a request to explain/plan, not to
+// execute — it contains "diseña" (a build verb) but is asking about a
+// hypothetical, never authorizing anything real. Detected independently
+// of negation because a purely hypothetical question may never mention
+// "no" at all (e.g. "¿cómo organizarías el equipo para X?" alone).
+const HYPOTHETICAL_PLANNING_PATTERN =
+  /\b(hipot[ée]tica(mente)?|c[oó]mo organizar[ií]as|c[oó]mo armar[ií]as|c[oó]mo compondr[ií]as|qu[ée] equipo (necesitar[ií]a|convocar[ií]as|usar[ií]as|conformar[ií]as|se necesitar[ií]a)|qui[ée]nes? (participar[ií]an|se encargar[ií]an|estar[ií]an involucrados)|a qui[ée]nes? convocar[ií]as|s[oó]lo (expl[ií]came|dime|cu[ée]ntame|quiero saber))\b/i;
+
 /** Whether a message is casual conversation with Esmeralda rather than a
  *  build/change instruction (2026-09-04 — "quiero que sea un chat junto a
  *  la entrada"). Same hybrid-router spirit as `routeIntent` above: a cheap
@@ -453,22 +472,242 @@ const GENERIC_CAPABILITY_QUESTION_PATTERN =
  *  A message counts as a build instruction if it either matches a
  *  recognizable action verb (`BUILD_INTENT_PATTERN`) or `routeIntent`
  *  finds a real capability-keyword match (`confidence > 0`) — otherwise
- *  it's chat, *unless* it's a generic capability question
- *  (`GENERIC_CAPABILITY_QUESTION_PATTERN`), which is always chat even when
- *  it contains a build verb. The asymmetry is deliberate: a false "chat"
- *  verdict just means Esmeralda replies conversationally and the user
- *  restates the instruction more explicitly (no worse than today's
- *  behavior for an unmatched intent); a false "build" verdict would spend
- *  a real Mission and a full 5-stage run on a question, which is the
- *  actual problem this function exists to prevent. Never called for the
- *  initial project-creation turn — see its one call site in
- *  Runbooks.svelte. */
+ *  it's chat, *unless* it's a generic capability question, an explicit
+ *  negation of building, or a hypothetical/planning question — all three
+ *  always win over any build verb they happen to contain. The asymmetry
+ *  is deliberate: a false "chat" verdict just means Esmeralda replies
+ *  conversationally and the user restates the instruction more explicitly
+ *  (no worse than today's behavior for an unmatched intent); a false
+ *  "build" verdict would spend a real Mission and a full 5-stage run — or,
+ *  worse, trap the conversation in a confirmation loop it can't escape
+ *  (the negation bug) — which is the actual problem this function exists
+ *  to prevent. Never called for the initial project-creation turn — see
+ *  its one call site in Runbooks.svelte. */
 export function isConversationalMessage(text: string): boolean {
   const trimmed = text.trim();
   if (!trimmed) return true;
   if (GENERIC_CAPABILITY_QUESTION_PATTERN.test(trimmed)) return true;
+  if (BUILD_NEGATION_PATTERN.test(trimmed)) return true;
+  if (HYPOTHETICAL_PLANNING_PATTERN.test(trimmed)) return true;
   if (BUILD_INTENT_PATTERN.test(trimmed)) return false;
   return routeIntent(trimmed).confidence === 0;
+}
+
+/** Whether a message explicitly refuses/defers building — distinct from
+ *  `isConversationalMessage` (which already returns `true` for these)
+ *  because the caller needs to know *why* it's chat: a negation must also
+ *  clear any pending build description awaiting confirmation
+ *  (`pendingBuildText` in Runbooks.svelte), never just leave it standing
+ *  to be silently overwritten or re-asked about next turn. */
+export function isBuildNegation(text: string): boolean {
+  return BUILD_NEGATION_PATTERN.test(text.trim());
+}
+
+// Standalone cancellation words — distinct from BUILD_NEGATION_PATTERN,
+// which only recognizes "no + verb" shapes. "Cancela." on its own negates
+// nothing grammatically but means exactly the same thing conversationally
+// — one of the mandate's own canonical test phrases (§12).
+const CANCEL_WORD_PATTERN = /\b(cancela(r|lo|la)?|olv[ií]dalo|detente)\b/i;
+
+// "qué equipo convocarías", "quiénes participarían", etc. — a subset of
+// hypothetical/planning questions specifically about team composition.
+// Detected separately from HYPOTHETICAL_PLANNING_PATTERN so the caller can
+// ground the answer in the real catalog (`planSolutionAsync`'s real
+// pipeline) instead of asking the model to invent generic roles.
+// Verb stems end with `\w*`, not a fixed conjugation — "convocar" alone
+// would match the infinitive but not "convocas"/"convocarías" (the exact
+// phrasing Wladimir actually used), the same truncated-stem pitfall as
+// BUILD_INTENT_PATTERN elsewhere in this file.
+const TEAM_COMPOSITION_QUESTION_PATTERN =
+  /\b(qu[ée] equipo|qui[ée]nes?\s+(particip\w*|convoc\w*|integr\w*)|a\s+qui[ée]n(es)?\s+convoc\w*|qu[ée] agentes|qu[ée] especialistas|qui[ée]n(es)? se encargar[ií]a|c[oó]mo organizar[ií]as? el equipo|c[oó]mo armar[ií]as? el equipo|c[oó]mo compondr[ií]as? el equipo)\b/i;
+
+/** Whether a message is asking specifically about which team/agents would
+ *  be convened — 2026-09-05, Wladimir's explicit requirement: "cuando se
+ *  pregunte qué equipo de IntentOS sería convocado, Esmeralda debe
+ *  basarse en el catálogo real de agentes/equipos disponibles, no
+ *  inventar roles genéricos". A `true` result is the caller's signal to
+ *  compute a real pipeline (`planSolutionAsync`) and pass its real agent
+ *  roster into the reply as grounding facts, the same evidence-over-guess
+ *  discipline as `narrateRunForEsmeralda`. */
+export function isTeamCompositionQuestion(text: string): boolean {
+  return TEAM_COMPOSITION_QUESTION_PATTERN.test(text.trim());
+}
+
+// ---------------------------------------------------------------------
+// Cognitive comprehension layer — 2026-09-05 mandate ("CEREBRO COGNITIVO
+// DE ESMERALDA"). Everything above this line is the regex-only classifier
+// built earlier the same day; it is NOT deleted — it becomes the
+// deterministic fallback below, exactly the same hybrid-router shape
+// `resolveCapabilitiesHybrid` already uses for capability selection
+// elsewhere in this file (semantic comprehension first, tested regex
+// safety net when the model is unavailable).
+//
+// The root cause the mandate identified: three separate live bugs (plain
+// "sí" not matching, "no construyas" read as a build order, "convocar" vs
+// "convocas") were all the same failure mode — enumerating Spanish
+// grammar with regex instead of genuinely understanding it. A flat regex
+// list can never keep up with every future phrasing ("capaz que",
+// "por ahora no", "ni se te ocurra"...). This layer asks the model to
+// actually comprehend negation/modality/hypothesis/confirmation/
+// restrictions instead of pattern-matching for them.
+//
+// `act` is deliberately named "execute", not "build": this is the
+// generic verdict "the user is authorizing a real effect right now",
+// independent of which domain that effect belongs to. Today the only real
+// effect IntentOS's runtime knows how to produce is its 5-stage software
+// pipeline (see approveAndStart in Runbooks.svelte) — Esmeralda is not an
+// AGI and this file does not pretend otherwise — but keeping the
+// conversational-comprehension vocabulary domain-neutral means a future
+// non-software action plugs into the same `execute` verdict without
+// requiring this classifier (or its tests) to be redesigned.
+// ---------------------------------------------------------------------
+
+export type ConversationalAct = "execute" | "explain" | "plan" | "smalltalk" | "confirm" | "cancel" | "unclear";
+
+/** A build/change description awaiting an explicit go-ahead — the
+ *  structured replacement for the plain `pendingBuildText: string | null`
+ *  used before this mandate. `restrictions` captures explicit conditions
+ *  the user attached ("pero no implementes nada todavía") so they survive
+ *  into the eventual build instruction instead of being silently dropped
+ *  the moment the classifier moves on to the next message. */
+export interface PendingBuildProposal {
+  text: string;
+  restrictions: string[];
+}
+
+export interface ConversationalIntent {
+  act: ConversationalAct;
+  negated: boolean;
+  restrictions: string[];
+  confidence: number;
+  reason: string;
+}
+
+/** Deterministic fallback — the exact same signals the regex-only
+ *  classifier above already used, reframed as first-class conversational
+ *  acts instead of ad hoc booleans threaded through an if/else chain in
+ *  Runbooks.svelte. Used only when the semantic layer below is
+ *  unavailable; never deleted, because a network-independent, instant,
+ *  already-tested classifier is exactly what a fallback should be. Never
+ *  throws. Order mirrors the priority the previous `isConversationalMessage`
+ *  callers relied on: an explicit confirmation on a pending proposal wins
+ *  first, then negation, then team-composition/hypothetical/generic
+ *  framing, then an actual build verb, defaulting to smalltalk. */
+export function classifyConversationalIntentDeterministic(
+  text: string,
+  pending: PendingBuildProposal | null,
+): ConversationalIntent {
+  const trimmed = text.trim();
+  if (!trimmed) {
+    return { act: "smalltalk", negated: false, restrictions: [], confidence: 0.3, reason: "Mensaje vacío." };
+  }
+  // "Sí, pero solo explícame." is a real case from the mandate's own test
+  // list: it reads as a short go-ahead (isExplicitConfirmation alone would
+  // say yes) but the "solo explícame" half means the user only agreed to
+  // be told something, not to actually execute the pending proposal — the
+  // hypothetical/explain-only override always wins over a bare
+  // confirmation word it happens to also contain, same asymmetric-safety
+  // principle as everywhere else in this file.
+  if (pending && isExplicitConfirmation(trimmed) && !HYPOTHETICAL_PLANNING_PATTERN.test(trimmed)) {
+    return { act: "confirm", negated: false, restrictions: [], confidence: 0.9, reason: "Confirmación explícita sobre una propuesta pendiente." };
+  }
+  if (isBuildNegation(trimmed) || CANCEL_WORD_PATTERN.test(trimmed)) {
+    return { act: "cancel", negated: true, restrictions: [], confidence: 0.8, reason: "Negación o cancelación explícita de construir." };
+  }
+  if (isTeamCompositionQuestion(trimmed)) {
+    return { act: "explain", negated: false, restrictions: [], confidence: 0.8, reason: "Pregunta sobre composición de equipo." };
+  }
+  if (GENERIC_CAPABILITY_QUESTION_PATTERN.test(trimmed) || HYPOTHETICAL_PLANNING_PATTERN.test(trimmed)) {
+    return { act: "plan", negated: false, restrictions: [], confidence: 0.7, reason: "Pregunta genérica o hipotética, sin intención ejecutiva." };
+  }
+  if (BUILD_INTENT_PATTERN.test(trimmed) || routeIntent(trimmed).confidence > 0) {
+    return { act: "execute", negated: false, restrictions: [], confidence: 0.6, reason: "Verbo de construcción o coincidencia de capability detectada." };
+  }
+  return { act: "smalltalk", negated: false, restrictions: [], confidence: 0.5, reason: "Sin señales de construcción; se trata como conversación." };
+}
+
+/** Semantic comprehension of a conversational turn. Same completion
+ *  primitive and DeepSeek backend as `classifyIntentSemantic` above — no
+ *  new inference path, no new risk surface. Understands negation,
+ *  hypothetical/conditional framing, confirmations tied to a pending
+ *  proposal, and explicit restrictions through genuine language
+ *  interpretation instead of enumerating patterns. Returns `null` (never
+ *  throws, never invents an act) when the model is unavailable or replies
+ *  with something unusable — the caller falls back to the deterministic
+ *  classifier above in that case. */
+async function classifyConversationalIntentSemantic(
+  text: string,
+  priorMessages: { role: string; content: string }[],
+  pending: PendingBuildProposal | null,
+): Promise<ConversationalIntent | null> {
+  const context = priorMessages
+    .slice(-8)
+    .map((m) => `${m.role.toUpperCase()}: ${m.content.slice(0, 400)}`)
+    .join("\n");
+  const prompt = [
+    "Eres el clasificador de intención conversacional de Esmeralda, la interfaz cognitiva de IntentOS.",
+    "Clasifica el ÚLTIMO MENSAJE del usuario en uno de estos actos, comprendiendo negación, modo hipotético/condicional, confirmaciones y restricciones reales del lenguaje — nunca busques palabras sueltas ni decidas solo por la presencia de un verbo:",
+    "- execute: autoriza a IntentOS a ejecutar/crear/modificar algo REAL, AHORA, sin negarlo ni condicionarlo a que primero se le explique algo.",
+    "- explain: pide que le expliques, describas o detalles algo (por ejemplo, qué equipo se convocaría o cómo funciona algo) — nunca pide que se ejecute nada.",
+    "- plan: habla de construir en modo hipotético, condicional o futuro indefinido ('¿cómo lo harías?', 'eventualmente', 'imagínate que', 'primero dime qué equipo usarías'), sin autorizar nada ahora mismo.",
+    "- confirm: da un sí/adelante/dale explícito a una propuesta que ya se venía discutiendo.",
+    "- cancel: rechaza, niega o pide detener una construcción ('no construyas', 'todavía no', 'cancela', 'aún no').",
+    "- smalltalk: conversación sin relación con construir ni ejecutar nada.",
+    "- unclear: no se puede determinar con confianza cuál de los anteriores aplica — ante la duda, usa este valor en vez de adivinar 'execute'.",
+    "",
+    pending ? `PROPUESTA QUE YA ESTÁ PENDIENTE DE CONFIRMACIÓN (nada de esto se ejecutó todavía):\n${pending.text.slice(0, 500)}` : "No hay ninguna propuesta pendiente de confirmación en este momento.",
+    context ? `\nCONVERSACIÓN PREVIA:\n${context}` : "",
+    `\nÚLTIMO MENSAJE DEL USUARIO:\n${text.trim()}`,
+    "",
+    "Responde ÚNICAMENTE un objeto JSON, sin texto antes ni después, con esta forma exacta:",
+    '{"act":"<execute|explain|plan|smalltalk|confirm|cancel|unclear>","negated":<true o false>,"restrictions":["..."],"confidence":<0.0-1.0>,"reason":"<una frase breve>"}',
+    "\"restrictions\" son condiciones explícitas que el usuario puso sobre una construcción futura (por ejemplo \"no implementes nada todavía\", \"sin modificar archivos\") — deja la lista vacía si no puso ninguna.",
+  ].join("\n");
+  let content: string;
+  try {
+    const completion = await invoke<{ content: string }>("local_model_complete", {
+      request: { prompt, maxTokens: 260, backend: "deepseek", purpose: "conversational_intent_classifier" },
+    });
+    content = completion.content;
+  } catch (error) {
+    console.warn("[intentosCapabilities] conversational intent semantic layer unavailable (DeepSeek not configured, or Paranoid Mode is on):", error);
+    return null;
+  }
+  const parsed = extractJsonObject(content);
+  if (!parsed) return null;
+  const VALID_ACTS: ConversationalAct[] = ["execute", "explain", "plan", "smalltalk", "confirm", "cancel", "unclear"];
+  const rawAct = typeof parsed.act === "string" ? parsed.act : undefined;
+  const act = rawAct && (VALID_ACTS as string[]).includes(rawAct) ? (rawAct as ConversationalAct) : undefined;
+  if (!act) return null;
+  const restrictions = Array.isArray(parsed.restrictions)
+    ? parsed.restrictions.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+    : [];
+  const confidence = typeof parsed.confidence === "number" && Number.isFinite(parsed.confidence) ? Math.max(0, Math.min(1, parsed.confidence)) : 0.5;
+  return {
+    act,
+    negated: typeof parsed.negated === "boolean" ? parsed.negated : act === "cancel",
+    restrictions,
+    confidence,
+    reason: typeof parsed.reason === "string" && parsed.reason.trim() ? parsed.reason.trim() : "Clasificación semántica sin justificación textual.",
+  };
+}
+
+/** The hybrid conversational classifier: semantic comprehension first,
+ *  deterministic regex fallback when the model is unavailable — never
+ *  throws, always returns a usable, conservative result. An "unclear" or
+ *  low-confidence read is always treated as non-executive by the caller
+ *  (Runbooks.svelte's `sendTurn`), never as `execute` — the same
+ *  asymmetric-risk posture documented on `isConversationalMessage` above:
+ *  a wrong "chat" verdict just means Esmeralda replies conversationally,
+ *  a wrong "execute" verdict spends a real Mission and a full production
+ *  run, so every uncertainty defaults toward the cheaper mistake. */
+export async function classifyConversationalIntent(
+  text: string,
+  priorMessages: { role: string; content: string }[],
+  pending: PendingBuildProposal | null,
+): Promise<ConversationalIntent> {
+  const semantic = await classifyConversationalIntentSemantic(text, priorMessages, pending);
+  return semantic ?? classifyConversationalIntentDeterministic(text, pending);
 }
 
 // Short, unambiguous go-ahead words only. Deliberately capped at 6 words —
