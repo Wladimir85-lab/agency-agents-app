@@ -1,4 +1,13 @@
 import { invoke } from "@tauri-apps/api/core";
+import {
+  elementsByDimension,
+  experienceDirectionPromptCatalog,
+  resolveExperienceDirection,
+  type ExperienceDirectionResult,
+  type ExperienceDirectionSemanticPayload,
+  type ExperienceDirectionStatus,
+  type VisualTechnologyElement,
+} from "./experienceDirection";
 
 export interface IntentOSCapability {
   id: string;
@@ -37,29 +46,20 @@ export interface RoutingTrace {
 export interface CreativeTechVerdict {
   justified: boolean;
   reason: string;
-  specializations: { id: string; status: CreativeTechSpecializationStatus }[];
+  specializations: { id: string; status: ExperienceDirectionStatus }[];
 }
 
-export type CreativeTechSpecializationStatus = "supported-now" | "known-future";
+/** @deprecated kept only so an old import doesn't hard-break — use
+ *  `ExperienceDirectionStatus` from `./experienceDirection`. */
+export type CreativeTechSpecializationStatus = ExperienceDirectionStatus;
 
-/** A conceptual family inside `creative-technology`, not a new top-level
- *  IntentOSCapability — see the audit this evolves from. `supported-now`
- *  means IntentOS has both a real matching persona AND a real way to
- *  build/run/verify the result with tools it already has (the npm/web
- *  runtime `preview.rs` drives); `known-future` means the concept is real
- *  and a persona may even exist, but IntentOS cannot yet materialize or
- *  verify it end to end, so it must never be presented as ready. */
-export interface CreativeTechSpecialization {
-  id: string;
-  label: string;
-  status: CreativeTechSpecializationStatus;
-  keywords: string[];
-  /** Overrides creative-technology's default "development" agent
-   *  (`xr-immersive-developer`) only when a genuinely better-fit persona
-   *  exists AND IntentOS can actually run/verify its output. */
-  developmentAgent: string;
-  note: string;
-}
+/** @deprecated kept only so an old import doesn't hard-break — use
+ *  `VisualTechnologyElement` from `./experienceDirection`, which is what
+ *  `CREATIVE_TECH_SPECIALIZATIONS` below actually contains now (2026-09-06,
+ *  Experience Direction System). See that module's doc comment: this was
+ *  always dimension C (Tecnología visual) of the three-dimension model,
+ *  just not named as one yet. */
+export type CreativeTechSpecialization = VisualTechnologyElement;
 
 export interface SolutionProposal {
   title: string;
@@ -78,6 +78,13 @@ export interface SolutionProposal {
    *  — absent only on proposals built by code that predates this field. */
   routing?: RoutingTrace;
   creativeTechnology?: CreativeTechVerdict | null;
+  /** Experience Direction System (2026-09-06) — which Aesthetic/Experience/
+   *  Visual-technology catalog elements this intent touches. Purely
+   *  descriptive: never a second way to approve `creative-technology`
+   *  (that stays `creativeTechnology`'s job alone). `null` exactly when
+   *  `creativeTechnology` is also `null` (never a candidate) — see
+   *  `experienceDirection.ts`. */
+  experienceDirection?: ExperienceDirectionResult | null;
 }
 
 export interface CreationCatalogProduct {
@@ -293,92 +300,14 @@ export const INTENTOS_CAPABILITIES: IntentOSCapability[] = [
   },
 ];
 
-/** Conceptual families inside `creative-technology` — see the interface doc
- *  comment. Audited against the real corpus (`corpus::ensure_corpus`) and
- *  against what IntentOS's own runtime can actually build/run/verify
- *  (`preview.rs` only ever drives an npm/web dev server — no game-engine
- *  editor, no native XR/AR build toolchain, no hardware). `supported-now`
- *  is deliberately conservative: a persona existing is not enough, and
- *  "the underlying LLM could probably improvise it" is not enough either —
- *  it requires the Naval Studio precedent's shape: a real corpus persona
- *  whose own expertise already covers this, building something the
- *  existing web runtime can genuinely run and Reality Check can genuinely
- *  inspect. Every `developmentAgent` below resolves against the real
- *  corpus (verified by hand this session, same as the audit).
- *
- *  `physical-interaction` deliberately has no override: IntentOS already
- *  has a full first-class `iot` capability (its own personas, its own
- *  domain_verification_guidance in runtime.rs) for exactly this. Routing
- *  physical/IoT work through creative-technology's roster instead would
- *  duplicate, not extend, existing architecture — so it stays
- *  known-future *from creative-technology's own agents' point of view*
- *  and defers to `iot` rather than pretending to own it. */
-export const CREATIVE_TECH_SPECIALIZATIONS: CreativeTechSpecialization[] = [
-  {
-    id: "realtime-web-3d",
-    label: "3D en tiempo real para navegador",
-    status: "supported-now",
-    keywords: ["three.js", "threejs", "webgl", "webgpu", "3d interactivo", "girar", "rotar", "recorrer", "recorrido 360", "explorar en 3d", "visor 3d", "modelo 3d"],
-    developmentAgent: "xr-immersive-developer",
-    note: "Probado en producción: Naval Studio (three ^0.169.0 + rhino3dm ^8.32.2, viewer3d-client.ts) — ver corpus/spatial-computing/xr-immersive-developer.md.",
-  },
-  {
-    id: "shaders-graphics",
-    label: "Shaders y gráficos en tiempo real (web)",
-    status: "supported-now",
-    keywords: ["shader", "glsl", "webgl", "efecto visual", "post-procesado", "post procesado"],
-    developmentAgent: "xr-immersive-developer",
-    note: "El mismo persona web (WebXR/Three.js) cubre shader tuning para navegador. Shader authoring específico de motor (Unity Shader Graph, Godot) es known-future: IntentOS no construye ni ejecuta proyectos de esos motores.",
-  },
-  {
-    id: "spatial-xr",
-    label: "AR/VR/XR nativo (headset, fuera del navegador)",
-    status: "known-future",
-    keywords: ["realidad aumentada nativa", "realidad virtual nativa", "vision pro", "visionos", "hololens", "meta quest nativo", "oculus nativo"],
-    developmentAgent: "xr-immersive-developer",
-    note: "Personas reales existen (corpus/spatial-computing/visionos-spatial-engineer.md, macos-spatial-metal-engineer.md) pero IntentOS no tiene toolchain nativo (Xcode/build/simulador) para construir, ejecutar ni verificar el resultado. XR dentro del navegador (WebXR) es 'realtime-web-3d', no esto.",
-  },
-  {
-    id: "generative-visuals",
-    label: "Arte/visuales generativos",
-    status: "known-future",
-    keywords: ["arte generativo", "generativo", "procedural", "creative coding"],
-    developmentAgent: "xr-immersive-developer",
-    note: "Sin persona dedicada en el corpus (no hay 'creative coder'/generative-art specialist) ni precedente ejecutado. El generalista WebXR podría intentarlo, pero sin prueba real no se presenta como supported-now.",
-  },
-  {
-    id: "spatial-capture",
-    label: "Captura 3D del mundo físico (fotogrametría/LiDAR)",
-    status: "known-future",
-    keywords: ["lidar", "fotogrametría", "fotogrametria", "escaneo 3d", "nube de puntos", "point cloud"],
-    developmentAgent: "xr-immersive-developer",
-    note: "La mitad web (visualizar la nube de puntos/malla resultante en el navegador) es 'realtime-web-3d', ya probada. La captura nativa (ARKit/LiDAR en un dispositivo) requiere una app móvil nativa que IntentOS no construye ni despliega hoy.",
-  },
-  {
-    id: "simulation-digital-twin",
-    label: "Simulación / gemelo digital",
-    status: "known-future",
-    keywords: ["gemelo digital", "digital twin", "simulación física", "simulacion fisica"],
-    developmentAgent: "xr-immersive-developer",
-    note: "Sin persona dedicada ni precedente ejecutado. Marcado explícitamente known-future en vez de improvisar una afirmación de capacidad.",
-  },
-  {
-    id: "audio-reactive",
-    label: "Audiovisual reactivo",
-    status: "known-future",
-    keywords: ["audio reactivo", "audio-reactivo", "reactivo al sonido", "visualizador de audio"],
-    developmentAgent: "xr-immersive-developer",
-    note: "Web Audio API + Three.js lo haría técnicamente posible, pero sin persona dedicada ni precedente ejecutado no se presenta como supported-now.",
-  },
-  {
-    id: "physical-interaction",
-    label: "Instalación física / computación física",
-    status: "known-future",
-    keywords: ["instalación física", "instalacion fisica", "projection mapping", "proyección mapeada", "kiosco interactivo", "sensor físico"],
-    developmentAgent: "xr-immersive-developer",
-    note: "IntentOS ya tiene una capability propia y operativa para esto ('iot', con sus propios agentes y su propio domain_verification_guidance en runtime.rs). Un intent predominantemente físico/IoT debe enrutarse ahí, no a creative-technology.",
-  },
-];
+/** Conceptual families inside `creative-technology` — dimension C
+ *  (Tecnología visual) of the Experience Direction System
+ *  (`experienceDirection.ts`, 2026-09-06). Single source of truth now
+ *  lives there (`VISUAL_TECHNOLOGY_ELEMENTS`, migrated verbatim: same
+ *  ids/status/keywords/note/developmentAgent) — re-exported here under
+ *  its original name so `pickCreativeTechSpecializations`/`composePipeline`
+ *  and existing tests keep working unchanged. */
+export const CREATIVE_TECH_SPECIALIZATIONS = elementsByDimension("visualTechnology") as VisualTechnologyElement[];
 
 /** Best-effort, deterministic tagging of which conceptual family (or
  *  families) inside creative-technology an intent's text touches. This is
@@ -948,6 +877,26 @@ function creativeTechVerdictFromRouting(
   return null;
 }
 
+/** Experience Direction System (2026-09-06) — descriptive tagging of which
+ *  Aesthetic/Experience/Visual-technology catalog elements this intent
+ *  touches. Deliberately mirrors `creativeTechVerdictFromRouting`'s own
+ *  "null iff never a candidate" discipline: an intent with nothing to do
+ *  with creative direction (a plain CRUD backend, a REST API) gets no
+ *  `experienceDirection` section at all. When it IS a candidate, the
+ *  actual tagging goes through `resolveExperienceDirection` — semantic
+ *  result authoritative when present (negation-aware, meaning-based),
+ *  the deterministic keyword catalog only as a fallback. See
+ *  `experienceDirection.ts`'s module doc for why this can never be
+ *  keyword-first. */
+function experienceDirectionFromVerdict(
+  creativeTechnology: CreativeTechVerdict | null,
+  text: string,
+  semantic?: SemanticClassification | null,
+): ExperienceDirectionResult | null {
+  if (!creativeTechnology) return null;
+  return resolveExperienceDirection(text, semantic?.experienceDirection);
+}
+
 /** Everything about a proposal that does not depend on *how* the
  *  capability roster was decided — shared, byte-for-byte, by the
  *  deterministic-only `planSolution` and the hybrid `planSolutionAsync`,
@@ -960,6 +909,7 @@ function finishProposal(
   capabilities: IntentOSCapability[],
   routing: RoutingTrace,
   creativeTechnology: CreativeTechVerdict | null,
+  experienceDirection: ExperienceDirectionResult | null,
 ): SolutionProposal {
   const lower = combined.toLocaleLowerCase("es");
   const titleLine = firstMeaningfulLine(input.intent).replace(/^(crear|construir|desarrollar|necesito)\s+/i, "");
@@ -1003,6 +953,7 @@ function finishProposal(
     revisionNotes,
     routing,
     creativeTechnology,
+    experienceDirection,
   };
 }
 
@@ -1025,7 +976,8 @@ export function planSolution(input: PlanSolutionInput): SolutionProposal {
     reason: routed.matched.length ? `Coincidencia determinista de palabras clave: ${routed.matched.join(", ")}.` : "Sin coincidencias de palabras clave; se usó la capability por defecto.",
   };
   const creativeTechnology = creativeTechVerdictFromRouting(capabilities, routed, combined);
-  return finishProposal(input, combined, revisionNotes, capabilities, routing, creativeTechnology);
+  const experienceDirection = experienceDirectionFromVerdict(creativeTechnology, combined);
+  return finishProposal(input, combined, revisionNotes, capabilities, routing, creativeTechnology, experienceDirection);
 }
 
 interface SemanticClassification {
@@ -1038,6 +990,12 @@ interface SemanticClassification {
   reason: string;
   creativeTechnologyJustified?: boolean;
   creativeTechnologyReason?: string;
+  /** Experience Direction System (2026-09-06) — same call, same JSON
+   *  reply, one more optional field. Absent when the model didn't address
+   *  it at all (triggers the deterministic fallback in
+   *  `resolveExperienceDirection`); present-but-empty means the model
+   *  looked and found nothing, which is still authoritative. */
+  experienceDirection?: ExperienceDirectionSemanticPayload;
 }
 
 function extractJsonObject(text: string): Record<string, unknown> | null {
@@ -1109,17 +1067,29 @@ async function classifyIntentSemantic(text: string): Promise<SemanticClassificat
     catalog,
     "",
     "Responde ÚNICAMENTE un objeto JSON (sin texto antes ni después), con esta forma exacta:",
-    '{"capabilityId":"<uno de los ids de arriba>","confidence":<numero 0.0-1.0>,"reason":"<una frase>","creativeTechnologyJustified":<true o false>,"creativeTechnologyReason":"<una frase>"}',
+    '{"capabilityId":"<uno de los ids de arriba>","confidence":<numero 0.0-1.0>,"reason":"<una frase>","creativeTechnologyJustified":<true o false>,"creativeTechnologyReason":"<una frase>","experienceDirection":{"aesthetic":[],"experience":[],"visualTechnology":[],"excluded":[]}}',
     "",
     "creativeTechnologyJustified debe ser true SOLO si el producto requiere, como parte de su función central, al menos una de estas capacidades técnicas concretas: geometría 3D real y navegable (rotar/explorar/recorrer un objeto), renderizado en tiempo real (WebGL/shaders/motion avanzado), captura o visualización espacial, o una interacción que sea literalmente imposible de lograr con imágenes estáticas bien tomadas, CSS y animaciones 2D convencionales.",
     "NO la marques true solo porque el pedido use palabras como \"atractivo\", \"memorable\", \"premium\", \"impactante\", \"profesional\", \"cinematográfico\" o \"que se vea bien\" — esas son metas de diseño normales que cualquier sitio bien hecho ya cumple sin 3D/WebGL. Un catálogo de fotos, un portafolio, una landing page o un sitio de presentación de productos (por ejemplo, mostrar repostería de forma atractiva para conseguir pedidos) NO justifican tecnología creativa solo por querer verse bien o ser memorables; SÍ la justifican si piden explícitamente poder rotar/explorar un objeto en 3D, una visualización que cambie en tiempo real según input del usuario (ej. un configurador de producto), o una experiencia espacial/inmersiva real.",
     "Antes de responder true, pregúntate: ¿este pedido sería literalmente imposible de cumplir con buena fotografía y una landing page normal? Si la respuesta es no (por ejemplo, un dashboard administrativo, un catálogo con fotos bonitas, o un sitio institucional \"impactante\"), responde false.",
     "",
+    "experienceDirection (Experience Direction System, mandato 2026-09-06): además de la capability, identifica qué elementos de estas tres dimensiones combinables toca la intención — ESTÉTICA (cómo debe verse), EXPERIENCIA (cómo debe sentirse/recorrerse) y TECNOLOGÍA VISUAL (con qué se materializa). Son dimensiones distintas, no una lista de estilos equivalentes: un mismo producto puede combinar una de cada una. Usa SOLO estos ids cerrados, nunca inventes uno nuevo:",
+    experienceDirectionPromptCatalog(),
+    "",
+    "Reglas obligatorias para experienceDirection:",
+    "- Interpreta por SIGNIFICADO, no por si la palabra exacta aparece en el texto. Ej: \"quiero que entrar a esta página se sienta como caminar dentro del barco\" debe poder producir \"immersive\" y/o \"spatial-ui\" aunque el usuario nunca use esas palabras.",
+    "- Si el usuario niega o excluye explícitamente una dirección (ej. \"pero no minimalista\", \"sin 3D\"), pon ese id en \"excluded\" y NUNCA lo incluyas en las listas positivas, sin importar qué otras palabras use el texto.",
+    "- Si nada de una dimensión aplica, deja su lista vacía. Si la intención no tiene ninguna dimensión creativa relevante, responde \"experienceDirection\":{}.",
+    "",
     `INTENCIÓN DEL PRODUCTO:\n${text.slice(0, 4000)}`,
   ].join("\n");
   let content: string;
   try {
-    const completion = await invoke<{ content: string }>("local_model_complete", { request: { prompt, maxTokens: 220, backend: "deepseek", purpose: "capability_classifier" } });
+    // 220 -> 420: the reply now also carries experienceDirection's up-to-
+    // four id arrays (aesthetic/experience/visualTechnology/excluded);
+    // 220 was already tight for capabilityId+reason+creativeTechnologyReason
+    // alone and would risk truncating the JSON mid-object.
+    const completion = await invoke<{ content: string }>("local_model_complete", { request: { prompt, maxTokens: 420, backend: "deepseek", purpose: "capability_classifier" } });
     content = completion.content;
   } catch (error) {
     console.warn("[intentosCapabilities] semantic fallback unavailable (DeepSeek not configured, or Paranoid Mode is on):", error);
@@ -1133,9 +1103,11 @@ async function classifyIntentSemantic(text: string): Promise<SemanticClassificat
     console.warn("[intentosCapabilities] semantic fallback returned an unknown capabilityId, ignoring only that field:", rawCapabilityId);
   }
   const creativeTechnologyJustified = typeof parsed.creativeTechnologyJustified === "boolean" ? parsed.creativeTechnologyJustified : undefined;
-  // Nothing usable at all (both the primary pick and the creative-tech
-  // verdict were absent/invalid) — genuinely equivalent to "unavailable".
-  if (!capabilityId && creativeTechnologyJustified === undefined) return null;
+  const experienceDirection = parseExperienceDirectionPayload(parsed.experienceDirection);
+  // Nothing usable at all (the primary pick, the creative-tech verdict, and
+  // the experience-direction tagging were all absent/invalid) — genuinely
+  // equivalent to "unavailable".
+  if (!capabilityId && creativeTechnologyJustified === undefined && !experienceDirection) return null;
   const confidence = typeof parsed.confidence === "number" && Number.isFinite(parsed.confidence) ? Math.max(0, Math.min(1, parsed.confidence)) : 0.5;
   return {
     capabilityId,
@@ -1143,6 +1115,28 @@ async function classifyIntentSemantic(text: string): Promise<SemanticClassificat
     reason: typeof parsed.reason === "string" && parsed.reason.trim() ? parsed.reason.trim() : "Clasificación semántica sin justificación textual.",
     creativeTechnologyJustified,
     creativeTechnologyReason: typeof parsed.creativeTechnologyReason === "string" ? parsed.creativeTechnologyReason : undefined,
+    experienceDirection,
+  };
+}
+
+/** Validates the model's `experienceDirection` reply into a usable shape
+ *  without trusting its contents — ids outside the closed catalog are
+ *  dropped by `resolveExperienceDirection` itself (same discipline as
+ *  `capabilityId`), this only guards against a malformed/missing field.
+ *  Returns `undefined` (not `{}`) when the key is absent entirely, so
+ *  `resolveExperienceDirection` can tell "the model didn't address this"
+ *  (fall back to keywords) apart from "the model looked and found
+ *  nothing" (an empty object here IS still authoritative). */
+function parseExperienceDirectionPayload(value: unknown): ExperienceDirectionSemanticPayload | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const raw = value as Record<string, unknown>;
+  const stringArray = (field: unknown): string[] | undefined =>
+    Array.isArray(field) ? field.filter((item): item is string => typeof item === "string") : undefined;
+  return {
+    aesthetic: stringArray(raw.aesthetic),
+    experience: stringArray(raw.experience),
+    visualTechnology: stringArray(raw.visualTechnology),
+    excluded: stringArray(raw.excluded),
   };
 }
 
@@ -1156,7 +1150,7 @@ async function classifyIntentSemantic(text: string): Promise<SemanticClassificat
 async function resolveCapabilitiesHybrid(
   combined: string,
   forcedIds: string[] | undefined,
-): Promise<{ capabilities: IntentOSCapability[]; routing: RoutingTrace; creativeTechnology: CreativeTechVerdict | null }> {
+): Promise<{ capabilities: IntentOSCapability[]; routing: RoutingTrace; creativeTechnology: CreativeTechVerdict | null; experienceDirection: ExperienceDirectionResult | null }> {
   const routed = routeIntent(combined);
   const forcedCapabilities = (forcedIds ?? [])
     .map((id) => INTENTOS_CAPABILITIES.find((capability) => capability.id === id))
@@ -1169,7 +1163,11 @@ async function resolveCapabilitiesHybrid(
       confidence: routed.confidence,
       reason: `Coincidencia determinista de palabras clave: ${routed.matched.join(", ")}.`,
     };
-    return { capabilities, routing, creativeTechnology: creativeTechVerdictFromRouting(capabilities, routed, combined) };
+    const creativeTechnology = creativeTechVerdictFromRouting(capabilities, routed, combined);
+    // No semantic call on the fast path — experienceDirection can only use
+    // the deterministic fallback here, same as creativeTechnology's own
+    // keyword-only reasoning on this branch.
+    return { capabilities, routing, creativeTechnology, experienceDirection: experienceDirectionFromVerdict(creativeTechnology, combined) };
   }
 
   const semantic = await classifyIntentSemantic(combined);
@@ -1180,7 +1178,8 @@ async function resolveCapabilitiesHybrid(
       confidence: routed.confidence,
       reason: "El motor semántico (Esmeralda/Qwen) no estaba disponible; se usó la mejor coincidencia determinista.",
     };
-    return { capabilities, routing, creativeTechnology: creativeTechVerdictFromRouting(capabilities, routed, combined) };
+    const creativeTechnology = creativeTechVerdictFromRouting(capabilities, routed, combined);
+    return { capabilities, routing, creativeTechnology, experienceDirection: experienceDirectionFromVerdict(creativeTechnology, combined) };
   }
 
   // `semantic.capabilityId` is only ever a validated, known id (or
@@ -1207,7 +1206,8 @@ async function resolveCapabilitiesHybrid(
       ? semantic.reason
       : `${semantic.reason} (el id de capability primaria devuelto por el modelo no es válido; se usó la mejor coincidencia determinista como primaria, conservando el veredicto de tecnología creativa).`,
   };
-  return { capabilities, routing, creativeTechnology: creativeTechVerdictFromRouting(capabilities, routed, combined, semantic) };
+  const creativeTechnology = creativeTechVerdictFromRouting(capabilities, routed, combined, semantic);
+  return { capabilities, routing, creativeTechnology, experienceDirection: experienceDirectionFromVerdict(creativeTechnology, combined, semantic) };
 }
 
 /** Hybrid version of `planSolution`: same deterministic fast path (zero
@@ -1220,6 +1220,6 @@ async function resolveCapabilitiesHybrid(
 export async function planSolutionAsync(input: PlanSolutionInput): Promise<SolutionProposal> {
   const revisionNotes = nctoRevisionNotes(input.constraints);
   const combined = combineInputText(input);
-  const { capabilities, routing, creativeTechnology } = await resolveCapabilitiesHybrid(combined, input.requiredCapabilityIds);
-  return finishProposal(input, combined, revisionNotes, capabilities, routing, creativeTechnology);
+  const { capabilities, routing, creativeTechnology, experienceDirection } = await resolveCapabilitiesHybrid(combined, input.requiredCapabilityIds);
+  return finishProposal(input, combined, revisionNotes, capabilities, routing, creativeTechnology, experienceDirection);
 }

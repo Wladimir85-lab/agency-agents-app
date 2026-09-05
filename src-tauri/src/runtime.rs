@@ -1135,7 +1135,17 @@ fn domain_verification_guidance(capability_id: &str) -> &'static str {
         "operations-automation" => "- Trigger the actual automation end to end (the real event -> the real action) and confirm it happened, including error/idempotency handling.\n- Inspect integration logs for the calls that actually happened, not a description of intended calls.",
         "data-decisions" => "- Validate schemas and run the actual transformations/queries against representative sample data; compare output to known-correct expectations.\n- Check that visualizations/reports reflect the real underlying data, not placeholder values.",
         "ai-agents" => "- Review actual tool-call transcripts and outputs from the agent under test, not a description of what it should do.\n- Check grounding — do its claims match what was actually retrieved/available? — and test its behavior on at least one deliberately bad or edge-case input.",
-        "creative-technology" => "- Inspect the actual rendered output/artifact (frame, export, build) and measured performance (load time, fps) rather than a subjective description.\n- Apply visual/UX criteria only where they are mechanically checkable from the acceptance criteria; do not invent taste-based scoring.",
+        // 2026-09-06 — Experience Direction System (mandate §9, "QA
+        // experiencial"): when an acceptance criterion states a declared
+        // aesthetic/experience direction (e.g. "debe sentirse
+        // cinematográfico", "mantener la estética japonesa"), the existing
+        // taste-scoring ban below still governs — report concrete evidence
+        // of what was actually built (the specific easing/timing values
+        // used, camera framing, motion parameters, the actual direction
+        // the build committed to) instead of a bare "sí, se siente
+        // cinematográfico". This is guidance on the existing
+        // INTENTOS_CRITERIA mechanism, not a new QA subsystem.
+        "creative-technology" => "- Inspect the actual rendered output/artifact (frame, export, build) and measured performance (load time, fps) rather than a subjective description.\n- Apply visual/UX criteria only where they are mechanically checkable from the acceptance criteria; do not invent taste-based scoring.\n- When an acceptance criterion names a declared aesthetic/experience direction (e.g. \"cinematográfico\", \"estética japonesa\"), report the concrete evidence that direction was actually followed (specific easing/timing values, camera framing, motion parameters, composition choices) — never a bare claim that it \"feels\" right.",
         "strategy-product" => "- This stage is not verifying software behavior: confirm the actual deliverable documents/artifacts exist, cover every required section, and cite real research or data rather than fabricated claims presented as findings.\n- Do not ask for screenshots, endpoints, or telemetry — they do not apply to this capability.",
         _ => "- No specific domain profile is recorded for this run; gather whatever objective evidence (commands run, files produced, outputs inspected) genuinely demonstrates this stage's claims, using the tools actually available in this workspace. Do not assume a web/Laravel stack by default.",
     }

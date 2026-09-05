@@ -529,3 +529,66 @@ describe("classifyConversationalIntent — semantic layer plumbing (mocked model
     });
   });
 });
+
+describe("Experience Direction System (2026-09-06) — SolutionProposal.experienceDirection", () => {
+  it("is null on a proposal that never touches creative-technology, exactly like creativeTechnology itself", async () => {
+    const proposal = await planSolutionAsync({ intent: "Necesito un panel para administrar clientes, facturas y pagos con roles y permisos." });
+    expect(invokeMock).not.toHaveBeenCalled();
+    expect(proposal.creativeTechnology).toBeNull();
+    expect(proposal.experienceDirection).toBeNull();
+  });
+
+  it("mandatory case 1: a semantic verdict that excludes Minimalism never lets it through, even though the word is in the intent", async () => {
+    invokeMock.mockResolvedValueOnce(
+      semanticReply({
+        capabilityId: "creative-technology",
+        confidence: 0.85,
+        reason: "Producto con dirección estética explícita.",
+        creativeTechnologyJustified: true,
+        creativeTechnologyReason: "Requiere una experiencia 3D navegable real.",
+        experienceDirection: { aesthetic: ["japanese-digital", "minimalism"], excluded: ["minimalism"] },
+      }),
+    );
+    const proposal = await planSolutionAsync({
+      intent: "Quiero que el visitante pueda girar el barco con el mouse. Quiero algo japonés pero no minimalista.",
+    });
+    expect(proposal.experienceDirection?.source).toBe("semantic");
+    const aestheticIds = proposal.experienceDirection?.aesthetic.map((e) => e.id) ?? [];
+    expect(aestheticIds).toContain("japanese-digital");
+    expect(aestheticIds).not.toContain("minimalism");
+  });
+
+  it("mandatory case 2: tags an experience direction by meaning even when the text never uses the catalog's words", async () => {
+    invokeMock.mockResolvedValueOnce(
+      semanticReply({
+        capabilityId: "creative-technology",
+        confidence: 0.8,
+        reason: "El recorrido descrito es una experiencia espacial/inmersiva real.",
+        creativeTechnologyJustified: true,
+        creativeTechnologyReason: "Recorrer un espacio como si se caminara dentro requiere una experiencia espacial real, no fotos estáticas.",
+        experienceDirection: { experience: ["immersive", "spatial-ui"] },
+      }),
+    );
+    const text = "Quiero que entrar a esta página se sienta como caminar dentro del astillero.";
+    expect(text.toLocaleLowerCase("es")).not.toMatch(/inmersiv|espacial/);
+    const proposal = await planSolutionAsync({ intent: text });
+    expect(proposal.experienceDirection?.source).toBe("semantic");
+    expect(proposal.experienceDirection?.experience.map((e) => e.id).sort()).toEqual(["immersive", "spatial-ui"]);
+  });
+
+  it("planSolution (sync, deterministic-only) uses the keyword fallback and still populates experienceDirection", () => {
+    const proposal = planSolution({ intent: "Quiero una web con una apertura cinematográfica y un visor 3D interactivo del barco, webgl, three.js." });
+    expect(proposal.creativeTechnology?.justified).toBe(true);
+    expect(proposal.experienceDirection?.source).toBe("deterministic-fallback");
+    expect(proposal.experienceDirection?.experience.map((e) => e.id)).toContain("cinematic");
+  });
+
+  it("degrades to the deterministic fallback (never throws) when the semantic call is unavailable but creative-technology is still weakly in play", async () => {
+    invokeMock.mockRejectedValueOnce(new Error("Paranoid Mode is on"));
+    const proposal = await planSolutionAsync({ intent: "Quiero que el visitante pueda girar el barco con el mouse y verlo desde cualquier ángulo." });
+    expect(proposal.routing?.source).toBe("semantic-unavailable");
+    if (proposal.creativeTechnology) {
+      expect(proposal.experienceDirection?.source).toBe("deterministic-fallback");
+    }
+  });
+});
