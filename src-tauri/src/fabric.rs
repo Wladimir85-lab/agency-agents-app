@@ -3,6 +3,21 @@
 //! External products implement replaceable bindings. They are never the
 //! identity of the system: IntentOS owns the capability names and the
 //! lifecycle from human intent to verified delivery.
+//!
+//! Superior definition (constitutional addendum, 2026-09-04 — "traducción
+//! general de intención humana a computación"): IntentOS is not
+//! fundamentally an IDE-with-AI, a code generator, a coding agent, or an
+//! LLM wrapper. Those are possible internal mechanisms. The system's
+//! actual identity is a translator of human intention into verified
+//! computational results — `translation_pipeline` below names that chain
+//! as real, inspectable data, the same way `bindings` makes replaceability
+//! real data instead of a comment. Code is one materialization mechanism
+//! among several (existing software, an API, a library, a specialized
+//! engine); generating more of it is never the automatic answer to every
+//! intention. This does not authorize a capability catalog, a new plugin
+//! system, or any other large build — see the addendum's own explicit
+//! scope limits — it only makes the principle a first-class, testable part
+//! of the codebase instead of documentation nobody enforces.
 
 use serde::Serialize;
 
@@ -20,6 +35,14 @@ pub struct FabricBinding {
 pub struct FabricStatus {
     pub owner: &'static str,
     pub principle: &'static str,
+    /// The authoritative stage chain a JOB moves through conceptually,
+    /// from a human's intention to a verified result — see the module doc
+    /// comment. Ordered; every stage's own machinery (runtime.rs's
+    /// JobState/StageCompletionDiagnosis, the local_agent observation
+    /// loop, QA/Reality-Check) already implements pieces of this chain,
+    /// but this is the one place the chain itself is named as data rather
+    /// than left implicit across those modules.
+    pub translation_pipeline: &'static [&'static str],
     pub shell: &'static str,
     pub bindings: Vec<FabricBinding>,
 }
@@ -27,7 +50,15 @@ pub struct FabricStatus {
 pub fn status() -> FabricStatus {
     FabricStatus {
         owner: "IntentOS",
-        principle: "maximum internal sophistication, minimum human complexity",
+        principle: "translate human intention into verified computational results — code, models and tools are replaceable mechanisms, not the identity of the system",
+        translation_pipeline: &[
+            "intención humana",
+            "inteligencia",
+            "traducción computacional",
+            "materialización",
+            "verificación",
+            "resultado",
+        ],
         shell: "svelteKitTauri",
         bindings: vec![
             binding(
@@ -192,6 +223,37 @@ mod tests {
             binding.contract == "PublicPreviewPublisher"
                 && binding.active_binding == "cloudflaredQuickTunnel"
         }));
+    }
+
+    #[test]
+    fn principle_states_translation_of_intention_not_code_generation() {
+        // The constitutional addendum's own test: IntentOS's stated
+        // identity must never collapse back into "generates code" — this
+        // is the literal check that the doctrine is real, inspectable
+        // data, not just a comment someone can drift away from silently.
+        let fabric = status();
+        assert!(fabric.principle.contains("intention"));
+        assert!(fabric.principle.contains("verified"));
+        assert!(
+            !fabric.principle.to_lowercase().contains("code generat"),
+            "the principle must not reduce IntentOS's identity to code generation"
+        );
+    }
+
+    #[test]
+    fn translation_pipeline_names_the_full_intention_to_result_chain_in_order() {
+        let fabric = status();
+        assert_eq!(
+            fabric.translation_pipeline,
+            &[
+                "intención humana",
+                "inteligencia",
+                "traducción computacional",
+                "materialización",
+                "verificación",
+                "resultado",
+            ]
+        );
     }
 
     #[test]

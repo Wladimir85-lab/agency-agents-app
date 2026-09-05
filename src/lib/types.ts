@@ -586,6 +586,9 @@ export interface FabricBinding {
 export interface FabricStatus {
   owner: "IntentOS";
   principle: string;
+  /** Human intention → verified result chain (constitutional addendum,
+   *  2026-09-04) — see fabric.rs's module doc comment. */
+  translationPipeline: string[];
   shell: string;
   bindings: FabricBinding[];
 }
