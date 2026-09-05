@@ -55,6 +55,7 @@
    *  that project's real, persisted `session.messages` — this array is
    *  only ever shown before that point. */
   let localMessages = $state<{ id: string; role: "user" | "esmeralda"; content: string; at: string }[]>([]);
+  let chatLogEl: HTMLOListElement | undefined = $state();
   let selectedSlug = $state("");
   let proposal = $state<SolutionProposal | null>(null);
   let previousProposal = $state<SolutionProposal | null>(null);
@@ -128,6 +129,17 @@
     projectPath = runs.current.projectPath;
     useExistingProject = true;
     if (runbooks.list.some((rb) => rb.slug === runs.current?.runbookId)) selectedSlug = runs.current.runbookId;
+  });
+  // Auto-scroll the chat to the newest message — 2026-09-05: "que la
+  // ventana del chat vaya subiendo a medida va avanzando el chat". Reads
+  // chatMessages/queue/busy purely to re-trigger on every new bubble; the
+  // actual scroll always jumps straight to the bottom, matching how every
+  // other chat (this one included) behaves.
+  $effect(() => {
+    void chatMessages.length;
+    void (projectPath ? session.queue.length : 0);
+    void busy;
+    if (chatLogEl) chatLogEl.scrollTop = chatLogEl.scrollHeight;
   });
   // Showroom: the moment a run's isolated workspace exists, show it living —
   // never the original project. Re-fires per new workspace so a follow-up
@@ -524,7 +536,7 @@
     <aside class="console" aria-live="polite">
       <div class="chat">
         <header class="chat-head"><span class="esmeralda-avatar" aria-hidden="true">E</span><div><strong>Esmeralda</strong><small>{projectPath && session.loading ? "Cargando conversación…" : `${chatMessages.length} mensajes`}</small></div></header>
-        <ol class="chat-log">
+        <ol class="chat-log" bind:this={chatLogEl}>
           {#each chatMessages as message (message.id)}
             <li class={`bubble ${message.role}`}>
               <span class="bubble-role">{message.role === "user" ? "Tú" : message.role === "esmeralda" ? "Esmeralda" : "Sistema"}</span>
