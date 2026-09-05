@@ -110,6 +110,34 @@ expansion, new UI panels beyond the minimal Requisito 6 fix, a large Esmeralda r
 `KnowledgeCandidate`/P1.3 knowledge capitalization (designed conceptually in this session's
 discussion, never built).
 
+**Same-day follow-up — `7640edd`, real chat with Esmeralda**: after the six commits above,
+Wladimir pointed out the one place Esmeralda actually "talks" — the chat panel in
+`Runbooks.svelte` — sent every message, no matter how trivial, straight into
+`prepareProposal()` → `mission_create` → a full 5-stage `runs.start()`. Saying "hola esmeralda"
+would try to classify a build capability for it. Fix, reusing the same completion primitive
+already wired for the post-run report (nothing new invented):
+`isConversationalMessage(text)` in `intentosCapabilities.ts` (same hybrid-router spirit as
+`routeIntent` — a Spanish action-verb pattern or a real `routeIntent` keyword match means
+"build"; otherwise "chat", deliberately asymmetric toward chat since a false "build" verdict
+wastes a real Mission+run on a greeting) gates `Runbooks.svelte`'s `sendTurn`: a conversational
+message short-circuits to `session.appendMessage` + the new `replyToEsmeraldaChat` (session.
+svelte.ts, same `local_model_complete` call and never-silent-fallback discipline as
+`narrateRunForEsmeralda`) and never reaches the proposal/Mission/run machinery at all. Gated on
+`projectPath` already existing — a project's first-ever message keeps today's behavior.
+
+**Live-verified in the real running app, not simulated**: relaunched `npm run tauri dev` with
+`WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9222`, connected Playwright via
+`chromium.connectOverCDP` to the actual WebView2 window, opened the real
+`quiero-un-sitio-web-para-almarnaval-un-astillero-empre` (ALMARNAVAL) project's existing
+conversation, and sent "Hola Esmeralda, ¿cómo estás? ¿En qué proyecto estamos trabajando?".
+No new run started (composer stayed the same, no stage list appeared). Esmeralda's real,
+model-generated reply, captured verbatim from the DOM: *"¡Hola! Estoy muy bien, gracias.
+Estamos trabajando en el sitio web premium para ALMARNAVAL, con ese estilo elegante y
+minimalista que me indicaste. ¿Hay algo que quieras comentar o afinar antes de seguir?"* —
+correctly grounded in the real project name and the real style brief from the conversation
+history, not invented. `vitest` 36 passed (up from 26), `npm run check` 496/0, `cargo test --lib`
+unaffected (476/0/17, no Rust touched).
+
 ## Ollama backend + evidence-driven guards — Direction reliable, Architecture blocked — 2026-09-03
 
 **Read this before the Groq section below** — it's the same session, continued, and

@@ -929,3 +929,16 @@ done: Windows Job Object process-tree tracking (scoped as a real follow-up), Lea
 a visible feature, generalized HITL, semantic resume matching, any NeMo/OpenHands/SWE-agent
 dependency, capability-catalog expansion, `KnowledgeCandidate`/P1.3 (designed, not built), a
 larger Esmeralda refactor.
+
+## 2026-09-04 (same day, follow-up) — Real chat with Esmeralda (`7640edd`)
+
+Every composer message, however trivial, went straight into `prepareProposal` → `mission_create`
+→ a full 5-stage `runs.start()`. New `isConversationalMessage` (`intentosCapabilities.ts`, same
+hybrid-router shape as `routeIntent`) gates `Runbooks.svelte`'s `sendTurn`: a plain conversational
+message now short-circuits to `replyToEsmeraldaChat` (`session.svelte.ts`, reuses
+`local_model_complete` and `narrateRunForEsmeralda`'s never-silent-fallback pattern) and never
+reaches the Mission/run machinery. Live-verified in the real running app (not simulated):
+relaunched with `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9222`, connected
+via Playwright `chromium.connectOverCDP`, opened the real ALMARNAVAL project's conversation, sent
+"Hola Esmeralda, ¿cómo estás?", got a real model-generated reply grounded in the actual project
+context, no new run triggered. `vitest` 36 passed (up from 26); no Rust touched.
