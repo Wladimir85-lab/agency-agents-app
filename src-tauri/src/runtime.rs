@@ -1440,12 +1440,6 @@ enum RealityVerdict {
     Fail(String),
 }
 
-impl RealityVerdict {
-    fn passed(&self) -> bool {
-        matches!(self, RealityVerdict::Pass)
-    }
-}
-
 /// The actual pass/fail decision for one stage attempt — pulled out of
 /// `run_codex_stage`/`run_claude_stage` so it is testable without spawning
 /// any process. Strict mode only ever applies to the reality-check stage;
@@ -3950,7 +3944,10 @@ mod tests {
             cr(1, CriterionStatus::Pass, ""),
             cr(2, CriterionStatus::Pass, ""),
         ];
-        assert!(reality_verdict(Some(&criteria), 3, false).passed());
+        assert!(matches!(
+            reality_verdict(Some(&criteria), 3, false),
+            RealityVerdict::Pass
+        ));
     }
 
     #[test]
@@ -4028,8 +4025,11 @@ mod tests {
 
     #[test]
     fn reality_verdict_falls_back_to_sentinel_when_mission_has_no_criteria() {
-        assert!(reality_verdict(None, 0, true).passed());
-        assert!(!reality_verdict(None, 0, false).passed());
+        assert!(matches!(reality_verdict(None, 0, true), RealityVerdict::Pass));
+        assert!(!matches!(
+            reality_verdict(None, 0, false),
+            RealityVerdict::Pass
+        ));
     }
 
     #[test]
@@ -4037,7 +4037,10 @@ mod tests {
         let criteria = vec![cr(0, CriterionStatus::Fail, "no cumple")];
         // sentinel_passed = true, but a real criterion failed — the
         // structured result must win.
-        assert!(!reality_verdict(Some(&criteria), 1, true).passed());
+        assert!(!matches!(
+            reality_verdict(Some(&criteria), 1, true),
+            RealityVerdict::Pass
+        ));
     }
 
     #[test]
@@ -4046,7 +4049,10 @@ mod tests {
         // sentinel_passed = false, but every approved criterion genuinely
         // checks out — the structured result is authoritative in both
         // directions, not just when it agrees with a FAIL.
-        assert!(reality_verdict(Some(&criteria), 1, false).passed());
+        assert!(matches!(
+            reality_verdict(Some(&criteria), 1, false),
+            RealityVerdict::Pass
+        ));
     }
 
     #[test]
