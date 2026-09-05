@@ -434,6 +434,16 @@ export function routeIntent(text: string): { capability: IntentOSCapability; cap
 const BUILD_INTENT_PATTERN =
   /\b(constru\w*|cre[ae]\w*|hac\w*|dise[ñn]\w*|desarroll\w*|implement\w*|agreg\w*|a[ñn]ad\w*|sum[ae]\w*|cambi\w*|modific\w*|corri?g\w*|arregl\w*|repar\w*|mejor\w*|actualiz\w*|borr\w*|elimin\w*|quit\w*|gener\w*|mont\w*|arm\w*|configur\w*|integr\w*|conect\w*|quiero|necesito)\b/i;
 
+// Real bug found live, 2026-09-05: "¿Qué se puede crear en frontend?" is a
+// genuine question about capabilities, not an instruction — but it
+// contains "crear", so BUILD_INTENT_PATTERN alone misclassified it and
+// silently started a full production run. A generic/impersonal question
+// about what's possible, how something works, or what something means is
+// never a build instruction, no matter which verb it happens to contain —
+// checked *before* BUILD_INTENT_PATTERN so it always wins.
+const GENERIC_CAPABILITY_QUESTION_PATTERN =
+  /\b(qu[ée] se puede|qu[ée] puedo|qu[ée] es posible|qu[ée] cosas? (se pueden|puedo|podr[ií]a)|c[oó]mo funciona|c[oó]mo se hace|para qu[ée] sirve|qu[ée] significa|qu[ée] tipos? de|qu[ée] opciones (hay|existen)|cu[aá]les? son (las|los) (opciones|posibilidades))\b/i;
+
 /** Whether a message is casual conversation with Esmeralda rather than a
  *  build/change instruction (2026-09-04 — "quiero que sea un chat junto a
  *  la entrada"). Same hybrid-router spirit as `routeIntent` above: a cheap
@@ -443,16 +453,20 @@ const BUILD_INTENT_PATTERN =
  *  A message counts as a build instruction if it either matches a
  *  recognizable action verb (`BUILD_INTENT_PATTERN`) or `routeIntent`
  *  finds a real capability-keyword match (`confidence > 0`) — otherwise
- *  it's chat. The asymmetry is deliberate: a false "chat" verdict just
- *  means Esmeralda replies conversationally and the user restates the
- *  instruction more explicitly (no worse than today's behavior for an
- *  unmatched intent); a false "build" verdict would spend a real Mission
- *  and a full 5-stage run on a greeting, which is the actual problem this
- *  function exists to prevent. Never called for the initial project-
- *  creation turn — see its one call site in Runbooks.svelte. */
+ *  it's chat, *unless* it's a generic capability question
+ *  (`GENERIC_CAPABILITY_QUESTION_PATTERN`), which is always chat even when
+ *  it contains a build verb. The asymmetry is deliberate: a false "chat"
+ *  verdict just means Esmeralda replies conversationally and the user
+ *  restates the instruction more explicitly (no worse than today's
+ *  behavior for an unmatched intent); a false "build" verdict would spend
+ *  a real Mission and a full 5-stage run on a question, which is the
+ *  actual problem this function exists to prevent. Never called for the
+ *  initial project-creation turn — see its one call site in
+ *  Runbooks.svelte. */
 export function isConversationalMessage(text: string): boolean {
   const trimmed = text.trim();
   if (!trimmed) return true;
+  if (GENERIC_CAPABILITY_QUESTION_PATTERN.test(trimmed)) return true;
   if (BUILD_INTENT_PATTERN.test(trimmed)) return false;
   return routeIntent(trimmed).confidence === 0;
 }

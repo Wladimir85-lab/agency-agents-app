@@ -305,4 +305,17 @@ describe("isConversationalMessage — real chat with Esmeralda vs. a build instr
     expect(isConversationalMessage("")).toBe(true);
     expect(isConversationalMessage("   ")).toBe(true);
   });
+
+  it("a generic capability question is chat even when it contains a build verb — real bug found live 2026-09-05", () => {
+    // The exact phrase that silently started a full production run instead
+    // of just answering: it contains "crear", but it's asking what's
+    // possible in general, not asking IntentOS to build something.
+    expect(isConversationalMessage("¿Qué se puede crear en frontend?")).toBe(true);
+    expect(isConversationalMessage("que se puede hacer en frontend")).toBe(true);
+    expect(isConversationalMessage("¿Cómo funciona el sistema de pagos?")).toBe(true);
+    expect(isConversationalMessage("¿Para qué sirve un dashboard?")).toBe(true);
+    // A real request phrased directly must still build, even though it
+    // also reads as a question grammatically.
+    expect(isConversationalMessage("¿Puedes construirme una landing page para mi estudio?")).toBe(false);
+  });
 });
