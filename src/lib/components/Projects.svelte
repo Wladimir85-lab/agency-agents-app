@@ -350,7 +350,7 @@
 
   /* ── Project list rows ── */
   .rows { flex: 1; min-height: 0; overflow-y: auto; list-style: none; margin: 0; padding: var(--space-3); display: flex; flex-direction: column; gap: var(--space-2); }
-  .proj { border: 1px solid var(--color-border); border-radius: var(--radius-lg); background: var(--color-surface-raised); overflow: hidden; }
+  .proj { flex: none; border: 1px solid var(--color-border); border-radius: var(--radius-lg); background: var(--color-surface-raised); overflow: hidden; }
   .proj:hover { border-color: var(--color-border-strong, var(--color-text-muted)); }
   .proj-row {
     width: 100%; display: flex; align-items: center; gap: var(--space-3);
