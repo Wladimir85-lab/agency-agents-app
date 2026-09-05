@@ -1,8 +1,9 @@
-//! Local knowledge library — indexes reference PDFs (standards, curricula,
-//! technical books the user drops into one or more folders) into an
-//! in-memory, keyword-scored (BM25) index so IntentOS's stage prompts can
-//! ground architecture/development decisions in real citations instead of
-//! relying solely on the model's own recollection.
+//! Local knowledge library — indexes reference PDFs and Markdown (standards,
+//! curricula, technical books, and original synthesis notes the user drops
+//! into one or more folders) into an in-memory, keyword-scored (BM25) index
+//! so IntentOS's stage prompts can ground architecture/development decisions
+//! in real citations instead of relying solely on the model's own
+//! recollection.
 //!
 //! Deliberately NOT a vector/embeddings RAG: IntentOS's local inference
 //! path is "sovereign" (loopback-only, no network — see `local_model.rs`),
@@ -172,28 +173,31 @@ fn chunk_text(raw: &str) -> Vec<String> {
     chunks
 }
 
-fn collect_pdfs(dir: &Path, out: &mut Vec<PathBuf>) {
+fn is_supported_doc(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.eq_ignore_ascii_case("pdf") || e.eq_ignore_ascii_case("md"))
+        .unwrap_or(false)
+}
+
+fn collect_docs(dir: &Path, out: &mut Vec<PathBuf>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
-            collect_pdfs(&path, out);
-        } else if path
-            .extension()
-            .map(|e| e.eq_ignore_ascii_case("pdf"))
-            .unwrap_or(false)
-        {
+            collect_docs(&path, out);
+        } else if is_supported_doc(&path) {
             out.push(path);
         }
     }
 }
 
-pub fn scan_pdfs(dirs: &[PathBuf]) -> Vec<PathBuf> {
+pub fn scan_docs(dirs: &[PathBuf]) -> Vec<PathBuf> {
     let mut out = Vec::new();
     for dir in dirs {
-        collect_pdfs(dir, &mut out);
+        collect_docs(dir, &mut out);
     }
     out.sort();
     out.dedup();
@@ -207,37 +211,43 @@ fn title_from_path(path: &Path) -> String {
         .to_string()
 }
 
-/// Build the index synchronously — PDF text extraction is CPU/IO-bound, so
-/// callers run this inside `spawn_blocking`. A PDF that fails to extract
-/// (corrupt, scanned-image-only) is skipped and logged rather than failing
-/// the whole reindex; only "zero readable pages across every source" is a
-/// hard error, since that means the configured folders are wrong.
+/// Extract raw text from one source file. PDF extraction is CPU-bound and
+/// `pdf_extract` panics on some malformed/corrupt PDFs instead of returning
+/// `Err` (observed on a real book in the wild: "missing object reference"),
+/// so it runs behind `catch_unwind` — a panic is treated exactly like an
+/// extraction error. Markdown is read as-is (no stripping of headings/links:
+/// they're short, readable, and still useful as retrieval context).
+fn extract_text(path: &Path) -> Result<String, String> {
+    let is_markdown = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.eq_ignore_ascii_case("md"))
+        .unwrap_or(false);
+    if is_markdown {
+        return std::fs::read_to_string(path).map_err(|e| e.to_string());
+    }
+    match std::panic::catch_unwind(|| pdf_extract::extract_text(path)) {
+        Ok(Ok(t)) => Ok(t),
+        Ok(Err(e)) => Err(e.to_string()),
+        Err(_) => Err("panicked during extraction".to_string()),
+    }
+}
+
+/// Build the index synchronously — text extraction is CPU/IO-bound, so
+/// callers run this inside `spawn_blocking`. A source that fails to extract
+/// (corrupt PDF, scanned-image-only, unreadable file) is skipped and logged
+/// rather than failing the whole reindex; only "zero readable sources across
+/// the whole corpus" is a hard error, since that means the configured
+/// folders are wrong.
 pub fn build_index(dirs: &[PathBuf]) -> Result<KnowledgeIndex, AppError> {
-    let paths = scan_pdfs(dirs);
+    let paths = scan_docs(dirs);
     let mut chunks = Vec::new();
     let mut skipped = 0usize;
-    // `pdf_extract` panics on some malformed/corrupt PDFs instead of
-    // returning `Err` (observed on a real book in the wild: "missing
-    // object reference"). One bad file must not abort indexing every
-    // other source, so extraction runs behind `catch_unwind` and a panic
-    // is treated exactly like an extraction error — skip and keep going.
-    // (Not swapping the global panic hook here: `build_index` runs inside
-    // `spawn_blocking` alongside other concurrent async work, and a
-    // process-wide hook is the wrong tool to silence one thread's noise.)
     for path in &paths {
-        let extracted = std::panic::catch_unwind(|| pdf_extract::extract_text(path));
-        let text = match extracted {
-            Ok(Ok(t)) => t,
-            Ok(Err(e)) => {
-                tracing::warn!("knowledge: skipping unreadable PDF {}: {e}", path.display());
-                skipped += 1;
-                continue;
-            }
-            Err(_) => {
-                tracing::warn!(
-                    "knowledge: skipping PDF that panicked during extraction: {}",
-                    path.display()
-                );
+        let text = match extract_text(path) {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::warn!("knowledge: skipping unreadable source {}: {e}", path.display());
                 skipped += 1;
                 continue;
             }
@@ -253,7 +263,7 @@ pub fn build_index(dirs: &[PathBuf]) -> Result<KnowledgeIndex, AppError> {
     if chunks.is_empty() && !paths.is_empty() {
         return Err(AppError::Internal {
             message: format!(
-                "could not extract text from any of {} PDF(s) ({skipped} skipped)",
+                "could not extract text from any of {} source(s) ({skipped} skipped)",
                 paths.len()
             ),
         });
@@ -283,6 +293,77 @@ pub fn build_index(dirs: &[PathBuf]) -> Result<KnowledgeIndex, AppError> {
         avg_chunk_len,
         indexed_at: Some(chrono::Utc::now().to_rfc3339()),
     })
+}
+
+// =====================================================================
+// Tauri integration — default corpus + startup seed
+// =====================================================================
+
+/// Folders always included alongside whatever the user registers in
+/// Settings > Biblioteca, so the repo's own curated corpus
+/// (`knowledge-base/` at the workspace root — SWEBOK, CS2023, OWASP ASVS,
+/// original synthesis notes) grounds stage prompts without anyone having to
+/// find and register that folder by hand.
+///
+/// Resolved from `CARGO_MANIFEST_DIR` (this crate lives in `<repo>/src-tauri`,
+/// so its parent is the workspace root) — this only resolves in a source
+/// checkout. A bundled/installed build has no `knowledge-base/` next to it;
+/// there is no packaging step yet that ships this corpus with a built app,
+/// so on such a build this contributes nothing (an unreadable/missing dir is
+/// already handled as "zero docs found there", not an error, by
+/// `collect_docs`).
+pub fn default_dirs() -> Vec<PathBuf> {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .map(|repo_root| vec![repo_root.join("knowledge-base")])
+        .unwrap_or_default()
+}
+
+/// Best-effort startup seed: if no index is cached yet (first launch, or a
+/// prior run never reindexed), build one from `default_dirs()` alone so
+/// architecture/development stage prompts have real grounding from day one
+/// — no dependency on the user ever opening Settings > Biblioteca. A user
+/// who later registers their own folders there gets a full reindex that
+/// still includes this default corpus (`commands::knowledge::knowledge_index`
+/// merges `default_dirs()` with whatever they pass).
+///
+/// PDF/Markdown extraction is too slow to block app startup, so this runs
+/// detached via `tauri::async_runtime::spawn`; failures are logged and just
+/// leave the cache at `None`, the same "no grounding available" degrade
+/// used everywhere else in this module.
+pub fn spawn_default_index_seed<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
+    use tauri::Manager;
+    tauri::async_runtime::spawn(async move {
+        let state: tauri::State<crate::state::AppState> = app.state();
+        {
+            let guard = state.knowledge_cache.lock().await;
+            if guard.is_some() {
+                return;
+            }
+        }
+        let dirs = default_dirs();
+        if dirs.is_empty() {
+            return;
+        }
+        let built = match tokio::task::spawn_blocking(move || build_index(&dirs)).await {
+            Ok(Ok(idx)) => idx,
+            Ok(Err(e)) => {
+                tracing::warn!("knowledge: default corpus seed skipped: {e}");
+                return;
+            }
+            Err(e) => {
+                tracing::warn!("knowledge: default corpus seed task panicked: {e}");
+                return;
+            }
+        };
+        if let Ok(bytes) = serde_json::to_vec(&built) {
+            let cache_path = state.app_data_dir.join(CACHE_FILE);
+            let _ = crate::util::fs::atomic_write(&cache_path, &bytes).await;
+        }
+        let source_count = built.status().source_count;
+        *state.knowledge_cache.lock().await = Some(std::sync::Arc::new(built));
+        tracing::info!("knowledge: seeded default corpus index at startup ({source_count} source(s))");
+    });
 }
 
 #[cfg(test)]
@@ -379,6 +460,28 @@ mod tests {
         assert_eq!(status.source_count, 2);
     }
 
+    /// Verifies `default_dirs()` actually resolves to the repo's own
+    /// `knowledge-base/` and that the corpus there (including the
+    /// `synthesis/*.md` content, not just the `canonical/*.pdf` sources)
+    /// gets indexed. Ignored by default like the smoke test below — it
+    /// depends on the checked-in corpus, not portable to every checkout
+    /// state. Run explicitly:
+    ///   cargo test --lib knowledge::tests::default_dirs_indexes_the_repo_corpus_including_markdown -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn default_dirs_indexes_the_repo_corpus_including_markdown() {
+        let dirs = default_dirs();
+        assert_eq!(dirs.len(), 1, "expected exactly the repo's knowledge-base/ dir");
+        let idx = build_index(&dirs).expect("build_index over the repo's own knowledge-base");
+        let status = idx.status();
+        println!("sources: {:?}", status.sources);
+        assert!(
+            status.sources.iter().any(|s| s.contains("mental-models")),
+            "expected the synthesis/*.md source to be indexed alongside the canonical PDFs"
+        );
+        assert!(status.source_count >= 4, "expected the 3 canonical PDFs plus at least one synthesis doc");
+    }
+
     /// Real-world smoke test against the actual configured libraries on
     /// this dev machine (not portable to CI/other checkouts — ignored by
     /// default). Run explicitly:
@@ -412,17 +515,38 @@ mod tests {
     }
 
     #[test]
-    fn scan_pdfs_recurses_and_dedupes() {
+    fn scan_docs_recurses_dedupes_and_accepts_pdf_and_markdown() {
         let dir = std::env::temp_dir().join(format!("knowledge-scan-test-{}", uuid::Uuid::new_v4()));
         let nested = dir.join("nested");
         std::fs::create_dir_all(&nested).unwrap();
         std::fs::write(dir.join("a.pdf"), b"x").unwrap();
         std::fs::write(nested.join("b.PDF"), b"x").unwrap();
+        std::fs::write(nested.join("c.md"), b"x").unwrap();
         std::fs::write(dir.join("ignore.txt"), b"x").unwrap();
+        std::fs::write(dir.join("ignore.yml"), b"x").unwrap();
 
-        let found = scan_pdfs(&[dir.clone(), dir.clone()]);
-        assert_eq!(found.len(), 2, "duplicate input dirs must not duplicate results");
-        assert!(found.iter().all(|p| p.extension().unwrap().eq_ignore_ascii_case("pdf")));
+        let found = scan_docs(&[dir.clone(), dir.clone()]);
+        assert_eq!(found.len(), 3, "duplicate input dirs must not duplicate results");
+        assert!(found.iter().all(|p| is_supported_doc(p)));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn build_index_indexes_markdown_sources_not_just_pdf() {
+        let dir = std::env::temp_dir().join(format!("knowledge-md-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("mental-models.md"),
+            "Kahneman's System 1 and System 2 describe fast intuitive judgment versus slow deliberate reasoning, directly relevant to how an agent should decide when to escalate instead of guessing.",
+        )
+        .unwrap();
+
+        let idx = build_index(&[dir.clone()]).expect("markdown-only corpus should index");
+        assert_eq!(idx.status().source_count, 1);
+        let hits = idx.retrieve("intuitive judgment escalate guessing", 3);
+        assert!(!hits.is_empty(), "expected the markdown source to be retrievable");
+        assert_eq!(hits[0].source_title, "mental-models");
 
         std::fs::remove_dir_all(&dir).ok();
     }

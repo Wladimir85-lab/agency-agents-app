@@ -147,6 +147,7 @@ pub fn run() {
             // when both `update_auto_check` is on AND `paranoid_mode`
             // is off. Backoff on failure: 1h → 6h → 24h.
             commands::updater::spawn_auto_check_scheduler(app.handle().clone());
+            knowledge::spawn_default_index_seed(app.handle().clone());
             #[cfg(target_os = "macos")]
             {
                 // Apply NSVisualEffectView to the main window so it picks up the

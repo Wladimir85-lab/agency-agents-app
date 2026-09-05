@@ -1,6 +1,6 @@
 //! Knowledge library commands — (re)index a set of local folders containing
-//! reference PDFs into the BM25 index (see `crate::knowledge`), and expose
-//! its status for the Settings UI. Fully local: no network call, no
+//! reference PDFs/Markdown into the BM25 index (see `crate::knowledge`), and
+//! expose its status for the Settings UI. Fully local: no network call, no
 //! embeddings model — see `knowledge.rs`'s module doc for why.
 
 use std::path::PathBuf;
@@ -19,16 +19,19 @@ pub async fn knowledge_status(state: State<'_, AppState>) -> Result<KnowledgeSta
     Ok(guard.as_ref().map(|idx| idx.status()).unwrap_or_default())
 }
 
-/// Rebuilds the index from scratch over `dirs` (each scanned recursively
-/// for `.pdf` files) and swaps it into `AppState` + persists a JSON cache
-/// so the next app launch doesn't have to re-extract every PDF. PDF text
-/// extraction is CPU-bound, so it runs in `spawn_blocking`.
+/// Rebuilds the index from scratch over `dirs` (each scanned recursively for
+/// `.pdf`/`.md` files) plus `knowledge::default_dirs()` — the repo's own
+/// curated corpus is always included so a user's own folders are additive,
+/// never a replacement for it — and swaps the result into `AppState` +
+/// persists a JSON cache so the next app launch doesn't have to re-extract
+/// everything. Text extraction is CPU-bound, so it runs in `spawn_blocking`.
 #[tauri::command]
 pub async fn knowledge_index(
     dirs: Vec<String>,
     state: State<'_, AppState>,
 ) -> Result<KnowledgeStatus, AppError> {
-    let dir_paths: Vec<PathBuf> = dirs.into_iter().map(PathBuf::from).collect();
+    let mut dir_paths: Vec<PathBuf> = knowledge::default_dirs();
+    dir_paths.extend(dirs.into_iter().map(PathBuf::from));
     let built: KnowledgeIndex = tokio::task::spawn_blocking(move || knowledge::build_index(&dir_paths))
         .await
         .map_err(|e| AppError::Internal {
