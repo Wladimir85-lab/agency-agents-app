@@ -616,14 +616,26 @@ fn validated_workspace(run: &RunSummary, app_data: &Path) -> Result<PathBuf, App
         .map_err(|e| AppError::InvalidArgument {
             message: format!("isolated workspace is unavailable: {e}"),
         })?;
-    let root = app_data
-        .join("state")
-        .join("run-workspaces")
-        .canonicalize()
-        .map_err(|e| AppError::Io {
-            message: format!("runtime workspace root is unavailable: {e}"),
-        })?;
-    if !workspace.starts_with(&root) || !workspace.is_dir() {
+    // Two managed roots are legitimate, not one: `run-workspaces/<runId>`
+    // (the original per-run copy) predates the chat/session feature;
+    // `session-workspaces/<sessionId>` (see session::session_workspace_dir)
+    // is the shared, evolving workspace a project's conversation reuses
+    // across turns. A run started from an open conversation always points
+    // at the latter — this function only ever checked the former, so real
+    // bug found live 2026-09-06: every conversational build's "Revisar
+    // cambios"/"Aplicar al original"/"Descartar copia" failed with "run
+    // workspace escaped the managed runtime area" even though the path was
+    // completely legitimate, just under the newer root.
+    let candidate_roots = [
+        app_data.join("state").join("run-workspaces"),
+        app_data.join("state").join("session-workspaces"),
+    ];
+    let matches_root = candidate_roots.iter().any(|root| {
+        root.canonicalize()
+            .map(|canon_root| workspace.starts_with(&canon_root))
+            .unwrap_or(false)
+    });
+    if !matches_root || !workspace.is_dir() {
         return Err(AppError::InvalidArgument {
             message: "run workspace escaped the managed runtime area".into(),
         });
@@ -4140,6 +4152,36 @@ mod tests {
         assert_ne!(other_session_id, session_id_1);
         assert_ne!(other, turn1);
         assert!(!other.join("viewer3d.js").exists());
+    }
+
+    /// Real bug found live, 2026-09-06: `validated_workspace` only ever
+    /// recognized `run-workspaces/<runId>` as a legitimate managed root —
+    /// it predates the chat/session feature, whose builds instead live
+    /// under `session-workspaces/<sessionId>` (`session_workspace_dir`).
+    /// Every conversational build's "Revisar cambios"/"Aplicar al
+    /// original"/"Descartar copia" was rejected with "run workspace
+    /// escaped the managed runtime area" even though the path was
+    /// completely legitimate, just under the newer of the two real roots.
+    #[tokio::test]
+    async fn validated_workspace_accepts_a_session_workspace_root_not_only_run_workspaces() {
+        let app_data = tempfile::tempdir().unwrap();
+        let source = tempfile::tempdir().unwrap();
+        fs::write(source.path().join("index.html"), b"<h1>hi</h1>").unwrap();
+        let state = test_state(app_data.path());
+        let project_path = source.path().to_string_lossy().into_owned();
+
+        let (_session_id, workspace_dir) =
+            resolve_session_workspace(&state, source.path(), &project_path)
+                .await
+                .unwrap();
+
+        let mut run = base_run_for_job_state_tests("session-based-run", RunStatus::Cancelled);
+        run.workspace_path = Some(workspace_dir.to_string_lossy().into_owned());
+
+        let validated = validated_workspace(&run, app_data.path()).expect(
+            "a real session-workspace path must be accepted, not rejected as \"escaped the managed runtime area\"",
+        );
+        assert_eq!(validated, workspace_dir.canonicalize().unwrap());
     }
 
     #[test]
