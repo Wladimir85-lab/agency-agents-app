@@ -5,7 +5,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const invokeMock = vi.hoisted(() => vi.fn());
 vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
 
-import { narrateRunForEsmeralda, replyToEsmeraldaChat, summarizeRunForEsmeralda } from "./session.svelte";
+import { draftBuildConfirmation, narrateRunForEsmeralda, replyToEsmeraldaChat, summarizeRunForEsmeralda } from "./session.svelte";
 import type { RunSummary } from "$lib/types";
 
 beforeEach(() => {
@@ -174,6 +174,32 @@ describe("replyToEsmeraldaChat — real chat with Esmeralda, no run involved (20
     invokeMock.mockRejectedValueOnce(new Error("Paranoid Mode is on"));
     const message = await replyToEsmeraldaChat("hola", []);
     expect(typeof message).toBe("string");
+    expect(message.length).toBeGreaterThan(0);
+  });
+});
+
+describe("draftBuildConfirmation — the agreement step before a project is created (2026-09-05)", () => {
+  it("asks for confirmation and never claims anything was already built", async () => {
+    invokeMock.mockResolvedValueOnce({
+      content: "Entendí que querés una landing page para tu estudio de fotografía. ¿Te la construyo ya así, o querés ajustar algo antes?",
+    });
+    const message = await draftBuildConfirmation("quiero una landing page para mi estudio de fotografía", []);
+    expect(message).toContain("¿");
+    expect(message).not.toMatch(/ya (lo )?constru|ya (lo )?cre[ée]|ya empec[ée]/i);
+  });
+
+  it("the prompt sent to the model is explicit that nothing has been created yet", async () => {
+    invokeMock.mockResolvedValueOnce({ content: "ok" });
+    await draftBuildConfirmation("necesito un dashboard", []);
+    const sentPrompt = invokeMock.mock.calls[0][1].request.prompt as string;
+    expect(sentPrompt).toContain("NO se creó ningún proyecto");
+    expect(sentPrompt).toContain("necesito un dashboard");
+  });
+
+  it("falls back to a real confirmation question, never silence, when the model is unavailable", async () => {
+    invokeMock.mockRejectedValueOnce(new Error("Paranoid Mode is on"));
+    const message = await draftBuildConfirmation("quiero un blog", []);
+    expect(message).toContain("¿");
     expect(message.length).toBeGreaterThan(0);
   });
 });

@@ -166,6 +166,48 @@ export async function replyToEsmeraldaChat(
   }
 }
 
+/** Esmeralda's reply when a build instruction arrives but no project
+ *  exists yet — 2026-09-05: "que las carpetas se creen cuando el mandato
+ *  sea explícito, ese chat se puede ver como una reunión de acuerdo".
+ *  Creating a project is a real filesystem commitment (a new folder on
+ *  disk), so the first mention of wanting something built opens a
+ *  discussion, not an execution — this drafts Esmeralda's side of that
+ *  discussion (summarize + ask for an explicit go-ahead) without ever
+ *  claiming anything was built or started, since at this point nothing
+ *  has been. Its one call site (Runbooks.svelte's `sendTurn`) only
+ *  reaches this when there is no `projectPath` yet; a genuinely explicit
+ *  confirmation (`isExplicitConfirmation`, intentosCapabilities.ts) is
+ *  what actually triggers `approveAndStart` afterward — this function
+ *  itself never creates anything. */
+export async function draftBuildConfirmation(
+  text: string,
+  priorMessages: ConversationMessage[],
+): Promise<string> {
+  const context = priorMessages
+    .slice(-MAX_CONTEXT_MESSAGES)
+    .map((m) => `${ROLE_LABEL[m.role]}: ${preview(m.content)}`)
+    .join("\n");
+  const prompt = [
+    "Eres Esmeralda, la inteligencia conversacional de IntentOS. El usuario acaba de describir algo que quiere que construyas, pero todavía NO se creó ningún proyecto ni se inició ninguna construcción real — este es un momento de acuerdo entre ambos, no de ejecución.",
+    context ? `\nCONVERSACIÓN PREVIA CON ESTE USUARIO:\n${context}` : "",
+    `\nLO QUE EL USUARIO DESCRIBIÓ QUERER CONSTRUIR:\n${text.trim()}`,
+    "\nRespóndele en español, en primera persona, en 2 a 4 frases: resume brevemente lo que entendiste que quiere, y preguntale explícitamente si quiere que lo construyas ahora tal cual, o si prefiere ajustar algo antes. No digas en ningún momento que ya lo construiste, que ya lo creaste o que ya empezaste a trabajar en eso — nada de eso ocurrió todavía.",
+  ].join("\n");
+  try {
+    const completion = await invoke<{ content: string }>("local_model_complete", {
+      request: { prompt, maxTokens: 220, purpose: "esmeralda_build_confirmation" },
+    });
+    const reply = completion.content.trim();
+    return reply || `Entendí que querés esto: "${text.trim()}". ¿Querés que lo construya ahora, o preferís ajustar algo antes?`;
+  } catch (error) {
+    console.warn(
+      "[session] Esmeralda's build-confirmation draft is unavailable right now (Paranoid Mode, no backend configured, or a real error):",
+      error,
+    );
+    return `Entendí que querés esto: "${text.trim()}". ¿Querés que lo construya ahora, o preferís ajustar algo antes?`;
+  }
+}
+
 class SessionStore {
   current: ProjectSession | null = $state(null);
   loading = $state(false);

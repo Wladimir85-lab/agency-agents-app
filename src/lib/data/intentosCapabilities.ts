@@ -471,6 +471,35 @@ export function isConversationalMessage(text: string): boolean {
   return routeIntent(trimmed).confidence === 0;
 }
 
+// Short, unambiguous go-ahead words only. Deliberately capped at 6 words —
+// a longer message that happens to contain "sí" or "dale" somewhere is a
+// new/refined instruction, not a plain confirmation of what was already
+// discussed, and must not be misread as one.
+// Unicode-aware boundaries, not `\b`: JavaScript's `\b` only recognizes
+// ASCII word characters, so a plain "sí" (an accented word with nothing
+// else around it) silently fails to match a `\b...\b`-wrapped pattern —
+// found by this function's own test suite, not guessed at.
+const CONFIRMATION_PATTERN =
+  /(?<![\p{L}\p{N}_])(s[ií]|dale|ok|okay|listo|hazlo|constr[uú]yelo|constr[uú]yela|cr[eé]alo|cr[eé]ala|adelante|procede|confirmado|empieza|comienza|hag[aá]moslo|h[aá]galo|de acuerdo|vamos|correcto|exacto|perfecto)(?![\p{L}\p{N}_])/iu;
+
+/** Whether a message is an explicit, unambiguous go-ahead — 2026-09-05:
+ *  "que las carpetas se creen cuando el mandato sea explícito, ese chat se
+ *  puede ver como una reunión de acuerdo". Creating a project is a real
+ *  filesystem commitment; a message that merely *sounds* like a build
+ *  instruction (see `isConversationalMessage`'s own false positive, found
+ *  live the same day) is not sufficient reason to create one. Only a
+ *  short, unmistakable confirmation — checked against a pending build
+ *  description already discussed in chat — actually authorizes it. Never
+ *  used on its own to detect a build instruction from scratch; it only
+ *  answers "did the user just agree to the thing we were already
+ *  discussing". */
+export function isExplicitConfirmation(text: string): boolean {
+  const trimmed = text.trim();
+  if (!trimmed) return false;
+  const wordCount = trimmed.split(/\s+/).length;
+  return wordCount <= 6 && CONFIRMATION_PATTERN.test(trimmed);
+}
+
 /** Whether the deterministic fast path above is trustworthy enough to skip
  *  the semantic fallback entirely — the hybrid router's only gate on
  *  calling the LLM at all, so it must stay cheap and conservative in both

@@ -13,6 +13,7 @@ import {
   CREATIVE_TECH_SPECIALIZATIONS,
   INTENTOS_CAPABILITIES,
   isConversationalMessage,
+  isExplicitConfirmation,
   planSolution,
   planSolutionAsync,
   routeIntent,
@@ -317,5 +318,30 @@ describe("isConversationalMessage — real chat with Esmeralda vs. a build instr
     // A real request phrased directly must still build, even though it
     // also reads as a question grammatically.
     expect(isConversationalMessage("¿Puedes construirme una landing page para mi estudio?")).toBe(false);
+  });
+});
+
+describe("isExplicitConfirmation — real mandate gate before a project is created (2026-09-05)", () => {
+  it("short, unmistakable go-ahead words are confirmations", () => {
+    expect(isExplicitConfirmation("sí")).toBe(true);
+    expect(isExplicitConfirmation("dale")).toBe(true);
+    expect(isExplicitConfirmation("hazlo")).toBe(true);
+    expect(isExplicitConfirmation("sí, constrúyelo")).toBe(true);
+    expect(isExplicitConfirmation("ok, adelante")).toBe(true);
+  });
+
+  it("a longer message that happens to contain a confirmation word is not a plain go-ahead", () => {
+    // A refined/new description, not an agreement to build what was
+    // already discussed — must not be misread as "yes, proceed".
+    expect(
+      isExplicitConfirmation(
+        "sí pero mejor que sea con un fondo azul y que tenga un formulario de contacto también",
+      ),
+    ).toBe(false);
+  });
+
+  it("an empty message or an unrelated message is not a confirmation", () => {
+    expect(isExplicitConfirmation("")).toBe(false);
+    expect(isExplicitConfirmation("cuánto cuesta esto")).toBe(false);
   });
 });
