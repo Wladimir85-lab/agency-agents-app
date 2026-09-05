@@ -1043,3 +1043,33 @@ every run/session JSON before touching anything). Cleaned up by invoking the rea
 `runtime_discard_workspace` command through the live running app (not raw `rm -rf`), so session
 pointers and run state stayed consistent instead of leaving orphaned JSON behind. `session-workspaces/`
 is empty again.
+
+## 2026-09-06 (same night) — senior-engineering-standard guidance + ambiguity escalation closes clean
+
+Wladimir pasted an external "Esmeralda profile" (Ousterhout deep-modules/complexity-elimination +
+guard-clause/no-dead-code rules) asking how to apply it. Esmeralda herself never writes code —
+added a "SENIOR ENGINEERING STANDARD" section to `stage_prompt()` (`runtime.rs`), gated to
+architecture/development stages only (the two where real design/code decisions happen). Commit
+`68213c7`. Adopted: deep modules, centralize each concept, guard clauses over nesting, real data
+structures over scattered null checks, structural names, no dead code, escalate genuine ambiguity
+instead of guessing. Deliberately dropped two clauses from the pasted brief: a hard "no function
+over 50 lines" rule (forcing a split to hit a number, not because a seam exists, produces the same
+complexity problem from the other direction) and "keep technical logs hidden from the interface"
+(contradicts this session's own P1.1 observability work and the Constitution's evidence-over-claim
+principle outright).
+
+Asked afterward whether everything configured tonight has concordance — actually verified rather
+than assuming yes, and found a real gap: the new "escalate ambiguity" instruction had no
+mechanical connection to `JobState`. `classify_app_error` only ever produced
+`HumanDecisionRequired` for one specific pre-run case (`AppError::CapabilityProviderUnavailable`);
+any other stage FAIL, including a deliberate ambiguity escalation, rendered as a generic
+`BlockedWithEvidence` ("no pude completar esta instrucción") — indistinguishable from a crash.
+Closed with a new `AppError::HumanDecisionRequested { stage, reason }`, constructed only from an
+exact `INTENTOS_HUMAN_DECISION_REQUIRED:` sentinel line (`extract_human_decision_reason`) — never
+by scanning freeform prose, same discipline as `output_gate_passed`/
+`contains_deferred_continuation_claim` — wired into both `run_codex_stage` and `run_claude_stage`
+right where they already compute pass/fail. Reaches the same already-wired frontend surfacing
+(Requisito 6) a missing-provider case already uses; no frontend changes needed. `stage_prompt`'s
+guidance now names this concrete mechanism instead of vague prose. Four new tests. Commit
+`2dbd442`. Rust 477→482 across today's four post-cognitive-architecture commits
+(`fb0000b`/`a198850`/`68213c7`/`2dbd442`).
