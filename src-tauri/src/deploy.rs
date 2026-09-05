@@ -447,6 +447,7 @@ mod tests {
             local_model_process: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
             preview_process: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
             public_preview_process: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+            knowledge_cache: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
         }
     }
 

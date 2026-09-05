@@ -12,6 +12,7 @@ mod error;
 mod fabric;
 mod github;
 mod install;
+mod knowledge;
 mod local_agent;
 mod local_model;
 mod mission;
@@ -272,6 +273,11 @@ pub fn run() {
             // today's only registered provider; see capability_resolution.rs.
             capability_resolution::capability_resolve,
             capability_resolution::capability_invoke,
+            // Knowledge library — local BM25 index over user-provided
+            // reference PDFs, grounding architecture/development stage
+            // prompts with citations. Fully local, no embeddings model.
+            knowledge_status,
+            knowledge_index,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -239,6 +239,7 @@ mod tests {
             local_model_process: Arc::new(Mutex::new(None)),
             preview_process: Arc::new(Mutex::new(None)),
             public_preview_process: Arc::new(Mutex::new(None)),
+            knowledge_cache: Arc::new(Mutex::new(None)),
         }
     }
 

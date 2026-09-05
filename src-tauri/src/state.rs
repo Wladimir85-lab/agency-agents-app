@@ -69,6 +69,13 @@ pub struct AppState {
     /// any, publishing the Showroom above to a `*.trycloudflare.com` URL.
     /// Same one-slot convention; see deploy.rs.
     pub public_preview_process: Arc<Mutex<Option<crate::deploy::RunningPublicPreview>>>,
+
+    /// Local knowledge library (see `knowledge.rs`) — a BM25 index over
+    /// user-provided reference PDFs, consulted by architecture/development
+    /// stage prompts. `None` until the frontend's first `knowledge_index`
+    /// call (or a successful cache load at startup); every reader treats
+    /// `None` as "no grounding available" rather than an error.
+    pub knowledge_cache: Arc<Mutex<Option<Arc<crate::knowledge::KnowledgeIndex>>>>,
 }
 
 impl AppState {
@@ -98,6 +105,14 @@ impl AppState {
             );
         }
 
+        // Best-effort: a missing or unparseable cache just means "reindex on
+        // first use", same non-fatal treatment as every other lazy cache
+        // here (corpus_cache, updater_state).
+        let knowledge_cache = std::fs::read(app_data_dir.join(crate::knowledge::CACHE_FILE))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<crate::knowledge::KnowledgeIndex>(&bytes).ok())
+            .map(Arc::new);
+
         Ok(Self {
             app_data_dir,
             corpus_cache: Arc::new(Mutex::new(None)),
@@ -108,6 +123,7 @@ impl AppState {
             local_model_process: Arc::new(Mutex::new(None)),
             preview_process: Arc::new(Mutex::new(None)),
             public_preview_process: Arc::new(Mutex::new(None)),
+            knowledge_cache: Arc::new(Mutex::new(knowledge_cache)),
         })
     }
 

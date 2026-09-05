@@ -2183,6 +2183,7 @@ pub async fn runtime_start(
     let app_data = state.app_data_dir.clone();
     let jobs = state.runtime_jobs.clone();
     let settings = state.settings.clone();
+    let knowledge_cache = state.knowledge_cache.clone();
     let task_run_id = run_id.clone();
     let handle = tokio::spawn(async move {
         let mut current = run.clone();
@@ -2256,11 +2257,13 @@ pub async fn runtime_start(
                         ),
                     });
                 }
+                let knowledge_snippets = stage_knowledge(&knowledge_cache, &current, index).await;
                 let prompt = stage_prompt(
                     &current,
                     index,
                     profiles.get(&current.stages[index].agent_slug),
                     mission.as_ref(),
+                    &knowledge_snippets,
                 );
                 // Stages `local_agent::local_stage_task` covers (direction,
                 // architecture, development) run on the sovereign local
@@ -2386,9 +2389,11 @@ pub async fn runtime_start(
                         let _ = on_event.send(RunEvent::RunUpdated {
                             run: current.clone(),
                         });
+                        let remediation_knowledge =
+                            stage_knowledge(&knowledge_cache, &current, development_index).await;
                         let fix_prompt = format!(
                             "The QA gate failed on attempt {attempt}. This is a remediation pass. Inspect the QA evidence and implement every in-scope requirement that is still missing; do not limit the repair to your catalog specialty. Fix the root causes and run the relevant checks.\n\n{}",
-                            stage_prompt(&current, development_index, profiles.get(&current.stages[development_index].agent_slug), mission.as_ref())
+                            stage_prompt(&current, development_index, profiles.get(&current.stages[development_index].agent_slug), mission.as_ref(), &remediation_knowledge)
                         );
                         // Practically unreachable with `provider_id: None`
                         // today: reaching a QA remediation pass means the QA
@@ -2566,11 +2571,33 @@ async fn persist_at(app_data: &Path, run: &RunSummary) -> Result<(), AppError> {
     .await
 }
 
+/// Top-3 knowledge-library chunks relevant to this stage's own work, or
+/// empty when no library is indexed, nothing scored, or this stage kind
+/// doesn't need grounding. Scoped to architecture/development — same
+/// stages `craftsmanship_guidance` targets, where real design/code
+/// decisions get made (QA/reality verify against what was already built,
+/// they don't need reference material to do that).
+async fn stage_knowledge(
+    cache: &std::sync::Arc<tokio::sync::Mutex<Option<std::sync::Arc<crate::knowledge::KnowledgeIndex>>>>,
+    run: &RunSummary,
+    index: usize,
+) -> Vec<crate::knowledge::RetrievedChunk> {
+    let stage = &run.stages[index];
+    if stage.kind != "architecture" && stage.kind != "development" {
+        return Vec::new();
+    }
+    match cache.lock().await.as_ref() {
+        Some(idx) => idx.retrieve(&run.intent, 3),
+        None => Vec::new(),
+    }
+}
+
 fn stage_prompt(
     run: &RunSummary,
     index: usize,
     persona: Option<&String>,
     mission: Option<&Mission>,
+    knowledge: &[crate::knowledge::RetrievedChunk],
 ) -> String {
     let s = &run.stages[index];
     // Additive only: when no Mission is attached, brief_section is empty
@@ -2610,6 +2637,27 @@ fn stage_prompt(
     } else {
         ""
     };
+    // 2026-09-05 — knowledge-library grounding (see `knowledge.rs`). Purely
+    // additive: `knowledge` is an empty slice whenever no library is
+    // indexed or the retrieval found nothing relevant, producing the exact
+    // same prompt as before this feature existed. Never presented as the
+    // only source of truth — the model is explicitly told these are
+    // reference excerpts to weigh, not to copy or defer to blindly.
+    let knowledge_section = if knowledge.is_empty() {
+        String::new()
+    } else {
+        let mut section = String::from(
+            "\nREFERENCIA TÉCNICA (fragmentos de la biblioteca local del usuario; úsalos para fundamentar tu decisión cuando sean relevantes, cita la fuente si corresponde, y no los copies literalmente ni asumas que son la única fuente válida):\n",
+        );
+        for chunk in knowledge {
+            section.push_str("- [");
+            section.push_str(&chunk.source_title);
+            section.push_str("] ");
+            section.push_str(&chunk.snippet);
+            section.push('\n');
+        }
+        section
+    };
     // Domain-conditional verification guidance — see "Reality gate —
     // domain-conditional verification guidance" above. Additive and
     // reality-stage-only: every other stage's prompt is byte-identical to
@@ -2631,7 +2679,7 @@ fn stage_prompt(
         ""
     };
     let workspace = run.workspace_path.as_deref().unwrap_or(&run.project_path);
-    format!("You are the {} agent ({}) in the IntentOS '{}' autonomous pipeline.\n\nINTENTOS ORCHESTRATOR OVERRIDES (highest priority for this run):\n- The USER INTENT below is the authoritative product specification.\n- Catalog persona references to missing templates, memory-bank files, frameworks, scripts, or organizational conventions are optional guidance, not prerequisites.\n- If useful project documentation is missing, create the minimal appropriate documentation yourself from the USER INTENT and continue autonomously.\n- Choose reasonable technical defaults when the user explicitly delegates the choice. Do not fail merely because an auxiliary file, preferred framework, or prior setup is absent.\n- Do not ask the user to implement or configure anything unless human authorization is genuinely required.\n- Stay within the requested scope and do not invent product requirements.\n- This is an isolated working copy. Never access or modify the source project outside WORKSPACE.\n- This invocation is a single non-interactive turn: there is no later turn, notification, or check-in where you could pick up a deferred background task. Run commands that must finish before you continue (npm install, builds, migrations, etc.) synchronously in the foreground and wait for their real exit code — never launch them as a background task expecting to resume afterward, since nothing will ever resume this turn. If a command is genuinely slow, wait for it; do not end your response early with an intention to continue later.\n{}{}\nCATALOG PERSONA INSTRUCTIONS:\n{}\n\n{}USER INTENT:\n{}\nSOURCE PROJECT (read-only reference; do not access): {}\nWORKSPACE: {}\n{}{}\nWork only inside WORKSPACE. Inspect existing work and perform this stage for real. Run relevant checks. Do not claim success without evidence. End your final response with exactly INTENTOS_GATE:PASS only if this stage genuinely passes; otherwise end with INTENTOS_GATE:FAIL and explain a genuine blocker. Previous stages are present in the workspace.", s.label, s.agent_slug, run.runbook_id, implementation_scope, craftsmanship_guidance, persona.map(String::as_str).unwrap_or("Catalog persona unavailable; disclose this limitation."), brief_section, run.intent, run.project_path, workspace, domain_guidance, criteria_instruction)
+    format!("You are the {} agent ({}) in the IntentOS '{}' autonomous pipeline.\n\nINTENTOS ORCHESTRATOR OVERRIDES (highest priority for this run):\n- The USER INTENT below is the authoritative product specification.\n- Catalog persona references to missing templates, memory-bank files, frameworks, scripts, or organizational conventions are optional guidance, not prerequisites.\n- If useful project documentation is missing, create the minimal appropriate documentation yourself from the USER INTENT and continue autonomously.\n- Choose reasonable technical defaults when the user explicitly delegates the choice. Do not fail merely because an auxiliary file, preferred framework, or prior setup is absent.\n- Do not ask the user to implement or configure anything unless human authorization is genuinely required.\n- Stay within the requested scope and do not invent product requirements.\n- This is an isolated working copy. Never access or modify the source project outside WORKSPACE.\n- This invocation is a single non-interactive turn: there is no later turn, notification, or check-in where you could pick up a deferred background task. Run commands that must finish before you continue (npm install, builds, migrations, etc.) synchronously in the foreground and wait for their real exit code — never launch them as a background task expecting to resume afterward, since nothing will ever resume this turn. If a command is genuinely slow, wait for it; do not end your response early with an intention to continue later.\n{}{}{}\nCATALOG PERSONA INSTRUCTIONS:\n{}\n\n{}USER INTENT:\n{}\nSOURCE PROJECT (read-only reference; do not access): {}\nWORKSPACE: {}\n{}{}\nWork only inside WORKSPACE. Inspect existing work and perform this stage for real. Run relevant checks. Do not claim success without evidence. End your final response with exactly INTENTOS_GATE:PASS only if this stage genuinely passes; otherwise end with INTENTOS_GATE:FAIL and explain a genuine blocker. Previous stages are present in the workspace.", s.label, s.agent_slug, run.runbook_id, implementation_scope, craftsmanship_guidance, knowledge_section, persona.map(String::as_str).unwrap_or("Catalog persona unavailable; disclose this limitation."), brief_section, run.intent, run.project_path, workspace, domain_guidance, criteria_instruction)
 }
 
 async fn run_codex_stage(
@@ -4072,10 +4120,10 @@ mod tests {
         // index 2 = "development" in the fallback roster — must be
         // byte-unaffected, same guarantee the existing frozen-contract
         // tests already cover for the mission-brief section.
-        let development_prompt = stage_prompt(&run, 2, None, None);
+        let development_prompt = stage_prompt(&run, 2, None, None, &[]);
         assert!(!development_prompt.contains("INTENTOS_CRITERIA"));
         // index 4 = "reality-check" in the fallback roster.
-        let reality_prompt = stage_prompt(&run, 4, None, None);
+        let reality_prompt = stage_prompt(&run, 4, None, None, &[]);
         assert!(reality_prompt.contains("INTENTOS_CRITERIA:"));
         assert!(reality_prompt.contains("criterionIndex"));
         // The gate sentinel instruction must still be present and unchanged
@@ -4108,11 +4156,11 @@ mod tests {
             error: None,
             terminal_state: None,
         };
-        let direction_prompt = stage_prompt(&run, 0, None, None);
-        let architecture_prompt = stage_prompt(&run, 1, None, None);
-        let development_prompt = stage_prompt(&run, 2, None, None);
-        let qa_prompt = stage_prompt(&run, 3, None, None);
-        let reality_prompt = stage_prompt(&run, 4, None, None);
+        let direction_prompt = stage_prompt(&run, 0, None, None, &[]);
+        let architecture_prompt = stage_prompt(&run, 1, None, None, &[]);
+        let development_prompt = stage_prompt(&run, 2, None, None, &[]);
+        let qa_prompt = stage_prompt(&run, 3, None, None, &[]);
+        let reality_prompt = stage_prompt(&run, 4, None, None, &[]);
         assert!(!direction_prompt.contains("SENIOR ENGINEERING STANDARD"));
         assert!(architecture_prompt.contains("SENIOR ENGINEERING STANDARD"));
         assert!(architecture_prompt.contains("Guard clauses over nested conditionals"));
@@ -4156,7 +4204,7 @@ mod tests {
         // Web case: DOM/browser/accessibility guidance, no Laravel assumed,
         // no IoT-specific telemetry language leaking in.
         let run = run_with_capabilities("digital-experience", vec!["digital-experience".into()]);
-        let reality_prompt = stage_prompt(&run, 4, None, None);
+        let reality_prompt = stage_prompt(&run, 4, None, None, &[]);
         assert!(reality_prompt.contains("DOMAIN VERIFICATION GUIDANCE"));
         assert!(reality_prompt.contains("[digital-experience]"));
         assert!(reality_prompt.contains("DOM structure"));
@@ -4171,7 +4219,7 @@ mod tests {
     fn stage_prompt_reality_gives_domain_guidance_for_iot() {
         // Non-web case: telemetry/protocol guidance, no browser/DOM language.
         let run = run_with_capabilities("iot", vec!["iot".into()]);
-        let reality_prompt = stage_prompt(&run, 4, None, None);
+        let reality_prompt = stage_prompt(&run, 4, None, None, &[]);
         assert!(reality_prompt.contains("[iot]"));
         assert!(reality_prompt.contains("MQTT"));
         assert!(!reality_prompt.contains("DOM structure"));
@@ -4184,7 +4232,7 @@ mod tests {
         // list doesn't know yet — must get domain-neutral guidance, never
         // default to assuming a web/Laravel stack.
         let run = run_with_capabilities("", vec![]);
-        let reality_prompt = stage_prompt(&run, 4, None, None);
+        let reality_prompt = stage_prompt(&run, 4, None, None, &[]);
         assert!(reality_prompt.contains("[unspecified]"));
         assert!(reality_prompt.contains("Do not assume a web/Laravel stack by default"));
     }
@@ -4198,7 +4246,7 @@ mod tests {
             "iot",
             vec!["iot".into(), "systems-data".into()],
         );
-        let reality_prompt = stage_prompt(&run, 4, None, None);
+        let reality_prompt = stage_prompt(&run, 4, None, None, &[]);
         assert!(reality_prompt.contains("[iot]"));
         assert!(reality_prompt.contains("[systems-data]"));
         assert!(reality_prompt.contains("MQTT"));
@@ -4209,7 +4257,7 @@ mod tests {
     fn domain_guidance_is_absent_outside_the_reality_stage() {
         let run = run_with_capabilities("iot", vec!["iot".into()]);
         // index 2 = "development" in the fallback roster.
-        let development_prompt = stage_prompt(&run, 2, None, None);
+        let development_prompt = stage_prompt(&run, 2, None, None, &[]);
         assert!(!development_prompt.contains("DOMAIN VERIFICATION GUIDANCE"));
     }
 
@@ -4250,6 +4298,7 @@ mod tests {
             local_model_process: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
             preview_process: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
             public_preview_process: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+            knowledge_cache: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
         }
     }
 
@@ -4870,7 +4919,7 @@ mod tests {
             terminal_state: None,
         };
         run.stages[2].id = "development".into();
-        let prompt = stage_prompt(&run, 2, None, None);
+        let prompt = stage_prompt(&run, 2, None, None, &[]);
         assert!(prompt.contains("IOT FULL-VERTICAL IMPLEMENTATION MANDATE"));
         assert!(prompt.contains("consumer/backend, persistence, alert rules, API"));
     }
@@ -4901,7 +4950,7 @@ mod tests {
             error: None,
             terminal_state: None,
         };
-        let prompt = stage_prompt(&run, 2, None, None);
+        let prompt = stage_prompt(&run, 2, None, None, &[]);
         assert!(!prompt.contains("MISSION BRIEF"));
         assert!(prompt.contains("USER INTENT:\nBuild a verified product"));
     }
@@ -4949,7 +4998,7 @@ mod tests {
             error: None,
             terminal_state: None,
         };
-        let prompt = stage_prompt(&run, 2, None, Some(&mission));
+        let prompt = stage_prompt(&run, 2, None, Some(&mission), &[]);
         assert!(prompt.contains("MISSION BRIEF"));
         assert!(prompt.contains("EXPLICITLY OUT OF SCOPE"));
         let brief_pos = prompt.find("MISSION BRIEF").unwrap();

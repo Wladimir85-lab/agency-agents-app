@@ -814,6 +814,14 @@ export interface ProjectInfo {
   installedCount: number;
 }
 
+/** Local knowledge library status — see `src-tauri/src/knowledge.rs`. */
+export interface KnowledgeStatus {
+  sourceCount: number;
+  chunkCount: number;
+  indexedAt: string | null;
+  sources: string[];
+}
+
 // =========================================================
 // UI-only types (frontend stores, command palette, etc.)
 // =========================================================
@@ -835,6 +843,7 @@ export type ThemePreference = "light" | "dark" | "system";
 export type SettingsSection =
   | "appearance"
   | "catalog"
+  | "knowledge"
   | "network"
   | "github"
   | "activity"

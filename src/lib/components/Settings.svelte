@@ -21,6 +21,7 @@
   import X from "@lucide/svelte/icons/x";
   import Paintbrush from "@lucide/svelte/icons/paintbrush";
   import Library from "@lucide/svelte/icons/library";
+  import BookOpen from "@lucide/svelte/icons/book-open";
   import Globe from "@lucide/svelte/icons/globe";
   import Github from "@lucide/svelte/icons/git-fork";
   import Activity from "@lucide/svelte/icons/activity";
@@ -29,6 +30,7 @@
   import { ui } from "$lib/stores/ui.svelte";
   import SettingsSectionAppearance from "./SettingsSectionAppearance.svelte";
   import SettingsSectionCatalog from "./SettingsSectionCatalog.svelte";
+  import SettingsSectionKnowledge from "./SettingsSectionKnowledge.svelte";
   import SettingsSectionNetwork from "./SettingsSectionNetwork.svelte";
   import SettingsSectionGitHub from "./SettingsSectionGitHub.svelte";
   import SettingsSectionActivity from "./SettingsSectionActivity.svelte";
@@ -44,6 +46,7 @@
   const NAV: NavEntry[] = [
     { id: "appearance", icon: Paintbrush },
     { id: "catalog",    icon: Library },
+    { id: "knowledge",  icon: BookOpen },
     { id: "network",    icon: Globe },
     { id: "github",     icon: Github },
     { id: "activity",   icon: Activity },
@@ -56,6 +59,7 @@
   function sectionLabel(id: SettingsSection): string {
     if (id === "appearance") return i18n.t("settings.appearance.title");
     if (id === "catalog") return i18n.t("settings.catalog");
+    if (id === "knowledge") return i18n.t("settings.knowledge");
     if (id === "network") return i18n.t("settings.network");
     if (id === "github") return i18n.t("settings.github");
     if (id === "activity") return i18n.t("settings.activity");
@@ -166,6 +170,8 @@
           <SettingsSectionAppearance />
         {:else if activeSection === "catalog"}
           <SettingsSectionCatalog />
+        {:else if activeSection === "knowledge"}
+          <SettingsSectionKnowledge />
         {:else if activeSection === "network"}
           <SettingsSectionNetwork />
         {:else if activeSection === "github"}

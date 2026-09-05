@@ -4,10 +4,12 @@
 //! `tauri::generate_handler![]`.
 
 pub mod github;
+pub mod knowledge;
 pub mod settings;
 pub mod updater;
 
 // Re-export every command in flat form so `invoke_handler!` can take them.
 pub use github::*;
+pub use knowledge::*;
 pub use settings::*;
 pub use updater::*;

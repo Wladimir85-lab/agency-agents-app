@@ -81,6 +81,12 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # `serde_urlencoded` is already pulled in transitively by `reqwest`
 # but `url` (parsing) is not. Keep this dep tight.
 url = "2"
+
+# Knowledge library (knowledge.rs) — pure-Rust PDF text extraction for the
+# local BM25 index over user-provided reference PDFs. No native/system
+# deps (unlike bundling a full PDF renderer), matching this dependency
+# list's existing bias toward small, self-contained crates.
+pdf-extract = "0.7"
 temporalio-client = "0.7.0"
 temporalio-common = "0.7.0"
 temporalio-macros = "0.7.0"
