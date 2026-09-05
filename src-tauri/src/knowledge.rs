@@ -53,7 +53,7 @@ pub struct KnowledgeStatus {
 /// The built index. Cheap to serialize (plain JSON) and small enough
 /// (thousands of chunks, not millions) that a hand-rolled inverted index
 /// beats pulling in a full-text-search engine dependency for this.
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct KnowledgeIndex {
     chunks: Vec<KnowledgeChunk>,
     /// term -> list of (chunk index, term frequency in that chunk).
@@ -121,6 +121,36 @@ impl KnowledgeIndex {
                 }
             })
             .collect()
+    }
+
+    /// Absorb one new source directly into the live index — no rescan of
+    /// any folder, no knowledge of which directories built the rest of the
+    /// index. This is how a run's own outcome (e.g. "QA failed here and was
+    /// fixed") gets folded into the shared memory the whole agent network
+    /// reads from, without requiring the caller to know or replay the
+    /// dirs/settings that produced everything already in `chunks`.
+    pub fn append(&mut self, source_title: String, text: &str) {
+        for chunk in chunk_text(text) {
+            let idx = self.chunks.len() as u32;
+            let mut tf: HashMap<String, u32> = HashMap::new();
+            for term in tokenize(&chunk) {
+                *tf.entry(term).or_insert(0) += 1;
+            }
+            for (term, freq) in tf {
+                self.postings.entry(term).or_default().push((idx, freq));
+            }
+            self.chunks.push(KnowledgeChunk {
+                source_title: source_title.clone(),
+                text: chunk,
+            });
+        }
+        let total_len: usize = self.chunks.iter().map(|c| c.text.len()).sum();
+        self.avg_chunk_len = if self.chunks.is_empty() {
+            0.0
+        } else {
+            total_len as f32 / self.chunks.len() as f32
+        };
+        self.indexed_at = Some(chrono::Utc::now().to_rfc3339());
     }
 }
 
@@ -319,6 +349,68 @@ pub fn default_dirs() -> Vec<PathBuf> {
         .unwrap_or_default()
 }
 
+/// Where the network's own learnings live — one Markdown file per recorded
+/// outcome (see `record_learning`), always under the per-install app data
+/// dir so it survives reindexes/updates and needs no source checkout,
+/// unlike `default_dirs()`. Included in every reindex alongside the
+/// curated corpus and whatever the user registers.
+pub fn learnings_dir(app_data_dir: &Path) -> PathBuf {
+    app_data_dir.join("knowledge-learnings")
+}
+
+fn slugify(s: &str) -> String {
+    let slug: String = s
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c.to_ascii_lowercase() } else { '-' })
+        .collect();
+    let slug = slug.trim_matches('-');
+    if slug.is_empty() {
+        "learning".to_string()
+    } else {
+        slug.chars().take(60).collect()
+    }
+}
+
+/// Folds a run's own outcome into the shared knowledge every agent reads
+/// from — the "the network learns from what actually happened" loop.
+/// Writes a durable Markdown file under `learnings_dir()` (so a cold
+/// restart / full reindex picks it up too, via the dirs merge in
+/// `commands::knowledge::knowledge_index` and `spawn_default_index_seed`)
+/// AND appends it directly into whatever index is already cached, so the
+/// lesson is retrievable immediately, in the same run, without needing a
+/// full rescan of every registered folder.
+pub async fn record_learning(
+    app_data_dir: &Path,
+    cache: &std::sync::Arc<tokio::sync::Mutex<Option<std::sync::Arc<KnowledgeIndex>>>>,
+    source_title: &str,
+    text: String,
+) -> Result<(), AppError> {
+    let dir = learnings_dir(app_data_dir);
+    tokio::fs::create_dir_all(&dir).await.map_err(|e| AppError::Io {
+        message: format!("could not create {}: {e}", dir.display()),
+    })?;
+    let fname = format!(
+        "{}-{}.md",
+        chrono::Utc::now().format("%Y%m%dT%H%M%SZ"),
+        slugify(source_title)
+    );
+    let content = format!("# {source_title}\n\n{text}\n");
+    crate::util::fs::atomic_write(&dir.join(fname), content.as_bytes()).await?;
+
+    let mut guard = cache.lock().await;
+    let mut idx = match guard.take() {
+        Some(arc) => (*arc).clone(),
+        None => KnowledgeIndex::default(),
+    };
+    idx.append(source_title.to_string(), &text);
+    if let Ok(bytes) = serde_json::to_vec(&idx) {
+        let cache_path = app_data_dir.join(CACHE_FILE);
+        let _ = crate::util::fs::atomic_write(&cache_path, &bytes).await;
+    }
+    *guard = Some(std::sync::Arc::new(idx));
+    Ok(())
+}
+
 /// Best-effort startup seed: if no index is cached yet (first launch, or a
 /// prior run never reindexed), build one from `default_dirs()` alone so
 /// architecture/development stage prompts have real grounding from day one
@@ -341,10 +433,8 @@ pub fn spawn_default_index_seed<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
                 return;
             }
         }
-        let dirs = default_dirs();
-        if dirs.is_empty() {
-            return;
-        }
+        let mut dirs = default_dirs();
+        dirs.push(learnings_dir(&state.app_data_dir));
         let built = match tokio::task::spawn_blocking(move || build_index(&dirs)).await {
             Ok(Ok(idx)) => idx,
             Ok(Err(e)) => {
@@ -549,5 +639,53 @@ mod tests {
         assert_eq!(hits[0].source_title, "mental-models");
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn append_makes_a_new_source_immediately_retrievable() {
+        let mut idx = index_from_texts(&[("OWASP-ASVS", "Authentication requirements for session tokens.")]);
+        assert_eq!(idx.status().source_count, 1);
+
+        idx.append(
+            "Remediación QA — run abc123".to_string(),
+            "La etapa QA no pasó por token de sesión ausente en el header; Development lo agregó y QA aprobó.",
+        );
+
+        let status = idx.status();
+        assert_eq!(status.source_count, 2, "the appended source must show up without rebuilding from disk");
+        let hits = idx.retrieve("token de sesión ausente header", 3);
+        assert!(!hits.is_empty(), "the just-appended learning must be retrievable in the same process");
+        assert_eq!(hits[0].source_title, "Remediación QA — run abc123");
+    }
+
+    #[tokio::test]
+    async fn record_learning_persists_to_disk_and_updates_the_live_cache() {
+        let app_data = std::env::temp_dir().join(format!("knowledge-learning-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&app_data).unwrap();
+        let cache: std::sync::Arc<tokio::sync::Mutex<Option<std::sync::Arc<KnowledgeIndex>>>> =
+            std::sync::Arc::new(tokio::sync::Mutex::new(None));
+
+        record_learning(
+            &app_data,
+            &cache,
+            "Remediación QA — run xyz",
+            "El endpoint de exportación devolvía 500 por un campo nulo; Development lo validó y QA aprobó.".to_string(),
+        )
+        .await
+        .expect("recording a learning with no prior cache should succeed");
+
+        // Persisted to disk under learnings_dir(), so a cold restart's full
+        // reindex (default_dirs() + learnings_dir()) would pick it up too.
+        let files: Vec<_> = std::fs::read_dir(learnings_dir(&app_data)).unwrap().collect();
+        assert_eq!(files.len(), 1, "expected exactly one learning file on disk");
+
+        // Retrievable immediately from the live cache, no reindex needed.
+        let guard = cache.lock().await;
+        let idx = guard.as_ref().expect("cache must be populated after recording a learning");
+        let hits = idx.retrieve("endpoint exportación campo nulo", 3);
+        assert!(!hits.is_empty(), "the recorded learning must be retrievable from the live cache");
+        drop(guard);
+
+        std::fs::remove_dir_all(&app_data).ok();
     }
 }

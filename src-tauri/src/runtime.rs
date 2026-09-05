@@ -2367,6 +2367,30 @@ pub async fn runtime_start(
                                 ),
                             });
                         }
+                        // Black-box-thinking loop: a QA pass that only
+                        // succeeded after at least one prior failure +
+                        // remediation round is exactly the kind of outcome
+                        // that should outlive this run — fold it into the
+                        // shared knowledge library so a similar future
+                        // intent surfaces this as grounding instead of the
+                        // network repeating the same failure blind.
+                        if is_qa && attempt > 1 {
+                            let dev_label = remediation_stage_index(&current, index)
+                                .map(|di| current.stages[di].label.clone())
+                                .unwrap_or_else(|| "Development".to_string());
+                            let learning = format!(
+                                "Intención original: \"{}\"\n\nLa etapa QA (\"{}\") no pasó en el/los primer(os) intento(s) y necesitó {attempt} intento(s) en total. La etapa \"{dev_label}\" aplicó una corrección de remediación entre intentos hasta que QA aprobó.",
+                                current.intent,
+                                current.stages[index].label,
+                            );
+                            let title = format!("Remediación QA — run {}", current.id);
+                            if let Err(e) =
+                                crate::knowledge::record_learning(&app_data, &knowledge_cache, &title, learning)
+                                    .await
+                            {
+                                tracing::warn!("knowledge: no se pudo registrar el aprendizaje de remediación QA: {e}");
+                            }
+                        }
                         passed = true;
                         break;
                     }

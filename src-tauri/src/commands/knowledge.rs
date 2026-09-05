@@ -20,10 +20,12 @@ pub async fn knowledge_status(state: State<'_, AppState>) -> Result<KnowledgeSta
 }
 
 /// Rebuilds the index from scratch over `dirs` (each scanned recursively for
-/// `.pdf`/`.md` files) plus `knowledge::default_dirs()` — the repo's own
-/// curated corpus is always included so a user's own folders are additive,
-/// never a replacement for it — and swaps the result into `AppState` +
-/// persists a JSON cache so the next app launch doesn't have to re-extract
+/// `.pdf`/`.md` files) plus `knowledge::default_dirs()` and
+/// `knowledge::learnings_dir()` — the repo's own curated corpus and the
+/// network's own recorded learnings (see `knowledge::record_learning`) are
+/// always included so a user's own folders are additive, never a
+/// replacement for either — and swaps the result into `AppState` + persists
+/// a JSON cache so the next app launch doesn't have to re-extract
 /// everything. Text extraction is CPU-bound, so it runs in `spawn_blocking`.
 #[tauri::command]
 pub async fn knowledge_index(
@@ -31,6 +33,7 @@ pub async fn knowledge_index(
     state: State<'_, AppState>,
 ) -> Result<KnowledgeStatus, AppError> {
     let mut dir_paths: Vec<PathBuf> = knowledge::default_dirs();
+    dir_paths.push(knowledge::learnings_dir(&state.app_data_dir));
     dir_paths.extend(dirs.into_iter().map(PathBuf::from));
     let built: KnowledgeIndex = tokio::task::spawn_blocking(move || knowledge::build_index(&dir_paths))
         .await
