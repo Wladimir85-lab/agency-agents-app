@@ -4438,6 +4438,74 @@ mod tests {
         assert_eq!(run.terminal_state, None);
     }
 
+    // ---- Requisito 6 closure (2026-09-04): real E2E proving the exact
+    // wire shape the frontend's JobState type must parse. Uses the same
+    // AppError construction runtime_start's real "no provider configured"
+    // branch uses (capability_id/message format copied verbatim from
+    // line ~2298 above), not an approximation — so this is the literal
+    // JSON a human's UI would receive for the real scenario the mandate
+    // named (falta de ejecutor configurado), persisted to real disk. The
+    // matching frontend assertion lives in
+    // src/lib/stores/session.svelte.test.ts, parsing this exact shape. ----
+    #[tokio::test]
+    async fn e2e_real_disk_a_missing_provider_job_persists_the_exact_wire_shape_the_frontend_parses(
+    ) {
+        let app_data = tempfile::tempdir().unwrap();
+        let state = test_state(app_data.path());
+        let run_id = Uuid::new_v4().to_string();
+        let mut run = base_run_for_job_state_tests(&run_id, RunStatus::Running);
+        run.stages[2].status = "running".into();
+
+        // The exact real-production error shape (runtime.rs ~line 2298:
+        // the primary stage dispatch's "no provider configured" branch),
+        // not a hand-simplified stand-in.
+        let real_error = AppError::CapabilityProviderUnavailable {
+            capability_id: format!("stage.{}", run.stages[2].kind),
+            message: format!(
+                "La etapa '{}' requiere un ejecutor externo (Codex o Claude) que no fue configurado para esta corrida; deteniendo de forma controlada.",
+                run.stages[2].label
+            ),
+        };
+        let terminal_state = classify_app_error(&real_error);
+        assert!(matches!(terminal_state, JobState::HumanDecisionRequired(_)));
+        fail_run(
+            &mut run,
+            2,
+            &real_error.to_string(),
+            terminal_state,
+        );
+        persist(&state, &run)
+            .await
+            .expect("must persist the real HumanDecisionRequired job to real disk");
+
+        let reread = load_run(&state, &run.id)
+            .await
+            .expect("must load the persisted job back from real disk");
+        assert!(matches!(
+            reread.terminal_state,
+            Some(JobState::HumanDecisionRequired(_))
+        ));
+
+        // The literal JSON, byte for byte, that crosses the Tauri IPC
+        // boundary to the frontend — this is what
+        // session.svelte.test.ts's fixture must match exactly.
+        let raw = tokio::fs::read_to_string(run_path(&state, &run.id))
+            .await
+            .unwrap();
+        assert!(
+            raw.contains("\"terminalState\""),
+            "the persisted JSON must carry a camelCase terminalState key the frontend type expects: {raw}"
+        );
+        assert!(
+            raw.contains("\"humanDecisionRequired\""),
+            "the persisted JSON must carry the exact discriminant the frontend's JobState union matches on: {raw}"
+        );
+        assert!(
+            raw.contains("requiere un ejecutor externo"),
+            "the real, human-readable detail must survive to disk verbatim: {raw}"
+        );
+    }
+
     // ---- Real E2E, no mocks: JOB-level operational responsibility against
     // real disk I/O (crash reconciliation) and, separately, a real Claude
     // Code stage carried all the way to a persisted ResultVerified JOB. ----

@@ -46,8 +46,22 @@ export function buildConversationalIntent(messages: ConversationMessage[], instr
 
 /** Esmeralda's own reply after a turn finishes — persisted back into the
  *  conversation so the next turn's context (and the visible chat) carries
- *  what actually happened, not just what was asked for. */
+ *  what actually happened, not just what was asked for.
+ *
+ *  Requisito 6 closure (2026-09-04): `terminalState` is checked *before*
+ *  falling back to the plain `status`-based branches below, so a run that
+ *  IntentOS classified as `humanDecisionRequired` (e.g. no external
+ *  executor configured for a stage that needs one) reads as a real
+ *  question waiting on Wladimir, never as "something broke" — the
+ *  distinction the backend already computes (`runtime.rs`'s
+ *  `classify_app_error`/`JobState`) must not disappear at the one place a
+ *  human actually reads it. A run with no `terminalState` at all (legacy,
+ *  or not yet reclassified) falls straight through to the original
+ *  status-based behavior, unchanged. */
 export function summarizeRunForEsmeralda(run: RunSummary): string {
+  if (run.terminalState?.state === "humanDecisionRequired") {
+    return `Necesito que decidas algo antes de seguir: ${run.terminalState.detail} Esto no es una falla técnica — IntentOS está esperando tu decisión o configuración para continuar.`;
+  }
   if (run.status === "succeeded") {
     const passed = run.stages.filter((s) => s.status === "passed").length;
     return `Listo — construí y verifiqué esta instrucción (${passed}/${run.stages.length} etapas superadas). Puedes verlo en el Showroom, pedirme otro ajuste, o aplicar los cambios al proyecto original cuando quieras.`;

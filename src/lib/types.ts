@@ -426,6 +426,18 @@ export interface RuntimeProvider {
 
 export type RunStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled";
 
+/** IntentOS's own authoritative classification of a JOB's operational
+ *  state (see runtime.rs's `JobState`) — never the model's or the
+ *  executor's claim. Absent while the run is still active. Mirrors the
+ *  Rust enum's adjacently-tagged shape exactly: the unit variant carries
+ *  no `detail`, the other two always do. Requisito 6 closure (2026-09-04):
+ *  this must be surfaced distinctly from a generic technical failure, not
+ *  collapsed into the same "failed" red text. */
+export type JobState =
+  | { state: "resultVerified" }
+  | { state: "humanDecisionRequired"; detail: string }
+  | { state: "blockedWithEvidence"; detail: string };
+
 export interface RunStage {
   id: string;
   label: string;
@@ -478,6 +490,10 @@ export interface RunSummary {
   updatedAt: string;
   completedAt: string | null;
   error: string | null;
+  /** Absent on any run persisted before this field existed, or before the
+   *  backend has had a chance to (re)classify it — never assume presence.
+   *  See `JobState`. */
+  terminalState?: JobState | null;
 }
 
 /** Esmeralda's persistent memory for one project — see session.rs. Replaces
