@@ -211,7 +211,7 @@
       const picked = await openDialog({ multiple: true, directory: false, title: "Adjuntar activos al brief de producción", filters: [{ name: "Activos de producción", extensions: ["png", "jpg", "jpeg", "webp", "svg", "pdf", "docx", "txt", "md", "csv", "xlsx", "json"] }] });
       const paths = typeof picked === "string" ? [picked] : (picked ?? []);
       attachments = [...new Set([...attachments, ...paths])];
-    } catch (e) { toast.error("No se pudieron adjuntar los archivos", String(e)); }
+    } catch (e) { toast.error("No se pudieron adjuntar los archivos", readableError(e)); }
   }
 
   function fileName(path: string): string { return path.split(/[\\/]/).pop() ?? path; }
@@ -546,7 +546,7 @@
   }
   async function reviewWorkspace() {
     try { await runs.reviewCurrent(); }
-    catch (e) { toast.error("No se pudo comparar la copia de trabajo", String(e)); }
+    catch (e) { toast.error("No se pudo comparar la copia de trabajo", readableError(e)); }
   }
   async function applyWorkspace() {
     if (!runs.review) await reviewWorkspace();
@@ -560,24 +560,32 @@
       // protected original, it does not end the conversation.
       if (projectPath) await session.appendMessage(projectPath, "system", `${changeCount} cambios aplicados al proyecto original, con backup de seguridad.`);
       toast.success("Cambios aplicados con backup de seguridad");
-    } catch (e) { toast.error("No se pudieron aplicar los cambios", String(e)); }
+    } catch (e) { toast.error("No se pudieron aplicar los cambios", readableError(e)); }
   }
   async function loadDeliveryReceipt() {
     try { await runs.loadReceipt(); }
-    catch (e) { toast.error("No se pudo construir el comprobante de entrega", String(e)); }
+    catch (e) { toast.error("No se pudo construir el comprobante de entrega", readableError(e)); }
   }
   async function discardWorkspace() {
     if (!confirm("Se eliminará toda la copia de trabajo de esta conversación (todos los turnos aún no aplicados). El proyecto original y los registros de evidencia se conservarán. La próxima instrucción partirá de una copia nueva del proyecto original. ¿Descartar copia?")) return;
     try {
-      await runs.discardCurrentWorkspace();
+      // Stop the preview dev-server BEFORE trying to delete the directory
+      // it's serving — real bug found live 2026-09-06: on Windows, a still-
+      // running preview process holds file handles open inside the
+      // workspace, so `remove_dir_all` fails with "access denied" and the
+      // discard silently never completes. The next turn then builds a
+      // fresh workspace copy on top of the one that was never actually
+      // removed, which is what looked like IntentOS "still making fake
+      // copies" no matter how many times discard was pressed.
       await preview.stop();
       await publicPreview.stop();
+      await runs.discardCurrentWorkspace();
       if (projectPath) {
         await session.appendMessage(projectPath, "system", "Copia de trabajo descartada. La próxima instrucción parte de una copia nueva del proyecto original.");
         await session.loadOrCreate(projectPath); // resync: backend cleared the session's workspace pointer too
       }
       toast.success("Copia de trabajo descartada");
-    } catch (e) { toast.error("No se pudo descartar la copia", String(e)); }
+    } catch (e) { toast.error("No se pudo descartar la copia", readableError(e)); }
   }
 </script>
 
