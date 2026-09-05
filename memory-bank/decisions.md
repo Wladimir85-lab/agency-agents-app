@@ -395,3 +395,41 @@ infrastructure finding surfaced along the way: this machine's low free RAM (1.2 
 7.8 GiB) caused two transient Ollama connection failures at the Direction→Architecture
 transition, fixed for this session via `OLLAMA_KEEP_ALIVE=30m` (relaunching `ollama serve`
 directly). Rust 431/0/13, Svelte/TS 0/0/0.
+
+### 2026-09-04: JOB-level terminal states are exactly three, with no fourth "Active" variant
+**Status**: Approved. **Context**: the runtime already had `RunStatus` (Queued/Running/
+Succeeded/Failed/Cancelled) and, as of this same session, `StageCompletionDiagnosis` at the
+stage/attempt level - but nothing above the stage decided, authoritatively, when a whole JOB
+had actually stopped being IntentOS's operational responsibility. A run could stay `Running`
+forever in persisted disk state after the process executing it crashed, and a QA-exhausted
+failure looked identical to a "no external executor configured" failure - the latter is a
+human decision waiting to happen, not a technical break. **Alternatives considered**: (A) a
+`JobState` enum with an explicit `Active` variant alongside the three terminals - rejected as
+redundant data that can drift from the truth; "active" is fully and unambiguously derivable as
+`RunSummary.terminal_state == None`, so adding a stored `Active` value would just be a second
+place the same fact could go stale. (B) A generic `stuck detector` modeled on OpenHands',
+analyzing action/observation repetition across the whole job - rejected for this cycle because
+every existing per-stage ceiling (`MAX_ITERATIONS`, `MAX_STAGE_SECONDS`, `MAX_STAGE_RUNTIME`)
+already bounds total possible JOB duration; there is no live "infinite stuck job" risk to guard
+against, only the crash case below. (C) OS-level process-tree tracking (Windows Job Objects) to
+directly observe grandchild processes an external CLI spawns - rejected for this cycle as
+unsafe FFI with real stability risk, disproportionate to what this pass needed; recorded as a
+named, scoped follow-up, not silently dropped. **Decision**: `JobState` has exactly three
+variants (`ResultVerified`, `HumanDecisionRequired(reason)`, `BlockedWithEvidence(reason)`),
+stored as `RunSummary.terminal_state: Option<JobState>`, computed authoritatively by
+`normalize_terminal_state` (evolved, not duplicated, from the pre-existing cosmetic-cleanup
+function of the same name) from real evidence: per-stage status agreement before trusting a
+`Succeeded` label, the specific `AppError` variant behind a failure
+(`AppError::CapabilityProviderUnavailable` → `HumanDecisionRequired`, everything else →
+`BlockedWithEvidence`), and - the concrete fix for the crash case - whether `AppState.
+runtime_jobs` (the existing live-task table) actually still contains the run's id. A
+`Queued`/`Running` run with no live task backing it is reclassified to `BlockedWithEvidence`
+the next time anyone reads it (`load_run`/`runtime_list`), and the correction is persisted back
+so it only has to happen once. The model's/executor's own claim never controls `JobState` -
+only the runtime's own evidence does. **Consequences**: closes the two real incidents that
+motivated the audit (npm-install-left-pending framed at the JOB level, and ambiguous
+Running-forever runs) with a mechanism that self-heals on next read rather than requiring an
+active watchdog process. Frontend surfacing of `HumanDecisionRequired` (Requisito 6, same
+session, commit `89a1ed2`) depends on this shape being stable - changing `JobState`'s variants
+later must also update `types.ts`'s discriminated union and `summarizeRunForEsmeralda`. Rust
+464→476 across the session's four implementation commits (P0/P1.1/P1.2/JOB-level), 0 failed.

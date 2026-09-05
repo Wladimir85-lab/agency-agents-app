@@ -893,3 +893,39 @@ Rust 431 passed / 0 failed / 13 ignored (up from 422/0/13 earlier this same sess
 Svelte/TS 0 errors / 0 warnings, unchanged. Files touched: `local_model.rs`, `local_agent.rs`
 only this pass. Stopped here deliberately per explicit instruction ("paremos aquí por hoy")
 rather than continuing to a bigger model or a stage redesign.
+
+## 2026-09-04 — Runtime engineering audit → JOB-level operational responsibility (six commits)
+
+Full detail in `activeContext.md` (top section, new) and a new ADR in `decisions.md`. Summary:
+a formal audit against all 10 of Wladimir's named runtime-reliability requirements (provider
+routing, executor↔runtime contract, agentic loop, resume/recovery, reality-based completion,
+human decision points, in-context learning, knowledge capitalization, replaceable models/
+Esmeralda, NVIDIA/NeMo) — Fase 0 baseline → Fase 1 pipeline map → Fase 2 gap analysis
+(including a sourced Devin/OpenHands/SWE-agent comparative study) → Fase 3 implementation.
+All 10 closed. Six commits on `main`:
+
+`4791aa6` executor↔runtime contract for external-CLI stages (`StageCompletionOutcome`,
+workspace-evidence-checked before trusting a claimed PASS, real E2E vs. live Claude Code).
+`cc5dbfd` observability — closed the "did OpenAI replace Claude" suspicion for good (it never
+did; Groq's open-weight model is literally named `openai/gpt-oss-120b`, unrelated to OpenAI's
+own API) with a `purpose` tag + stage-executor-start logging. `8204421` split MODEL CLAIM
+(`GateMarker`, now with a real `Missing` state) from OBJECTIVE EVIDENCE (`ObjectiveEvidence`).
+`f90bf29` JOB-level `JobState` (`ResultVerified`/`HumanDecisionRequired`/`BlockedWithEvidence`)
+on `RunSummary.terminal_state`, with `normalize_terminal_state` reconciling a persisted
+`Running` run against `AppState.runtime_jobs`'s live-task table — fixes "a run stays Running
+forever after the app that was executing it crashes." Two real E2E tests (crash reconciliation
+against real disk; a real Claude Code job to a persisted `ResultVerified`). `be94bc0` encoded
+the "IntentOS translates intention, doesn't just generate code" thesis as tested data in
+`fabric.rs` (existing `principle` field + new `translation_pipeline`), not a new system.
+`89a1ed2` closed the gap where the backend had the right semantics but the human still saw a
+generic red failure either way — `terminalState` now crosses the IPC boundary into `types.ts`
+and renders distinctly (warning-toned, not error-toned) in `Runbooks.svelte`/
+`summarizeRunForEsmeralda`, verified with an E2E whose frontend fixture is the *exact* JSON
+string captured from a real Rust E2E run.
+
+Verdict: `cargo test --lib` 476 passed / 0 failed / 17 ignored (up from 455/0/15 at session
+start). `npm run check` 496 files / 0 errors. `vitest` 26 passed (up from 21). Deliberately not
+done: Windows Job Object process-tree tracking (scoped as a real follow-up), Learning Points as
+a visible feature, generalized HITL, semantic resume matching, any NeMo/OpenHands/SWE-agent
+dependency, capability-catalog expansion, `KnowledgeCandidate`/P1.3 (designed, not built), a
+larger Esmeralda refactor.

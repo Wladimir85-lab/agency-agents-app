@@ -1,5 +1,115 @@
 # Active Context — Agency Agents
 
+## Runtime engineering audit + JOB-level operational responsibility — 2026-09-04
+
+**Read this before every section below** — it supersedes the "Architecture blocked" framing
+of the 2026-09-03 entry (Architecture now completes; see the foreground-execution fix below)
+and closes out the "what's left" items from several earlier sessions with real, tested,
+committed code, not just analysis.
+
+**Earlier the same day, before this documented session** (commits `299308a`..`68be1d8`, not
+narrated here in detail — read those commits directly if you need the why): hybrid intent
+routing (keyword fast path + semantic fallback via DeepSeek after Groq was tried and reverted),
+`creativeTechnologyJustified` prompt tightened against false positives, an explicit provider
+now allowed to run direction/architecture/development (not just qa/reality), Claude Code
+preferred over Codex when both probe available, stage agents told to run blocking commands in
+the foreground (`stage_prompt`'s "single non-interactive turn" paragraph — this is what
+actually unblocked Architecture), and two dangling agent refs + three dormant corpus personas
+repaired/connected.
+
+**This session's mandate**: Wladimir asked for a from-first-principles audit of the runtime
+against a formal "Constitución de Trabajo Profesional Asistido por IA" (not written into this
+repo — it's a standing instruction to Claude across sessions) plus an operational-autonomy
+addendum whose authoritative hierarchy is **LLM RESPONSE ≠ AGENT TURN ≠ STAGE ≠ TASK ≠ JOB
+COMPLETED**. Real incidents motivated it: a background `npm install` left pending after a
+one-shot Claude Code turn ended with no future turn to resume it; a suspicion that OpenAI had
+silently replaced Claude as executor; ambiguous run states with no deliberate terminal
+semantics. Methodology: Fase 0 (baseline, 455 tests clean) → Fase 1 (full pipeline map,
+UI→intent→routing→executor→stages→QA→persistence, each piece classified EXISTS-WORKS / WEAK /
+DISCONNECTED / MISSING, against all 10 of Wladimir's named requirements) → Fase 2 gap analysis
+(P0-P3, plus a sourced comparative study of Devin/OpenHands/SWE-agent's job-completion
+mechanisms — principles extracted, nothing adopted as a dependency) → Fase 3 implementation.
+All 10 requirements closed this session; six real commits landed on `main`:
+
+1. **`4791aa6` — executor↔runtime contract (P0)**: for external-CLI (Claude Code/Codex)
+   stages, a claimed `INTENTOS_GATE:PASS` is now checked against a real before/after workspace-
+   manifest diff (`StageCompletionOutcome`/`StageCompletionDiagnosis` in `runtime.rs`) before
+   being trusted — evidence can only ever downgrade a false-positive PASS, never manufacture one
+   out of a genuine FAIL. A deferred-continuation text heuristic is advisory-only (never gates on
+   its own, so a legitimate long-lived background process like a dev-server preview can't cause
+   a false FAIL). Real E2E against the live Claude Code CLI (wrote a real file, real PASS, real
+   evidence). **Documented, not fixed**: IntentOS still cannot see grandchild processes an
+   external CLI spawns internally — a Windows Job Object would close this, scoped as a real
+   follow-up, not attempted this cycle (unsafe FFI, stability risk not justified yet).
+2. **`cc5dbfd` — observability (P1.1)**: root-caused and closed the "did OpenAI replace Claude"
+   suspicion — it never did. Groq's open-weight model is literally named `openai/gpt-oss-120b`
+   (OpenAI publishes it open-weight; Groq serves it; unrelated to OpenAI's own paid API), and a
+   real 429 from Groq's free-tier rate limit reads exactly like "falló por cuota." Added a
+   caller-declared `purpose` tag on `local_model_complete` (the classifier now tags itself
+   `capability_classifier`) and a "stage executor starting" log line in
+   `run_claude_stage`/`run_codex_stage` — a classifier call and a stage-executor run can no
+   longer be conflated even by someone just grepping logs.
+3. **`8204421` — MODEL CLAIM vs OBJECTIVE EVIDENCE (P1.2)**: `GateMarker` (Pass/Fail/**Missing**
+   — a process ending with no verdict at all is now distinguishable from an explicit FAIL) and
+   `ObjectiveEvidence` (currently just `workspace_changed`, deliberately not more — build/test-
+   exit-code/Playwright checks are a real, named extension point for later, not stubbed as an
+   always-`None` field) persisted alongside the final diagnosis in
+   `{stage}-{attempt}.completion.json`.
+4. **`f90bf29` — JOB-level operational responsibility**: the JOB-level instance of the
+   LLM-response≠...≠job-completed hierarchy. `JobState` (`ResultVerified` /
+   `HumanDecisionRequired(reason)` / `BlockedWithEvidence(reason)` — deliberately no fourth
+   "Active" variant; being active is simply `RunSummary.terminal_state == None`) on
+   `RunSummary.terminal_state`. `normalize_terminal_state` (pre-existing, only did cosmetic
+   stage-status cleanup before) now also reconciles a persisted `Queued`/`Running` run against
+   `AppState.runtime_jobs` (the live-task table) and reclassifies it to `BlockedWithEvidence` if
+   the process that was actually executing it is confirmed dead — **the concrete fix for "a run
+   stays Running forever in disk state after the app that was running it crashed."**
+   `AppError::CapabilityProviderUnavailable` (already existed, already documented, never
+   connected to anything) now correctly classifies as `HumanDecisionRequired` instead of a
+   generic failure via a new `classify_app_error`. Two real E2E tests: a crashed-job disk-
+   reconciliation run (persists a `Running` run with no live task, reads it back, independently
+   re-reads the raw file to prove the correction landed on disk) and a real Claude Code job
+   carried all the way to a persisted `ResultVerified`.
+5. **`be94bc0` — translation-principle encoded in `fabric.rs`**: a second constitutional
+   addendum ("IntentOS translates human intention into verified computational results; code/
+   models/tools are replaceable mechanisms, not the system's identity — not fundamentally a code
+   generator") is now real, tested data in `fabric.rs`'s existing `FabricStatus.principle` string
+   plus a new ordered `translation_pipeline` field, not just a comment — a test fails if
+   `principle` ever again reduces to "generates code." No new capability catalog, RAG, or plugin
+   system — explicitly out of scope for this addendum.
+6. **`89a1ed2` — Requisito 6 closure**: `terminalState` now actually crosses the Tauri IPC
+   boundary into `types.ts` and the frontend. Before this, the backend had the right semantics
+   but a `HumanDecisionRequired` run rendered identically to a technically-broken one — same
+   generic red "failed" text either way, which is operational autonomy without an unambiguous
+   human signal, i.e. not real soberanía humana. `summarizeRunForEsmeralda` (the one function
+   that writes Esmeralda's chat message) and `Runbooks.svelte`'s run-error paragraph now
+   distinguish it (warning-toned, "no es una falla técnica, necesito tu decisión") without any
+   new UI system — reused the existing `--color-warning` token already used elsewhere in the app.
+   `vitest.config.ts` gained the `sveltekit()` plugin (first test to need Svelte-rune/`$lib`
+   resolution — anticipated by that file's own prior comment). Real E2E: a Rust test builds the
+   exact production `AppError::CapabilityProviderUnavailable`, persists it, and asserts the
+   literal JSON shape; the frontend test parses that *exact* captured string, so backend and
+   frontend are proven to agree on the wire shape, not just assumed to.
+
+**Surprising finding worth remembering**: Esmeralda's chat "voice" is 100% deterministic
+templated Spanish text (`summarizeRunForEsmeralda`) over real `RunSummary` data — there is
+currently no LLM call anywhere that generates what she "says." Not a bug; just don't assume
+more conversational intelligence exists there than actually does when reasoning about future
+work in this area.
+
+**Verified**: `cargo test --lib` 476 passed / 0 failed / 17 ignored (was 455/0/15 at this
+session's start). `npm run check` 496 files / 0 errors. `vitest` 26 passed (was 21). Every real
+E2E in this list was actually executed against the live Claude Code CLI or real disk I/O, not
+only asserted as unit tests.
+
+**Deliberately not done this session** (explicit scope decisions, not oversights — don't
+"discover" these as gaps and rebuild them without checking this note first): Learning Points as
+a visible feature, generalized HITL beyond Mission approval, semantic (non-exact-text) resume
+matching, any NeMo/OpenHands/SWE-agent integration as a dependency, capability-catalog
+expansion, new UI panels beyond the minimal Requisito 6 fix, a large Esmeralda refactor, and
+`KnowledgeCandidate`/P1.3 knowledge capitalization (designed conceptually in this session's
+discussion, never built).
+
 ## Ollama backend + evidence-driven guards — Direction reliable, Architecture blocked — 2026-09-03
 
 **Read this before the Groq section below** — it's the same session, continued, and
