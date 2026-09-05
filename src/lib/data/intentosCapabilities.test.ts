@@ -12,6 +12,7 @@ import {
   composePipeline,
   CREATIVE_TECH_SPECIALIZATIONS,
   INTENTOS_CAPABILITIES,
+  isConversationalMessage,
   planSolution,
   planSolutionAsync,
   routeIntent,
@@ -283,5 +284,25 @@ describe("architecture audit fixes — dormant corpus personas connected, broken
     const capabilities = [INTENTOS_CAPABILITIES.find((c) => c.id === "ai-agents")!];
     const stages = composePipeline(capabilities, "Necesito un chatbot con RAG sobre mis documentos internos.");
     expect(stages.find((s) => s.kind === "development")?.agent).toBe("engineering-ai-engineer");
+  });
+});
+
+describe("isConversationalMessage — real chat with Esmeralda vs. a build instruction (2026-09-04)", () => {
+  it("a plain greeting is chat, not a build instruction", () => {
+    expect(isConversationalMessage("hola esmeralda")).toBe(true);
+    expect(isConversationalMessage("¿cómo estás?")).toBe(true);
+    expect(isConversationalMessage("gracias!")).toBe(true);
+  });
+
+  it("an explicit build/change instruction is never treated as chat", () => {
+    expect(isConversationalMessage("quiero construir una landing page para mi estudio")).toBe(false);
+    expect(isConversationalMessage("necesito un dashboard administrativo")).toBe(false);
+    expect(isConversationalMessage("arregla el error del formulario de contacto")).toBe(false);
+    expect(isConversationalMessage("agrega un botón para exportar a PDF")).toBe(false);
+  });
+
+  it("an empty or whitespace-only message is chat (nothing to build)", () => {
+    expect(isConversationalMessage("")).toBe(true);
+    expect(isConversationalMessage("   ")).toBe(true);
   });
 });

@@ -75,6 +75,97 @@ export function summarizeRunForEsmeralda(run: RunSummary): string {
   return `Estado actual: ${run.status}.`;
 }
 
+/** Esmeralda's real conversational reply (2026-09-04 — "quiero que
+ *  Esmeralda pueda responder"). Until this, `summarizeRunForEsmeralda`'s
+ *  fixed templates were the only thing that ever appeared as her message
+ *  — no model ever generated anything she "said". This function keeps
+ *  that fact-generator as the untouchable ground truth (what actually
+ *  happened is never left to a model to decide or invent) and asks the
+ *  already-configured completion engine — `local_model_complete`, the
+ *  same generic command the rest of the app already uses, on whichever
+ *  backend Esmeralda's own build/conversation engine currently points to
+ *  (see local_model.rs's `InferenceBackend`) — to phrase those exact
+ *  facts naturally, with real conversational context. Reuses the
+ *  classifier's own completion command deliberately, not a new one:
+ *  "ya todo está inventado" — the primitive already exists.
+ *
+ *  Falls back to the deterministic fact string verbatim on *any* failure
+ *  (Paranoid Mode, no backend configured, network blocked, malformed
+ *  reply) — Esmeralda must always answer with something real, never
+ *  silence, and never a phrasing that could drift from the actual
+ *  outcome. */
+export async function narrateRunForEsmeralda(
+  run: RunSummary,
+  priorMessages: ConversationMessage[],
+): Promise<string> {
+  const facts = summarizeRunForEsmeralda(run);
+  const context = priorMessages
+    .slice(-MAX_CONTEXT_MESSAGES)
+    .map((m) => `${ROLE_LABEL[m.role]}: ${preview(m.content)}`)
+    .join("\n");
+  const prompt = [
+    "Eres Esmeralda, la inteligencia conversacional de IntentOS. Un usuario te pidió construir algo y esa etapa de trabajo acaba de terminar.",
+    "",
+    "HECHOS REALES DE ESTE RESULTADO (no inventes nada fuera de esto, no cambies ni suavices el resultado real):",
+    facts,
+    context ? `\nCONVERSACIÓN PREVIA CON ESTE USUARIO:\n${context}` : "",
+    "",
+    "Respóndele ahora en español, en primera persona, en 1 a 3 frases, con un tono cercano y directo — como si fueras vos quien construyó esto. Comunica exactamente los hechos reales de arriba, sin inventar ni un resultado distinto ni detalles que no están ahí.",
+  ].join("\n");
+  try {
+    const completion = await invoke<{ content: string }>("local_model_complete", {
+      request: { prompt, maxTokens: 220, purpose: "esmeralda_conversational_reply" },
+    });
+    const reply = completion.content.trim();
+    return reply || facts;
+  } catch (error) {
+    console.warn(
+      "[session] Esmeralda's conversational reply is unavailable right now (Paranoid Mode, no backend configured, or a real error) — falling back to the deterministic report:",
+      error,
+    );
+    return facts;
+  }
+}
+
+/** Esmeralda's reply to a plain conversational message — no run, no
+ *  Mission, no build involved (2026-09-04 — "quiero que sea un chat junto
+ *  a la entrada... digo hola esmeralda, ella responde, y de ahí le digo
+ *  quiero construir x cosa"). Its one call site (Runbooks.svelte's
+ *  `sendTurn`) only reaches this for messages `isConversationalMessage`
+ *  (intentosCapabilities.ts) classified as chat, not a build instruction
+ *  — this function never decides that itself, and never starts anything.
+ *  Same completion primitive and fallback discipline as
+ *  `narrateRunForEsmeralda`: if the model is unavailable for any reason,
+ *  a real (if generic) reply is still returned — never silence. */
+export async function replyToEsmeraldaChat(
+  text: string,
+  priorMessages: ConversationMessage[],
+): Promise<string> {
+  const context = priorMessages
+    .slice(-MAX_CONTEXT_MESSAGES)
+    .map((m) => `${ROLE_LABEL[m.role]}: ${preview(m.content)}`)
+    .join("\n");
+  const prompt = [
+    "Eres Esmeralda, la inteligencia conversacional y soberana de IntentOS. Un usuario te está hablando — todavía no te pidió construir nada en este mensaje.",
+    context ? `\nCONVERSACIÓN PREVIA CON ESTE USUARIO:\n${context}` : "",
+    `\nMENSAJE NUEVO DEL USUARIO:\n${text.trim()}`,
+    "\nRespóndele en español, en primera persona, en 1 a 3 frases, con un tono cercano y natural — como una conversación real, no un formulario. Si simplemente te está saludando o charlando, respóndele igual de natural; no le exijas que 'construya algo'. Si en este mensaje sí te pide construir, crear o cambiar algo concreto, dile que puede describirlo con más detalle y vas a preparar la propuesta.",
+  ].join("\n");
+  try {
+    const completion = await invoke<{ content: string }>("local_model_complete", {
+      request: { prompt, maxTokens: 220, purpose: "esmeralda_conversational_reply" },
+    });
+    const reply = completion.content.trim();
+    return reply || "Hola — dime en qué te ayudo.";
+  } catch (error) {
+    console.warn(
+      "[session] Esmeralda's chat reply is unavailable right now (Paranoid Mode, no backend configured, or a real error):",
+      error,
+    );
+    return "Hola — puedo conversar contigo o construir lo que necesites; contame qué tenés en mente.";
+  }
+}
+
 class SessionStore {
   current: ProjectSession | null = $state(null);
   loading = $state(false);

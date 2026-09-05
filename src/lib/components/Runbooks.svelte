@@ -18,8 +18,8 @@
   import { publicPreview } from "$lib/stores/publicPreview.svelte";
   import { toast } from "$lib/stores/toast.svelte";
   import { ui } from "$lib/stores/ui.svelte";
-  import { CREATION_CATALOG, findCatalogProduct, INTENTOS_CAPABILITIES, planSolutionAsync } from "$lib/data/intentosCapabilities";
-  import { session, buildConversationalIntent, summarizeRunForEsmeralda } from "$lib/stores/session.svelte";
+  import { CREATION_CATALOG, findCatalogProduct, INTENTOS_CAPABILITIES, isConversationalMessage, planSolutionAsync } from "$lib/data/intentosCapabilities";
+  import { session, buildConversationalIntent, narrateRunForEsmeralda, replyToEsmeraldaChat } from "$lib/stores/session.svelte";
   import type { SolutionProposal } from "$lib/data/intentosCapabilities";
   import type { Agent, AutomaticProject, Mission, RunEvent } from "$lib/types";
 
@@ -141,7 +141,9 @@
     if (run.status !== "succeeded" && run.status !== "failed" && run.status !== "cancelled") return;
     if (summarizedRunId === run.id) return;
     summarizedRunId = run.id;
-    void session.appendMessage(run.projectPath, "esmeralda", summarizeRunForEsmeralda(run), run.id);
+    void narrateRunForEsmeralda(run, session.messages).then((message) =>
+      session.appendMessage(run.projectPath, "esmeralda", message, run.id),
+    );
   });
   // The composer never blocks: a message sent while Esmeralda is already
   // building goes to `session.queue` instead (see sendChatMessage). This is
@@ -323,8 +325,26 @@
   /** A chat turn on a project already in conversation: compute the
    *  proposal and immediately build, no manual "Aprobar y construir" click.
    *  Reuses prepareProposal()/approveAndStart() untouched — this only
-   *  chains them and clears the composer once the turn actually started. */
+   *  chains them and clears the composer once the turn actually started.
+   *
+   *  2026-09-04 — real chat with Esmeralda: a message classified as plain
+   *  conversation (`isConversationalMessage`) never reaches
+   *  prepareProposal/Mission/runs.start at all — Esmeralda just replies,
+   *  the same way a person would say "hola" back before you describe what
+   *  you actually want built. Only gated on `projectPath` already existing
+   *  (an established conversation) — a brand-new project's very first
+   *  message keeps today's behavior unchanged, since deciding whether a
+   *  first-ever message should even create a project is a different,
+   *  bigger question this change doesn't attempt to answer. */
   async function sendTurn(text: string) {
+    if (projectPath && isConversationalMessage(text)) {
+      await session.loadOrCreate(projectPath);
+      const priorMessages = session.messages;
+      await session.appendMessage(projectPath, "user", text);
+      const reply = await replyToEsmeraldaChat(text, priorMessages);
+      await session.appendMessage(projectPath, "esmeralda", reply);
+      return;
+    }
     intent = text;
     await prepareProposal();
     if (validation || !proposal) return;

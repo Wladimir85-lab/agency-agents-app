@@ -428,6 +428,35 @@ export function routeIntent(text: string): { capability: IntentOSCapability; cap
   return { capability, capabilities, confidence, matched: best.matched, ranked };
 }
 
+// Deliberately simple and Spanish-specific — a real build/change request
+// almost always carries an action verb like these, so their absence is a
+// cheap, honest signal, not a heavy classifier of its own.
+const BUILD_INTENT_PATTERN =
+  /\b(constru\w*|cre[ae]\w*|hac\w*|dise[ñn]\w*|desarroll\w*|implement\w*|agreg\w*|a[ñn]ad\w*|sum[ae]\w*|cambi\w*|modific\w*|corri?g\w*|arregl\w*|repar\w*|mejor\w*|actualiz\w*|borr\w*|elimin\w*|quit\w*|gener\w*|mont\w*|arm\w*|configur\w*|integr\w*|conect\w*|quiero|necesito)\b/i;
+
+/** Whether a message is casual conversation with Esmeralda rather than a
+ *  build/change instruction (2026-09-04 — "quiero que sea un chat junto a
+ *  la entrada"). Same hybrid-router spirit as `routeIntent` above: a cheap
+ *  deterministic fast path, reusing signals that already exist
+ *  (`routeIntent`'s own `confidence`) rather than a new classifier call.
+ *
+ *  A message counts as a build instruction if it either matches a
+ *  recognizable action verb (`BUILD_INTENT_PATTERN`) or `routeIntent`
+ *  finds a real capability-keyword match (`confidence > 0`) — otherwise
+ *  it's chat. The asymmetry is deliberate: a false "chat" verdict just
+ *  means Esmeralda replies conversationally and the user restates the
+ *  instruction more explicitly (no worse than today's behavior for an
+ *  unmatched intent); a false "build" verdict would spend a real Mission
+ *  and a full 5-stage run on a greeting, which is the actual problem this
+ *  function exists to prevent. Never called for the initial project-
+ *  creation turn — see its one call site in Runbooks.svelte. */
+export function isConversationalMessage(text: string): boolean {
+  const trimmed = text.trim();
+  if (!trimmed) return true;
+  if (BUILD_INTENT_PATTERN.test(trimmed)) return false;
+  return routeIntent(trimmed).confidence === 0;
+}
+
 /** Whether the deterministic fast path above is trustworthy enough to skip
  *  the semantic fallback entirely — the hybrid router's only gate on
  *  calling the LLM at all, so it must stay cheap and conservative in both
