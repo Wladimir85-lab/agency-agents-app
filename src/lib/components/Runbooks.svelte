@@ -2,7 +2,6 @@
   import { onMount } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
   import { open as openDialog } from "@tauri-apps/plugin-dialog";
-  import PlayIcon from "@lucide/svelte/icons/play";
   import PaperclipIcon from "@lucide/svelte/icons/paperclip";
   import XIcon from "@lucide/svelte/icons/x";
   import SquareIcon from "@lucide/svelte/icons/square";
@@ -49,6 +48,13 @@
   let acceptance = $state("");
   let projectPath = $state("");
   let useExistingProject = $state(false);
+  /** The chat before any project exists yet — 2026-09-04, "quiero que sea
+   *  un chat... yo ahí le declaro lo que quiero". Not persisted (there is
+   *  no project to persist it against); once a build instruction creates
+   *  a project (see sendTurn), the visible conversation switches over to
+   *  that project's real, persisted `session.messages` — this array is
+   *  only ever shown before that point. */
+  let localMessages = $state<{ id: string; role: "user" | "esmeralda"; content: string; at: string }[]>([]);
   let selectedSlug = $state("");
   let proposal = $state<SolutionProposal | null>(null);
   let previousProposal = $state<SolutionProposal | null>(null);
@@ -79,15 +85,27 @@
   // of the human intention flow.
   const availableProviders = $derived(runs.providers.filter((p) => p.available));
   const provider = $derived(availableProviders[0] ?? null);
-  const canPropose = $derived(Boolean(intent.trim() && !runs.starting && runs.current?.status !== "running" && runs.current?.status !== "queued"));
   const output = $derived(runs.events.filter((item) => item.event.kind === "output"));
-  // A "follow-up" turn continues an already-chosen project: the human already
-  // committed to it once (picking it from `useExistingProject`), so every
-  // further instruction on it builds straight onto the isolated workspace
-  // without asking for approval again. The gate that matters — writing to
-  // the real project — still happens once, explicitly, at applyWorkspace().
-  const followUp = $derived(useExistingProject && Boolean(projectPath));
-  const sending = $derived(approving || runs.starting);
+  // A "follow-up" turn continues an already-chosen project: every further
+  // instruction on it builds straight onto the isolated workspace without
+  // asking for approval again. The gate that matters — writing to the real
+  // project — still happens once, explicitly, at applyWorkspace().
+  //
+  // 2026-09-04: no longer gated on the `useExistingProject` checkbox — that
+  // checkbox only ever controlled whether the project *picker* was visible
+  // in the options panel, not whether a conversation exists. Requiring it
+  // to reach the chat forced a "expand panel → check a box → pick from a
+  // dropdown" ceremony before Esmeralda would even talk, which is exactly
+  // what "quiero que sea un chat... ahí le declaro lo que quiero" objected
+  // to. `projectPath` alone (set either by picking an existing project, or
+  // auto-created the moment a build instruction needs one — see sendTurn)
+  // is the only real signal of "is there a project-scoped conversation".
+  const followUp = $derived(Boolean(projectPath));
+  /** What the chat panel actually renders — the persisted, real
+   *  conversation once a project exists, or the ephemeral pre-project
+   *  chat before that. See `localMessages`'s own doc comment. */
+  const chatMessages = $derived(projectPath ? session.messages : localMessages);
+  const sending = $derived(resolvingProposal || approving || runs.starting);
   const busy = $derived(runs.current?.status === "running" || runs.current?.status === "queued");
   let draining = $state(false);
   let summarizedRunId = $state<string | null>(null);
@@ -189,6 +207,7 @@
     acceptance = "";
     projectPath = "";
     useExistingProject = false;
+    localMessages = [];
     proposal = null;
     previousProposal = null;
     proposalChanges = [];
@@ -337,14 +356,37 @@
    *  first-ever message should even create a project is a different,
    *  bigger question this change doesn't attempt to answer. */
   async function sendTurn(text: string) {
-    if (projectPath && isConversationalMessage(text)) {
-      await session.loadOrCreate(projectPath);
-      const priorMessages = session.messages;
-      await session.appendMessage(projectPath, "user", text);
-      const reply = await replyToEsmeraldaChat(text, priorMessages);
-      await session.appendMessage(projectPath, "esmeralda", reply);
+    if (isConversationalMessage(text)) {
+      if (projectPath) {
+        await session.loadOrCreate(projectPath);
+        const priorMessages = session.messages;
+        await session.appendMessage(projectPath, "user", text);
+        const reply = await replyToEsmeraldaChat(text, priorMessages);
+        await session.appendMessage(projectPath, "esmeralda", reply);
+      } else {
+        // No project exists yet — this is chat before any work has
+        // started, so there is nothing to persist it against. Kept purely
+        // in-memory (localMessages); the moment a later message actually
+        // needs a project, the conversation continues in that project's
+        // real, persisted session instead.
+        const now = new Date().toISOString();
+        localMessages = [
+          ...localMessages,
+          { id: crypto.randomUUID(), role: "user", content: text, at: now },
+        ];
+        const reply = await replyToEsmeraldaChat(text, []);
+        localMessages = [
+          ...localMessages,
+          { id: crypto.randomUUID(), role: "esmeralda", content: reply, at: new Date().toISOString() },
+        ];
+      }
       return;
     }
+    // A real build/change instruction. approveAndStart() already
+    // auto-creates a project when none is selected yet (project_create_
+    // automatic, keyed off the proposal's own slug) — unchanged here, so
+    // this is exactly today's behavior whether or not a project already
+    // existed before this turn.
     intent = text;
     await prepareProposal();
     if (validation || !proposal) return;
@@ -473,36 +515,32 @@
           </div>
         </details>
         {#if validation}<p id="validation" class="error" role="alert">{validation}</p>{/if}
-        {#if followUp}
-          <Button variant="primary" onclick={sendChatMessage} loading={sending && !busy} disabled={!intent.trim()} ariaLabel="Enviar a Esmeralda">Enviar</Button>
-          <p class="hint">{busy ? "Esmeralda sigue trabajando en tu instrucción anterior — esta se procesará automáticamente en cuanto termine." : "Esmeralda conserva el contexto de esta conversación y del proyecto. Cada instrucción se construye sobre la copia de trabajo acumulada; el proyecto original solo cambia cuando pides aplicar."}</p>
-        {:else}
-          <Button variant="primary" onclick={prepareProposal} disabled={!canPropose} loading={resolvingProposal} ariaLabel="Interpretar intención"><PlayIcon size={15}/> {resolvingProposal ? "Analizando intención…" : "Ver propuesta"}</Button>
-        {/if}
+        <Button variant="primary" onclick={sendChatMessage} loading={sending && !busy} disabled={!intent.trim()} ariaLabel="Enviar a Esmeralda">Enviar</Button>
+        <p class="hint">{busy ? "Esmeralda sigue trabajando en tu instrucción anterior — esta se procesará automáticamente en cuanto termine." : followUp ? "Esmeralda conserva el contexto de esta conversación y del proyecto. Cada instrucción se construye sobre la copia de trabajo acumulada; el proyecto original solo cambia cuando pides aplicar." : "Puedes charlar con Esmeralda o pedirle directamente que construya algo — ella decide cuál es cuál."}</p>
       </div>
       {/if}
     </div>
 
     <aside class="console" aria-live="polite">
-      {#if followUp}
-        <div class="chat">
-          <header class="chat-head"><span class="esmeralda-avatar" aria-hidden="true">E</span><div><strong>Esmeralda</strong><small>{session.loading ? "Cargando conversación…" : `${session.messages.length} mensajes`}</small></div></header>
-          <ol class="chat-log">
-            {#each session.messages as message (message.id)}
-              <li class={`bubble ${message.role}`}>
-                <span class="bubble-role">{message.role === "user" ? "Tú" : message.role === "esmeralda" ? "Esmeralda" : "Sistema"}</span>
-                <p>{message.content}</p>
-                <time>{new Date(message.at).toLocaleTimeString()}</time>
-              </li>
-            {/each}
+      <div class="chat">
+        <header class="chat-head"><span class="esmeralda-avatar" aria-hidden="true">E</span><div><strong>Esmeralda</strong><small>{projectPath && session.loading ? "Cargando conversación…" : `${chatMessages.length} mensajes`}</small></div></header>
+        <ol class="chat-log">
+          {#each chatMessages as message (message.id)}
+            <li class={`bubble ${message.role}`}>
+              <span class="bubble-role">{message.role === "user" ? "Tú" : message.role === "esmeralda" ? "Esmeralda" : "Sistema"}</span>
+              <p>{message.content}</p>
+              <time>{new Date(message.at).toLocaleTimeString()}</time>
+            </li>
+          {/each}
+          {#if projectPath}
             {#each session.queue as queued, index (index)}
               <li class="bubble user queued"><span class="bubble-role">Tú · en cola</span><p>{queued}</p></li>
             {/each}
-            {#if busy}<li class="bubble esmeralda pending"><span class="bubble-role">Esmeralda</span><p>Trabajando en tu instrucción…</p></li>{/if}
-            {#if !session.messages.length && !session.queue.length && !busy}<li class="bubble-empty">Escríbele a Esmeralda para empezar a trabajar en este proyecto.</li>{/if}
-          </ol>
-        </div>
-      {/if}
+          {/if}
+          {#if busy}<li class="bubble esmeralda pending"><span class="bubble-role">Esmeralda</span><p>Trabajando en tu instrucción…</p></li>{/if}
+          {#if !chatMessages.length && !(projectPath && session.queue.length) && !busy}<li class="bubble-empty">Escríbele a Esmeralda — puedes charlar o pedirle directamente que construya algo.</li>{/if}
+        </ol>
+      </div>
       {#if runs.current}
         <div class="run-head"><div><span class="eyebrow">EJECUCIÓN · {INTENTOS_CAPABILITIES.find((item) => item.id === runs.current?.capabilityId)?.shortLabel ?? runs.current.capabilityId}</span><h2>{runs.current.status}</h2><p title={runs.current.projectPath}>Origen protegido: {runs.current.projectPath}</p>{#if runs.current.workspacePath}<p title={runs.current.workspacePath}>Copia de trabajo: {runs.current.workspacePath}</p>{/if}</div>{#if runs.current.status === "running" || runs.current.status === "queued"}<Button variant="danger" onclick={() => runs.cancel()} loading={runs.cancelling}><SquareIcon size={13}/> Cancelar</Button>{/if}</div>
         {#if runs.current.workspacePath}
@@ -558,15 +596,13 @@
           <div class="decision-actions"><Button variant="primary" onclick={approveAndStart} loading={approving} disabled={!teamReady}>Aprobar y construir</Button>{#if rejecting}<Button variant="danger" onclick={rejectProposal}>Enviar rechazo razonado</Button>{:else}<Button variant="secondary" onclick={() => rejecting = true}>Rechazar / pedir cambios</Button>{/if}<Button variant="secondary" onclick={() => proposal = null}>Editar intención</Button></div>
           {#if !provider}<p class="error">El runtime no está disponible; puedes revisar la propuesta, pero no iniciar producción.</p>{/if}
         </section>
-      {:else if !followUp}
-        <div class="empty"><div class="empty-icon"><PlayIcon size={28}/></div><span class="eyebrow">VISTA PREVIA</span><h2>¿Qué quieres construir?</h2><p>IntentOS elegirá internamente capacidades, especialistas y gates. Tú revisarás la solución propuesta antes de que comience la construcción.</p><ol><li>Describe el resultado deseado</li><li>Revisa la propuesta</li><li>Aprueba la construcción</li></ol></div>
       {/if}
     </aside>
   </div>
 </section>
 
 <style>
-  .workspace{height:100%;display:flex;flex-direction:column;min-height:0;overflow:hidden}.head{flex:0 0 auto;padding:var(--space-3) var(--space-4);border-bottom:1px solid var(--color-border);display:flex;justify-content:space-between;gap:16px;align-items:center}.head h1{font-size:var(--text-h2)}.head p,.hint{color:var(--color-text-secondary);font-size:var(--text-body-sm)}.grid{flex:1;min-height:0;overflow:hidden;padding:var(--space-3);display:grid;grid-template-columns:minmax(340px,460px) minmax(380px,1fr);gap:var(--space-3)}.composer,.console{min-height:0;overflow:auto;scrollbar-gutter:stable}.composer{display:flex;flex-direction:column;gap:var(--space-3)}.card,.console{background:var(--color-surface-raised);border:1px solid var(--color-border);border-radius:var(--radius-lg)}.card{padding:var(--space-4);display:flex;flex-direction:column;gap:10px}label{font-size:var(--text-body-sm);font-weight:var(--fw-semibold);display:flex;flex-direction:column;gap:5px}textarea,select{width:100%;border:1px solid var(--color-border);border-radius:var(--radius-md);background:var(--color-surface);color:var(--color-text-primary);padding:9px;font:inherit}textarea{resize:vertical}.attachments{display:grid;grid-template-columns:1fr auto;gap:8px;align-items:center;padding:9px;border:1px dashed var(--color-border);border-radius:var(--radius-md)}.attachments>div{display:flex;flex-direction:column}.attachments small{font-size:11px;color:var(--color-text-muted)}.attachments ul{grid-column:1/-1;display:flex;flex-direction:column;gap:4px;list-style:none}.attachments li{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:5px 7px;border-radius:var(--radius-sm);background:var(--color-surface-raised);font-size:11px}.attachments li span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.attachments li button{display:flex;color:var(--color-text-muted)}.fields{display:grid;grid-template-columns:1fr auto;align-items:end;gap:8px}.error{font-size:var(--text-body-sm);color:var(--color-danger)}h2{font-size:var(--text-h3)}.console{padding:var(--space-4);display:flex;flex-direction:column;gap:var(--space-3)}.run-head{display:flex;justify-content:space-between;gap:10px}.run-head p{font-size:11px;color:var(--color-text-muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:440px}.eyebrow{font-size:10px;color:var(--color-brand);letter-spacing:.08em}.stages{list-style:none;display:flex;flex-direction:column;gap:6px}.stages li{display:grid;grid-template-columns:12px 1fr auto;align-items:center;gap:9px;padding:8px;border-radius:var(--radius-md);background:var(--color-surface)}.stages li.active{outline:1px solid var(--color-brand)}.stages small{display:block;color:var(--color-text-muted);font-size:11px}.stages b{font-size:10px;text-transform:uppercase}.dot{width:9px;height:9px;border-radius:50%;background:var(--color-border)}.dot.running{background:var(--color-brand)}.dot.passed{background:var(--color-success)}.dot.failed{background:var(--color-danger)}.log{flex:1;min-height:180px;overflow:auto;background:var(--color-surface-sunken);border-radius:var(--radius-md);padding:10px}.log div{display:grid;grid-template-columns:76px 1fr;gap:8px;border-bottom:1px solid var(--color-border);padding:5px 0}.log time{font:10px var(--font-mono);color:var(--color-text-muted)}.log pre{white-space:pre-wrap;word-break:break-word;font:11px/1.45 var(--font-mono);color:var(--color-text-secondary)}.empty{margin:auto;width:min(100%,440px);min-height:300px;padding:32px;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;color:var(--color-text-secondary)}.empty-icon{width:54px;height:54px;display:grid;place-items:center;margin-bottom:14px;border-radius:16px;background:color-mix(in srgb,var(--color-brand) 14%,transparent);color:var(--color-brand)}.empty h2{max-width:360px;color:var(--color-text-primary);margin:8px 0}.empty p{max-width:390px;font-size:var(--text-body-sm);line-height:1.5}.empty ol{display:flex;gap:6px;margin-top:18px;padding:0;list-style:none;counter-reset:steps}.empty li{padding:6px 9px;border:1px solid var(--color-border);border-radius:99px;font-size:10px;color:var(--color-text-muted)}.run-error{padding:8px;background:color-mix(in srgb,var(--color-danger) 10%,transparent);border-radius:var(--radius-md)}.notice{font-size:var(--text-body-sm);color:var(--color-warning)}.run-decision{padding:8px;background:color-mix(in srgb,var(--color-warning) 10%,transparent);border-radius:var(--radius-md)}button{cursor:pointer}@media(max-width:820px){.workspace{overflow:auto}.grid{overflow:visible;grid-template-columns:1fr}.composer,.console{overflow:visible}.console{min-height:420px}.head{align-items:flex-start;flex-direction:column}.fields{grid-template-columns:1fr}.empty ol{flex-direction:column}.recipe-actions{justify-content:flex-start;flex-wrap:wrap}}@media(prefers-reduced-motion:reduce){*{scroll-behavior:auto!important}}
+  .workspace{height:100%;display:flex;flex-direction:column;min-height:0;overflow:hidden}.head{flex:0 0 auto;padding:var(--space-3) var(--space-4);border-bottom:1px solid var(--color-border);display:flex;justify-content:space-between;gap:16px;align-items:center}.head h1{font-size:var(--text-h2)}.head p,.hint{color:var(--color-text-secondary);font-size:var(--text-body-sm)}.grid{flex:1;min-height:0;overflow:hidden;padding:var(--space-3);display:grid;grid-template-columns:minmax(340px,460px) minmax(380px,1fr);gap:var(--space-3)}.composer,.console{min-height:0;overflow:auto;scrollbar-gutter:stable}.composer{display:flex;flex-direction:column;gap:var(--space-3)}.card,.console{background:var(--color-surface-raised);border:1px solid var(--color-border);border-radius:var(--radius-lg)}.card{padding:var(--space-4);display:flex;flex-direction:column;gap:10px}label{font-size:var(--text-body-sm);font-weight:var(--fw-semibold);display:flex;flex-direction:column;gap:5px}textarea,select{width:100%;border:1px solid var(--color-border);border-radius:var(--radius-md);background:var(--color-surface);color:var(--color-text-primary);padding:9px;font:inherit}textarea{resize:vertical}.attachments{display:grid;grid-template-columns:1fr auto;gap:8px;align-items:center;padding:9px;border:1px dashed var(--color-border);border-radius:var(--radius-md)}.attachments>div{display:flex;flex-direction:column}.attachments small{font-size:11px;color:var(--color-text-muted)}.attachments ul{grid-column:1/-1;display:flex;flex-direction:column;gap:4px;list-style:none}.attachments li{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:5px 7px;border-radius:var(--radius-sm);background:var(--color-surface-raised);font-size:11px}.attachments li span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.attachments li button{display:flex;color:var(--color-text-muted)}.fields{display:grid;grid-template-columns:1fr auto;align-items:end;gap:8px}.error{font-size:var(--text-body-sm);color:var(--color-danger)}h2{font-size:var(--text-h3)}.console{padding:var(--space-4);display:flex;flex-direction:column;gap:var(--space-3)}.run-head{display:flex;justify-content:space-between;gap:10px}.run-head p{font-size:11px;color:var(--color-text-muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:440px}.eyebrow{font-size:10px;color:var(--color-brand);letter-spacing:.08em}.stages{list-style:none;display:flex;flex-direction:column;gap:6px}.stages li{display:grid;grid-template-columns:12px 1fr auto;align-items:center;gap:9px;padding:8px;border-radius:var(--radius-md);background:var(--color-surface)}.stages li.active{outline:1px solid var(--color-brand)}.stages small{display:block;color:var(--color-text-muted);font-size:11px}.stages b{font-size:10px;text-transform:uppercase}.dot{width:9px;height:9px;border-radius:50%;background:var(--color-border)}.dot.running{background:var(--color-brand)}.dot.passed{background:var(--color-success)}.dot.failed{background:var(--color-danger)}.log{flex:1;min-height:180px;overflow:auto;background:var(--color-surface-sunken);border-radius:var(--radius-md);padding:10px}.log div{display:grid;grid-template-columns:76px 1fr;gap:8px;border-bottom:1px solid var(--color-border);padding:5px 0}.log time{font:10px var(--font-mono);color:var(--color-text-muted)}.log pre{white-space:pre-wrap;word-break:break-word;font:11px/1.45 var(--font-mono);color:var(--color-text-secondary)}.run-error{padding:8px;background:color-mix(in srgb,var(--color-danger) 10%,transparent);border-radius:var(--radius-md)}.notice{font-size:var(--text-body-sm);color:var(--color-warning)}.run-decision{padding:8px;background:color-mix(in srgb,var(--color-warning) 10%,transparent);border-radius:var(--radius-md)}button{cursor:pointer}@media(max-width:820px){.workspace{overflow:auto}.grid{overflow:visible;grid-template-columns:1fr}.composer,.console{overflow:visible}.console{min-height:420px}.head{align-items:flex-start;flex-direction:column}.fields{grid-template-columns:1fr}.recipe-actions{justify-content:flex-start;flex-wrap:wrap}}@media(prefers-reduced-motion:reduce){*{scroll-behavior:auto!important}}
   .dynamic-team{display:grid;grid-template-columns:1fr 1fr;gap:5px;list-style:none}.dynamic-team li{padding:7px;border-radius:var(--radius-sm);background:var(--color-surface-raised)}.dynamic-team li div{min-width:0;display:flex;flex-direction:column}.dynamic-team strong,.dynamic-team small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.dynamic-team strong{font-size:10px;color:var(--color-text-primary)}.dynamic-team small{font-size:9px;color:var(--color-text-muted)}.dynamic-team li.missing{outline:1px solid var(--color-danger)}@media(max-width:520px){.dynamic-team{grid-template-columns:1fr}}
   .head-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
   .showroom{display:flex;flex-direction:column;gap:7px;padding:10px;border:1px solid var(--color-border);border-radius:var(--radius-md);background:var(--color-surface)}.showroom-head{display:flex;justify-content:space-between;align-items:center;gap:10px}.showroom-head a{font-size:10px;color:var(--color-brand);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.showroom-frame{width:100%;height:280px;border:1px solid var(--color-border);border-radius:var(--radius-sm);background:var(--color-surface-sunken)}
