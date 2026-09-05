@@ -23,6 +23,34 @@
   import type { Agent, AutomaticProject, ConversationMessage, Mission, RunEvent } from "$lib/types";
 
   const LEGACY_DRAFT_KEY = "intentos.productionBrief.v1";
+  // 2026-09-05 — the pre-project chat used to be truly ephemeral (see
+  // `localMessages`'s original doc comment below), which meant a real,
+  // possibly long conversation with Esmeralda vanished the moment the app
+  // closed or restarted, with no warning. Fixed by persisting it through
+  // the exact same `session_get_or_create`/`session_append_message`
+  // backend calls a real project's conversation already uses, keyed by a
+  // synthetic "project path" (never touched by any filesystem code — it's
+  // just the hash key `ProjectSession` is stored under) instead of a real
+  // one. `localMessages` itself is unchanged; this only makes it survive
+  // a restart.
+  const DRAFT_SESSION_ID_KEY = "agency-agents:draft-session-id:v1";
+  function draftSessionPath(): string {
+    let id: string | null = null;
+    try { id = localStorage.getItem(DRAFT_SESSION_ID_KEY); } catch { /* ignore */ }
+    if (!id) {
+      id = crypto.randomUUID();
+      try { localStorage.setItem(DRAFT_SESSION_ID_KEY, id); } catch { /* ignore */ }
+    }
+    return `__draft__:${id}`;
+  }
+  /** Abandons the current draft session (a fresh id is created lazily next
+      time a message is sent) — called on an explicit "Nueva intención" so
+      a deliberate reset doesn't drag the old conversation back in. The
+      abandoned file itself is left on disk, same as any other stale
+      session/run IntentOS already never garbage-collects. */
+  function resetDraftSession(): void {
+    try { localStorage.removeItem(DRAFT_SESSION_ID_KEY); } catch { /* ignore */ }
+  }
   // `selected` (a NEXUS scenario runbook from strategy/runbooks.json) is
   // optional correlation metadata, not a prerequisite: runtime_start only
   // needs runbookId to be a non-empty string (validate_start_request) and
@@ -40,6 +68,18 @@
     // store exists.
     try { localStorage.removeItem(LEGACY_DRAFT_KEY); } catch { /* best effort */ }
     corpus.ensureLoaded(); runbooks.load(); projects.refresh(); runs.load();
+    // Restore a pre-project conversation that survived a restart (see
+    // DRAFT_SESSION_ID_KEY above). No-op the first time a draft id has
+    // never been created, or once a project is already selected.
+    if (!projectPath) {
+      void session.loadOrCreate(draftSessionPath()).then((restored) => {
+        if (restored && restored.messages.length > 0 && localMessages.length === 0) {
+          localMessages = restored.messages
+            .filter((m) => m.role !== "system")
+            .map((m) => ({ id: m.id, role: m.role as "user" | "esmeralda", content: m.content, at: m.at }));
+        }
+      });
+    }
   });
   const bySlug = $derived(new Map(corpus.agents.map((a) => [a.slug, a])));
   let intent = $state("");
@@ -49,11 +89,13 @@
   let projectPath = $state("");
   let useExistingProject = $state(false);
   /** The chat before any project exists yet — 2026-09-04, "quiero que sea
-   *  un chat... yo ahí le declaro lo que quiero". Not persisted (there is
-   *  no project to persist it against); once a build instruction creates
-   *  a project (see sendTurn), the visible conversation switches over to
-   *  that project's real, persisted `session.messages` — this array is
-   *  only ever shown before that point. */
+   *  un chat... yo ahí le declaro lo que quiero". 2026-09-06: mirrored into
+   *  a real persisted session behind a synthetic path (DRAFT_SESSION_ID_KEY
+   *  above) so it survives a restart — a real conversation was lost to
+   *  exactly that before this fix. Once a build instruction creates a
+   *  project (see sendTurn), the visible conversation switches over to
+   *  that project's own persisted `session.messages` — this array is only
+   *  ever shown before that point. */
   let localMessages = $state<{ id: string; role: "user" | "esmeralda"; content: string; at: string }[]>([]);
   /** The build description (plus any explicit restrictions attached to it,
    *  e.g. "pero no implementes nada todavía") awaiting an explicit
@@ -226,6 +268,7 @@
     projectPath = "";
     useExistingProject = false;
     localMessages = [];
+    resetDraftSession();
     pendingBuildProposal = null;
     proposal = null;
     previousProposal = null;
@@ -379,6 +422,12 @@
       ...localMessages,
       { id: crypto.randomUUID(), role, content, at: new Date().toISOString() },
     ];
+    // Persist alongside the in-memory push (see DRAFT_SESSION_ID_KEY above)
+    // so a restart mid-conversation no longer loses it. Best-effort: a
+    // failure here (Paranoid Mode, disk issue) still leaves the message
+    // visible for the rest of this session via `localMessages` — it just
+    // won't survive a restart, same as before this fix existed.
+    void session.appendMessage(draftSessionPath(), role, content);
   }
 
   /** The single place a conversational (non-build) message becomes
