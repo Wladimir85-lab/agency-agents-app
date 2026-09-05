@@ -498,7 +498,7 @@
       <div class="card">
         {#if catalogProduct}<div class="catalog-context"><span>PRODUCTO SELECCIONADO</span><strong>{catalogProduct.name}</strong><small>La intención es editable. IntentOS mantendrá las capacidades mínimas necesarias.</small></div>{/if}
         <label for="intent">¿Qué quieres que construya o resuelva IntentOS?</label>
-        <textarea id="intent" bind:value={intent} rows="5" placeholder="Cuéntale a IntentOS qué quieres conseguir…" aria-describedby="intent-help validation" oninput={() => proposal = null}></textarea>
+        <textarea id="intent" bind:value={intent} rows="5" placeholder="Cuéntale a IntentOS qué quieres conseguir…" aria-describedby="intent-help validation" oninput={() => proposal = null} onkeydown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); void sendChatMessage(); } }}></textarea>
         <p id="intent-help" class="hint">IntentOS resolverá internamente usuarios, objetivos, capacidades, criterios y plan de trabajo.</p>
         <details class="options" open={attachments.length > 0 || useExistingProject}>
           <summary>Archivos o proyecto existente <small>Opcional</small></summary>
