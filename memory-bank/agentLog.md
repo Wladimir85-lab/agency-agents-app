@@ -1010,3 +1010,36 @@ correctly asked for more detail instead of guessing.
 a multi-domain tool-selection engine, real "research" capabilities, or a plugin system for new
 action types — none of these exist in IntentOS's runtime today; only the comprehension vocabulary
 was made domain-neutral so they could be added later without a core redesign.
+
+## 2026-09-06 (same night, follow-up) — "Descartar copia" fixed, two real stacked bugs
+
+Wladimir reported live: "No se pudo descartar la copia" / `[object Object]` / "aun se hacen
+falsas copias". Two independent bugs, both real, both in the workspace-lifecycle path
+(`Runbooks.svelte`'s `discardWorkspace`/`reviewWorkspace`/`applyWorkspace`/`loadDeliveryReceipt`
+and `runtime.rs`'s `validated_workspace`):
+
+1. **Ordering bug** (`Runbooks.svelte`): `discardWorkspace()` called `runs.discardCurrentWorkspace()`
+   (which asks the backend to `remove_dir_all` the workspace) *before* `preview.stop()` — so a
+   still-running preview dev-server was holding file handles open inside that exact directory,
+   and on Windows the delete failed with "access denied." Fixed by stopping preview/publicPreview
+   first. Separately, five `catch` blocks displayed `String(e)` instead of the existing
+   `readableError(e)` helper, so a Tauri-rejected non-Error object rendered as `[object Object]`
+   instead of the real reason — all five switched to `readableError`. Commit `fb0000b`.
+2. **Deeper root cause, found while actually cleaning up the leftover copies**: `validated_workspace`
+   (the security check `runtime_discard_workspace`/`build_review` run before touching a workspace)
+   only ever recognized `run-workspaces/<runId>` as a legitimate managed root — a check that
+   predates the chat/session feature. Every session-originated build's workspace instead lives
+   under `session-workspaces/<sessionId>/project` (`session::session_workspace_dir`), a second
+   real root nobody taught this check about. Every conversational build's "Revisar cambios"/
+   "Aplicar al original"/"Descartar copia" was rejected with "run workspace escaped the managed
+   runtime area" regardless of the preview-lock fix above — this was the actual blocking error the
+   whole time for the reported case. Fixed by checking both known roots. New regression test:
+   `validated_workspace_accepts_a_session_workspace_root_not_only_run_workspaces`. Commit `a198850`,
+   Rust 477/0/17 (was 476, +1 test).
+
+**Cleanup performed**: 6 leftover `session-workspaces/*` directories had accumulated from failed
+discard attempts (all real runs, all already `cancelled`/terminal — confirmed by cross-referencing
+every run/session JSON before touching anything). Cleaned up by invoking the real, now-fixed
+`runtime_discard_workspace` command through the live running app (not raw `rm -rf`), so session
+pointers and run state stayed consistent instead of leaving orphaned JSON behind. `session-workspaces/`
+is empty again.
