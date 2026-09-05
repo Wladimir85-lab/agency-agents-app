@@ -2565,6 +2565,27 @@ fn stage_prompt(
     } else {
         ""
     };
+    // 2026-09-06 — engineering-standard guidance, architecture/development
+    // stages only (where design decisions and real code actually get
+    // written; QA/reality already carry their own domain_guidance below).
+    // Deliberately phrased as signals/defaults, not mechanical rules: a
+    // hard numeric line-count law was in the source brief Wladimir pasted
+    // ("no function over 50 lines") but is dropped as written — forcing a
+    // split to satisfy a number, rather than because a natural seam
+    // exists, produces the same complexity Ousterhout warns against from
+    // the opposite direction (over-decomposition). Kept as a smell signal
+    // instead. Also deliberately drops that brief's "keep technical logs
+    // hidden from the interface" clause outright — it contradicts this
+    // session's own P1.1 observability work and the Constitution's
+    // evidence-over-claim principle; nothing IntentOS's runtime produces
+    // should be hidden from the human who can already see it in the run
+    // log, only kept out of Esmeralda's own conversational replies, which
+    // was already true before this change.
+    let craftsmanship_guidance = if s.kind == "architecture" || s.kind == "development" {
+        "\nSENIOR ENGINEERING STANDARD (applies to this stage's own output):\n- Deep modules: expose the smallest, simplest interface that does the job; keep implementation detail behind it so callers need to know as little as possible.\n- Centralize each concept: if a requirement can change, its logic must live in exactly one place, never duplicated across files or functions.\n- Guard clauses over nested conditionals: handle failure/edge cases first and return early; keep the main success path flat. Avoid stacking more than two levels of nested if/else.\n- Prefer a well-modeled data structure or a sensible default over scattering ad hoc null/undefined checks through the code.\n- Small, focused functions: when one function's responsibility keeps growing, treat that as a signal to extract a well-named sub-function — not a number to hit by splitting arbitrarily.\n- Structural, intention-revealing names; no placeholder names (tmp, data, x, foo). No commented-out or dead code left behind.\n- If a requirement is genuinely ambiguous and guessing would risk the wrong architecture, say so explicitly in your final report instead of silently inventing an assumption.\n"
+    } else {
+        ""
+    };
     // Domain-conditional verification guidance — see "Reality gate —
     // domain-conditional verification guidance" above. Additive and
     // reality-stage-only: every other stage's prompt is byte-identical to
@@ -2586,7 +2607,7 @@ fn stage_prompt(
         ""
     };
     let workspace = run.workspace_path.as_deref().unwrap_or(&run.project_path);
-    format!("You are the {} agent ({}) in the IntentOS '{}' autonomous pipeline.\n\nINTENTOS ORCHESTRATOR OVERRIDES (highest priority for this run):\n- The USER INTENT below is the authoritative product specification.\n- Catalog persona references to missing templates, memory-bank files, frameworks, scripts, or organizational conventions are optional guidance, not prerequisites.\n- If useful project documentation is missing, create the minimal appropriate documentation yourself from the USER INTENT and continue autonomously.\n- Choose reasonable technical defaults when the user explicitly delegates the choice. Do not fail merely because an auxiliary file, preferred framework, or prior setup is absent.\n- Do not ask the user to implement or configure anything unless human authorization is genuinely required.\n- Stay within the requested scope and do not invent product requirements.\n- This is an isolated working copy. Never access or modify the source project outside WORKSPACE.\n- This invocation is a single non-interactive turn: there is no later turn, notification, or check-in where you could pick up a deferred background task. Run commands that must finish before you continue (npm install, builds, migrations, etc.) synchronously in the foreground and wait for their real exit code — never launch them as a background task expecting to resume afterward, since nothing will ever resume this turn. If a command is genuinely slow, wait for it; do not end your response early with an intention to continue later.\n{}\nCATALOG PERSONA INSTRUCTIONS:\n{}\n\n{}USER INTENT:\n{}\nSOURCE PROJECT (read-only reference; do not access): {}\nWORKSPACE: {}\n{}{}\nWork only inside WORKSPACE. Inspect existing work and perform this stage for real. Run relevant checks. Do not claim success without evidence. End your final response with exactly INTENTOS_GATE:PASS only if this stage genuinely passes; otherwise end with INTENTOS_GATE:FAIL and explain a genuine blocker. Previous stages are present in the workspace.", s.label, s.agent_slug, run.runbook_id, implementation_scope, persona.map(String::as_str).unwrap_or("Catalog persona unavailable; disclose this limitation."), brief_section, run.intent, run.project_path, workspace, domain_guidance, criteria_instruction)
+    format!("You are the {} agent ({}) in the IntentOS '{}' autonomous pipeline.\n\nINTENTOS ORCHESTRATOR OVERRIDES (highest priority for this run):\n- The USER INTENT below is the authoritative product specification.\n- Catalog persona references to missing templates, memory-bank files, frameworks, scripts, or organizational conventions are optional guidance, not prerequisites.\n- If useful project documentation is missing, create the minimal appropriate documentation yourself from the USER INTENT and continue autonomously.\n- Choose reasonable technical defaults when the user explicitly delegates the choice. Do not fail merely because an auxiliary file, preferred framework, or prior setup is absent.\n- Do not ask the user to implement or configure anything unless human authorization is genuinely required.\n- Stay within the requested scope and do not invent product requirements.\n- This is an isolated working copy. Never access or modify the source project outside WORKSPACE.\n- This invocation is a single non-interactive turn: there is no later turn, notification, or check-in where you could pick up a deferred background task. Run commands that must finish before you continue (npm install, builds, migrations, etc.) synchronously in the foreground and wait for their real exit code — never launch them as a background task expecting to resume afterward, since nothing will ever resume this turn. If a command is genuinely slow, wait for it; do not end your response early with an intention to continue later.\n{}{}\nCATALOG PERSONA INSTRUCTIONS:\n{}\n\n{}USER INTENT:\n{}\nSOURCE PROJECT (read-only reference; do not access): {}\nWORKSPACE: {}\n{}{}\nWork only inside WORKSPACE. Inspect existing work and perform this stage for real. Run relevant checks. Do not claim success without evidence. End your final response with exactly INTENTOS_GATE:PASS only if this stage genuinely passes; otherwise end with INTENTOS_GATE:FAIL and explain a genuine blocker. Previous stages are present in the workspace.", s.label, s.agent_slug, run.runbook_id, implementation_scope, craftsmanship_guidance, persona.map(String::as_str).unwrap_or("Catalog persona unavailable; disclose this limitation."), brief_section, run.intent, run.project_path, workspace, domain_guidance, criteria_instruction)
 }
 
 async fn run_codex_stage(
@@ -3970,6 +3991,50 @@ mod tests {
         // The gate sentinel instruction must still be present and unchanged
         // — the structured report is additive, not a replacement.
         assert!(reality_prompt.contains("End your final response with exactly INTENTOS_GATE:PASS"));
+    }
+
+    #[test]
+    fn stage_prompt_adds_the_senior_engineering_standard_only_for_architecture_and_development() {
+        // 2026-09-06 — the guidance must reach exactly the two stages where
+        // real design/code decisions get made, and never the others.
+        let now = Utc::now();
+        let run = RunSummary {
+            id: "run".into(),
+            intent: "Build a verified product".into(),
+            project_path: "/tmp/project".into(),
+            workspace_path: None,
+            runbook_id: "startup-mvp".into(),
+            capability_id: "digital-experience".into(),
+            capability_ids: vec!["digital-experience".into()],
+            mission_id: None,
+            session_id: None,
+            provider_id: Some(PROVIDER_ID.into()),
+            status: RunStatus::Running,
+            current_stage: None,
+            stages: initial_stages(&[], &[], &[], &[]),
+            created_at: now,
+            updated_at: now,
+            completed_at: None,
+            error: None,
+            terminal_state: None,
+        };
+        let direction_prompt = stage_prompt(&run, 0, None, None);
+        let architecture_prompt = stage_prompt(&run, 1, None, None);
+        let development_prompt = stage_prompt(&run, 2, None, None);
+        let qa_prompt = stage_prompt(&run, 3, None, None);
+        let reality_prompt = stage_prompt(&run, 4, None, None);
+        assert!(!direction_prompt.contains("SENIOR ENGINEERING STANDARD"));
+        assert!(architecture_prompt.contains("SENIOR ENGINEERING STANDARD"));
+        assert!(architecture_prompt.contains("Guard clauses over nested conditionals"));
+        assert!(development_prompt.contains("SENIOR ENGINEERING STANDARD"));
+        assert!(!qa_prompt.contains("SENIOR ENGINEERING STANDARD"));
+        assert!(!reality_prompt.contains("SENIOR ENGINEERING STANDARD"));
+        // The brief Wladimir pasted included a hard "no function over 50
+        // lines" rule and a "hide technical logs" clause — both dropped
+        // deliberately (see the doc comment on craftsmanship_guidance);
+        // neither literal phrase should ever appear in a real stage prompt.
+        assert!(!architecture_prompt.contains("50 lines"));
+        assert!(!architecture_prompt.to_lowercase().contains("hide"));
     }
 
     fn run_with_capabilities(capability_id: &str, capability_ids: Vec<String>) -> RunSummary {
