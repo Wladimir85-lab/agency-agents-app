@@ -35,10 +35,16 @@ primarias; todavía no están conectados automáticamente al recuperador del run
 A diferencia de `canonical/` (PDF de fuente primaria) y `catalog/` (bibliografía
 sin contenido), `synthesis/` guarda texto propio — interpretaciones en palabras
 originales de conceptos de una obra, no citas — ya troceado en unidades listas
-para vectorizar. Primer contenido: `mental-models-cognitive-science.md`, ocho
-síntesis de modelos mentales y ciencia cognitiva con su aplicación directa a la
-arquitectura de agentes de IntentOS (ver `sources.yml`,
-`sintesis-modelos-mentales-cognitiva-v1`).
+para vectorizar.
+
+- `mental-models-cognitive-science.md` — ocho síntesis de modelos mentales y
+  ciencia cognitiva con su aplicación directa a la arquitectura de agentes de
+  IntentOS (ver `sources.yml`, `sintesis-modelos-mentales-cognitiva-v1`).
+- `esmeralda-operational-manual.md` — Manual Operativo Esmeralda: nueve
+  capítulos que cruzan auto-referencia, sesgos cognitivos, aprendizaje de
+  fallos, arquitectura multiagente y meta-cognición en un protocolo de
+  decisión unificado específico para el motor de Esmeralda (ver `sources.yml`,
+  `manual-operativo-esmeralda-v1`).
 
 ## Próximas capas
 

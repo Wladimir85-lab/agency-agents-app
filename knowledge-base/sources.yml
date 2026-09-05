@@ -67,3 +67,20 @@ sources:
     license: "Texto original propio, no reproduce contenido de las obras base"
     status: "ready-to-index"
 
+  - id: manual-operativo-esmeralda-v1
+    title: "Manual Operativo Esmeralda — constante mental y framework lógico"
+    version: "1"
+    authority: "IntentOS (síntesis original, cruce conceptual aplicado a la arquitectura de Esmeralda)"
+    kind: "original-synthesis"
+    local_path: "synthesis/esmeralda-operational-manual.md"
+    based_on:
+      - "Gödel, Escher, Bach — Douglas Hofstadter (auto-referencia, bucle extraño)"
+      - "Thinking, Fast and Slow — Daniel Kahneman (bifurcación reactivo/deliberativo)"
+      - "The Art of Thinking Clearly — Rolf Dobelli (matriz de sesgos)"
+      - "Black Box Thinking — Matthew Syed (falla como dato, circuito cerrado)"
+      - "The Society of Mind — Marvin Minsky (enjambre de micro-agentes)"
+      - "Algorithms to Live By — Brian Christian & Tom Griffiths (óptimos de parada, exploración/explotación)"
+      - "Arquitectura propia de IntentOS (manifiesto de capacidades, gate de confianza de salida)"
+    license: "Texto original propio, no reproduce contenido de las obras base"
+    status: "ready-to-index"
+
