@@ -1,0 +1,69 @@
+schema_version: 1
+generated_at: "2026-08-24"
+policy:
+  purpose: "Contexto para juicio autónomo con trazabilidad; no instrucciones mecánicas universales."
+  commercial_books: "Solo metadatos y enlaces oficiales salvo licencia que autorice copia local."
+
+sources:
+  - id: ieee-swebok-v4.0a
+    title: "Guide to the Software Engineering Body of Knowledge"
+    version: "4.0a"
+    authority: "IEEE Computer Society"
+    kind: "body-of-knowledge"
+    canonical_url: "https://www.computer.org/education/bodies-of-knowledge/software-engineering"
+    download_url: "https://ieeecs-media.computer.org/media/education/swebok/swebok-v4.pdf"
+    local_path: "canonical/software-engineering/SWEBOK-v4.0a.pdf"
+    sha256: "0C9DB4DA0B2425C58CF778B99131EB31BB6C188E98B67163A549A1366D96E511"
+    status: "downloaded-not-indexed"
+
+  - id: acm-ieee-aaai-cs2023
+    title: "Computer Science Curricula 2023"
+    version: "2023 final report"
+    authority: "ACM, IEEE Computer Society and AAAI"
+    kind: "curriculum-guideline"
+    canonical_url: "https://csed.acm.org/final-report/"
+    download_url: "https://ieeecs-media.computer.org/media/education/reports/CS2023.pdf"
+    local_path: "canonical/computer-science/CS2023.pdf"
+    sha256: "C7CC63986E866B7CDDA60C3F02DEA83099A1D975C628A02B3F8BF50C07F524DD"
+    status: "downloaded-not-indexed"
+    rights_note: "Uso sujeto al aviso de copyright y permisos incluido en el documento."
+
+  - id: owasp-asvs-v5.0.0
+    title: "OWASP Application Security Verification Standard"
+    version: "5.0.0"
+    authority: "OWASP Foundation"
+    kind: "verification-standard"
+    canonical_url: "https://owasp.org/www-project-application-security-verification-standard/"
+    download_url: "https://raw.githubusercontent.com/OWASP/ASVS/v5.0.0_release/5.0/OWASP_Application_Security_Verification_Standard_5.0.0_en.pdf"
+    local_path: "canonical/security/OWASP-ASVS-v5.0.0-en.pdf"
+    sha256: "F3E9A2F1098BC4AF594578ACB404121AF69E3964AA4D90ABD4B00607218D30C6"
+    license: "CC BY-SA 4.0"
+    status: "downloaded-not-indexed"
+
+  - id: sebok-v2.14
+    title: "Guide to the Systems Engineering Body of Knowledge"
+    version: "2.14"
+    authority: "INCOSE, IEEE Systems Council and Stevens Institute of Technology"
+    kind: "body-of-knowledge"
+    canonical_url: "https://sebokwiki.org/wiki/Main_Page"
+    download_page: "https://sebokwiki.org/wiki/Download_SEBoK_PDF"
+    status: "catalogued-download-pending"
+
+  - id: sintesis-modelos-mentales-cognitiva-v1
+    title: "Modelos mentales y ciencia cognitiva aplicados a arquitectura de agentes"
+    version: "1"
+    authority: "IntentOS (síntesis original, no cita textual de las obras base)"
+    kind: "original-synthesis"
+    local_path: "synthesis/mental-models-cognitive-science.md"
+    based_on:
+      - "Thinking, Fast and Slow — Daniel Kahneman"
+      - "The Art of Thinking Clearly — Rolf Dobelli"
+      - "Black Box Thinking — Matthew Syed"
+      - "Blink — Malcolm Gladwell"
+      - "Algorithms to Live By — Brian Christian & Tom Griffiths"
+      - "Gödel, Escher, Bach — Douglas Hofstadter"
+      - "The Society of Mind — Marvin Minsky"
+      - "Systems Thinking — Joseph O'Connor & Ian McDermott"
+    license: "Texto original propio, no reproduce contenido de las obras base"
+    status: "ready-to-index"
+
