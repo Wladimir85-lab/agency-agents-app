@@ -111,6 +111,21 @@ pub enum AppError {
         capability_id: String,
         message: String,
     },
+
+    /// A stage's own executor explicitly reported that finishing the work
+    /// would require a human decision — not a technical failure. Only ever
+    /// constructed from the exact `INTENTOS_HUMAN_DECISION_REQUIRED:`
+    /// sentinel a stage's raw output contains (see
+    /// `extract_human_decision_reason` in runtime.rs), never from scanning
+    /// freeform prose, so it can never misfire the way a text heuristic
+    /// could. `classify_app_error` (runtime.rs) maps this to
+    /// `JobState::HumanDecisionRequired` — the same terminal-state family
+    /// `CapabilityProviderUnavailable` already reaches, but for a decision
+    /// the *executor* raised mid-stage rather than a pre-run configuration
+    /// gap.
+    #[error("stage '{stage}' requires a human decision: {reason}")]
+    #[serde(rename_all = "camelCase")]
+    HumanDecisionRequested { stage: String, reason: String },
 }
 
 // ---------- From impls ----------

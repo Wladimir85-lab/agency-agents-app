@@ -211,8 +211,32 @@ fn classify_app_error(e: &AppError) -> JobState {
         } => JobState::HumanDecisionRequired(format!(
             "la etapa de capability '{capability_id}' requiere una decisión humana: {message}"
         )),
+        AppError::HumanDecisionRequested { stage, reason } => JobState::HumanDecisionRequired(
+            format!("la etapa '{stage}' requiere una decisión humana: {reason}"),
+        ),
         other => JobState::BlockedWithEvidence(clean_text(&other.to_string())),
     }
+}
+
+/// Explicit sentinel a stage's own output can use to say "I stopped
+/// because this genuinely requires a human decision, not because
+/// something broke" — 2026-09-06, closing a real gap: `craftsmanship_
+/// guidance` in `stage_prompt` asks agents to escalate genuine ambiguity
+/// instead of guessing, but until this every such escalation rendered
+/// identically to a crash (`JobState::BlockedWithEvidence`) because
+/// `classify_app_error` had no way to tell them apart. Detected as an
+/// exact sentinel on its own line, never by scanning free prose — same
+/// discipline as `output_gate_passed`/`contains_deferred_continuation_claim`,
+/// so this can never misfire against a model's narrative the way a
+/// heuristic reading its prose could.
+fn extract_human_decision_reason(output: &str) -> Option<String> {
+    output.lines().find_map(|line| {
+        line.trim()
+            .strip_prefix("INTENTOS_HUMAN_DECISION_REQUIRED:")
+            .map(str::trim)
+            .filter(|reason| !reason.is_empty())
+            .map(str::to_string)
+    })
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2582,7 +2606,7 @@ fn stage_prompt(
     // log, only kept out of Esmeralda's own conversational replies, which
     // was already true before this change.
     let craftsmanship_guidance = if s.kind == "architecture" || s.kind == "development" {
-        "\nSENIOR ENGINEERING STANDARD (applies to this stage's own output):\n- Deep modules: expose the smallest, simplest interface that does the job; keep implementation detail behind it so callers need to know as little as possible.\n- Centralize each concept: if a requirement can change, its logic must live in exactly one place, never duplicated across files or functions.\n- Guard clauses over nested conditionals: handle failure/edge cases first and return early; keep the main success path flat. Avoid stacking more than two levels of nested if/else.\n- Prefer a well-modeled data structure or a sensible default over scattering ad hoc null/undefined checks through the code.\n- Small, focused functions: when one function's responsibility keeps growing, treat that as a signal to extract a well-named sub-function — not a number to hit by splitting arbitrarily.\n- Structural, intention-revealing names; no placeholder names (tmp, data, x, foo). No commented-out or dead code left behind.\n- If a requirement is genuinely ambiguous and guessing would risk the wrong architecture, say so explicitly in your final report instead of silently inventing an assumption.\n"
+        "\nSENIOR ENGINEERING STANDARD (applies to this stage's own output):\n- Deep modules: expose the smallest, simplest interface that does the job; keep implementation detail behind it so callers need to know as little as possible.\n- Centralize each concept: if a requirement can change, its logic must live in exactly one place, never duplicated across files or functions.\n- Guard clauses over nested conditionals: handle failure/edge cases first and return early; keep the main success path flat. Avoid stacking more than two levels of nested if/else.\n- Prefer a well-modeled data structure or a sensible default over scattering ad hoc null/undefined checks through the code.\n- Small, focused functions: when one function's responsibility keeps growing, treat that as a signal to extract a well-named sub-function — not a number to hit by splitting arbitrarily.\n- Structural, intention-revealing names; no placeholder names (tmp, data, x, foo). No commented-out or dead code left behind.\n- If a requirement is genuinely ambiguous and guessing would risk the wrong architecture, do not invent an assumption. End with INTENTOS_GATE:FAIL and, on its own line, `INTENTOS_HUMAN_DECISION_REQUIRED: <one clear sentence naming the exact decision needed>` — this reaches the human as a real question, not a generic failure.\n"
     } else {
         ""
     };
@@ -2860,6 +2884,19 @@ async fn run_codex_stage(
                 stream: "system".into(),
                 text: "ADVERTENCIA: el texto del agente sugiere que continuará este trabajo en un futuro turno; esta es una invocación one-shot y no existe un futuro turno que la retome. Este aviso es informativo y no decide por sí solo si la etapa pasó.".into(),
             });
+        }
+        // 2026-09-06 — closes the ambiguity-escalation gap: a stage that
+        // did not pass gets one more chance to say *why* in a way the
+        // runtime can act on, distinct from an ordinary FAIL. Checked only
+        // when the stage did not pass — a passing stage's sentinel (if any)
+        // is irrelevant noise, never a reason to second-guess a real PASS.
+        if !outcome.passed() {
+            if let Some(reason) = extract_human_decision_reason(&combined) {
+                return Err(AppError::HumanDecisionRequested {
+                    stage: stage_kind.to_string(),
+                    reason,
+                });
+            }
         }
         Ok::<bool, AppError>(outcome.passed())
     };
@@ -3152,6 +3189,19 @@ async fn run_claude_stage(
                 stream: "system".into(),
                 text: "ADVERTENCIA: el texto del agente sugiere que continuará este trabajo en un futuro turno; esta es una invocación one-shot y no existe un futuro turno que la retome. Este aviso es informativo y no decide por sí solo si la etapa pasó.".into(),
             });
+        }
+        // 2026-09-06 — closes the ambiguity-escalation gap: a stage that
+        // did not pass gets one more chance to say *why* in a way the
+        // runtime can act on, distinct from an ordinary FAIL. Checked only
+        // when the stage did not pass — a passing stage's sentinel (if any)
+        // is irrelevant noise, never a reason to second-guess a real PASS.
+        if !outcome.passed() {
+            if let Some(reason) = extract_human_decision_reason(&combined) {
+                return Err(AppError::HumanDecisionRequested {
+                    stage: stage_kind.to_string(),
+                    reason,
+                });
+            }
         }
         Ok::<bool, AppError>(outcome.passed())
     };
@@ -3500,6 +3550,46 @@ mod tests {
             evaluate_external_stage_completion("development", true, output, true, false, false, 0);
         assert!(outcome.passed());
         assert_eq!(outcome.diagnosis, StageCompletionDiagnosis::Completed);
+    }
+
+    // ---- 2026-09-06 — ambiguity escalation reaches HumanDecisionRequired,
+    // not a generic BlockedWithEvidence, closing the gap found while
+    // reviewing tonight's craftsmanship_guidance addition. ----
+
+    #[test]
+    fn extract_human_decision_reason_finds_the_exact_sentinel() {
+        let output = "I looked at the two possible data models.\nINTENTOS_HUMAN_DECISION_REQUIRED: should orders belong to a customer or to a session?\nINTENTOS_GATE:FAIL";
+        assert_eq!(
+            extract_human_decision_reason(output).as_deref(),
+            Some("should orders belong to a customer or to a session?")
+        );
+    }
+
+    #[test]
+    fn extract_human_decision_reason_is_none_for_an_ordinary_fail() {
+        let output = "Could not finish: the test suite is red.\nINTENTOS_GATE:FAIL";
+        assert_eq!(extract_human_decision_reason(output), None);
+    }
+
+    #[test]
+    fn extract_human_decision_reason_ignores_an_empty_sentinel() {
+        let output = "INTENTOS_HUMAN_DECISION_REQUIRED:   \nINTENTOS_GATE:FAIL";
+        assert_eq!(extract_human_decision_reason(output), None);
+    }
+
+    #[test]
+    fn classify_app_error_maps_human_decision_requested_to_human_decision_required() {
+        let e = AppError::HumanDecisionRequested {
+            stage: "architecture".into(),
+            reason: "should orders belong to a customer or to a session?".into(),
+        };
+        let state = classify_app_error(&e);
+        assert!(matches!(state, JobState::HumanDecisionRequired(_)));
+        let JobState::HumanDecisionRequired(detail) = state else {
+            unreachable!()
+        };
+        assert!(detail.contains("architecture"));
+        assert!(detail.contains("should orders belong to a customer or to a session?"));
     }
 
     #[test]
